@@ -17,12 +17,12 @@ import {OperationDisabledButton} from './OperationDisabledButton';
 import {Subtle} from './Subtle';
 import {Tooltip} from './Tooltip';
 import {ChangedFiles} from './UncommittedChanges';
+import {Button} from './components/Button';
 import {T, t} from './i18n';
 import {atomLoadableWithRefresh} from './jotaiUtils';
 import {DeleteShelveOperation} from './operations/DeleteShelveOperation';
 import {UnshelveOperation} from './operations/UnshelveOperation';
 import {RelativeDate} from './relativeDate';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {useAtom} from 'jotai';
 import {useEffect} from 'react';
 import {ComparisonType} from 'shared/Comparison';
@@ -57,9 +57,9 @@ export function ShelvedChangesMenu() {
           Shelved Changes ($shortcut)
         </T>
       }>
-      <VSCodeButton appearance="icon" data-testid="shelved-changes-button">
+      <Button icon data-testid="shelved-changes-button">
         <Icon icon="archive" />
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }
@@ -114,7 +114,7 @@ function ShelvedChangesList({dismiss}: {dismiss: () => void}) {
                   <FlexSpacer />
                   <Tooltip title={t('Remove from the list of shelved changes')}>
                     <OperationDisabledButton
-                      appearance="icon"
+                      kind="icon"
                       contextKey={`delete-shelve-${change.hash}`}
                       data-testid={`delete-shelve-${change.hash}`}
                       className="unshelve-button"
@@ -129,7 +129,7 @@ function ShelvedChangesList({dismiss}: {dismiss: () => void}) {
                       'Apply these changes without removing this from your list of shelved changes',
                     )}>
                     <OperationDisabledButton
-                      appearance="icon"
+                      kind="icon"
                       contextKey={`unshelve-keep-${change.hash}`}
                       className="unshelve-button"
                       runOperation={() => {
@@ -145,7 +145,6 @@ function ShelvedChangesList({dismiss}: {dismiss: () => void}) {
                       'Apply these changes and remove this from your list of shelved changes',
                     )}>
                     <OperationDisabledButton
-                      appearance="secondary"
                       contextKey={`unshelve-${change.hash}`}
                       className="unshelve-button"
                       runOperation={() => {

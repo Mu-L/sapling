@@ -31,6 +31,8 @@ from eden.fs.cli.doctor.util import (
     hg_doctor_in_backing_repo,
 )
 
+from facebook.eden.constants import STATS_MOUNTS_STATS
+
 from facebook.eden.ttypes import GetStatInfoParams, MountState
 from fb303_core.ttypes import fb303_status
 
@@ -243,7 +245,9 @@ class EdenDoctorChecker:
         # Get information about the checkouts currently known to the running
         # edenfs process
         with self.instance.get_thrift_client_legacy() as client:
-            internal_stats = client.getStatInfo(GetStatInfoParams())
+            internal_stats = client.getStatInfo(
+                GetStatInfoParams(statsMask=STATS_MOUNTS_STATS)
+            )
             mount_point_info = internal_stats.mountPointInfo or {}
 
             for mount in client.listMounts():
@@ -506,7 +510,7 @@ class EdenfsPrivHelperNotHealthy(Problem):
 class EdenfsStarting(Problem):
     def __init__(self) -> None:
         remediation = '''\
-Please wait for edenfs to finish starting. You can watch it's progress with
+Please wait for edenfs to finish starting. You can watch its progress with
 `eden status --wait`.
 
 If EdenFS seems to be taking too long to start you can try restarting it
@@ -571,7 +575,18 @@ class NestedCheckout(Problem):
         super().__init__(
             f"""\
 edenfs reports that checkout {checkout.path} is nested within an existing checkout {existing_checkout.path}
-Nested checkouts are usually not intended and can cause spurious behavior.\n"""
+Nested checkouts are usually not intended and can cause spurious behavior. Consider running `eden rm {checkout.path}` to remove misplaced repo(s)\n"""
+        )
+
+
+class CheckoutInsideBackingRepo(Problem):
+    def __init__(
+        self, checkout: CheckoutInfo, existing_checkout: config_mod.EdenCheckout
+    ) -> None:
+        super().__init__(
+            f"""\
+edenfs reports that checkout {checkout.path} is created within backing repo of an existing checkout {existing_checkout.path} (backing repo: {existing_checkout.get_backing_repo_path()})
+Checkouts inside backing repo are usually not intended and can cause spurious behavior. Consider running `eden rm {checkout.path}` to remove misplaced repo(s)\n"""
         )
 
 
@@ -633,12 +648,18 @@ def check_mount(
 
     try:
         # Check if this checkout is nested inside another one
-        existing_checkout, rel_path = config_mod.detect_nested_checkout(
+        problem_type, existing_checkout = config_mod.detect_checkout_path_problem(
             checkout.path,
             instance,
         )
-        if existing_checkout is not None and rel_path is not None:
-            tracker.add_problem(NestedCheckout(checkout, existing_checkout))
+
+        if problem_type is not None and existing_checkout is not None:
+            if problem_type == config_mod.CheckoutPathProblemType.NESTED_CHECKOUT:
+                tracker.add_problem(NestedCheckout(checkout, existing_checkout))
+            if problem_type == config_mod.CheckoutPathProblemType.INSIDE_BACKING_REPO:
+                tracker.add_problem(
+                    CheckoutInsideBackingRepo(checkout, existing_checkout)
+                )
     except Exception as ex:
         raise RuntimeError("Failed to detect nested checkout") from ex
 
@@ -712,7 +733,7 @@ def check_running_mount(
         except Exception as ex:
             raise RuntimeError("Failed to check loaded content integrity") from ex
 
-    if config.scm_type == "hg":
+    if config.scm_type in ["hg", "filteredhg"]:
         try:
             check_hg.check_hg(tracker, checkout)
         except Exception as ex:
@@ -894,16 +915,54 @@ the old directory from before the EdenFS checkouts were mounted.
     return StaleWorkingDirectory(msg)
 
 
+class BadEdenFsVersion(Problem):
+    def __init__(self, running_version: str, reasons: List[str]) -> None:
+        reasons_string = "\n    ".join(reasons)
+        help_string = f"""\
+The version of EdenFS that is running on your machine is:
+    {running_version}
+This version is known to have issue:
+    {reasons_string}
+
+Run `edenfsctl restart{"" if sys.platform == "win32" else " --graceful"}` to migrate to the newer version to avoid these issues.
+"""
+        super().__init__(dedent(help_string), severity=ProblemSeverity.ADVICE)
+
+
 class OutOfDateVersion(Problem):
-    def __init__(self, help_string: str) -> None:
-        super().__init__(help_string, severity=ProblemSeverity.ADVICE)
+    def __init__(self, installed_version: str, running_version: str) -> None:
+        help_string = f"""\
+The version of EdenFS that is installed on your machine is:
+    {installed_version}
+but the version of EdenFS that is currently running is:
+    {running_version}
+
+Consider running `edenfsctl restart --graceful` to migrate to the newer version,
+which may have important bug fixes or performance improvements.
+"""
+        super().__init__(dedent(help_string), severity=ProblemSeverity.ADVICE)
 
 
 def check_edenfs_version(tracker: ProblemTracker, instance: EdenInstance) -> None:
+    # get released version parts
     rver, release = instance.get_running_version_parts()
     if not rver or not release:
         # This could be a dev build that returns the empty
         # string for both of these values.
+        return
+
+    # check for bad eden fs running version
+    bad_version_reasons_map = instance.get_known_bad_edenfs_versions()
+    running_version = version.format_eden_version((rver, release))
+    running_version_str = (
+        f"fb.eden {running_version}"
+        if sys.platform == "win32"
+        else f"fb-eden-{running_version}.x86_64"
+    )
+    if running_version in bad_version_reasons_map:
+        reasons = bad_version_reasons_map[running_version]
+        tracker.add_problem(BadEdenFsVersion(running_version_str, reasons))
+        # if bad version, don't check for out of date version
         return
 
     # get installed version parts
@@ -921,30 +980,13 @@ def check_edenfs_version(tracker: ProblemTracker, instance: EdenInstance) -> Non
     if daysgap.days < 14:
         return
 
-    running_version = version.format_eden_version((rver, release))
     installed_version = version.format_eden_version((iversion, irelease))
-
-    if sys.platform == "win32":
-        help_string = f"""\
-The version of EdenFS that is installed on your machine is:
-    fb.eden {installed_version}
-but the version of EdenFS that is currently running is:
-    fb.eden {running_version}
-
-Consider running `edenfsctl restart` to migrate to the newer version,
-which may have important bug fixes or performance improvements.
-"""
-    else:
-        help_string = f"""\
-The version of EdenFS that is installed on your machine is:
-    fb-eden-{installed_version}.x86_64
-but the version of EdenFS that is currently running is:
-    fb-eden-{running_version}.x86_64
-
-Consider running `edenfsctl restart --graceful` to migrate to the newer version,
-which may have important bug fixes or performance improvements.
-"""
-    tracker.add_problem(OutOfDateVersion(dedent(help_string)))
+    installed_version_str = (
+        f"fb.eden {installed_version}"
+        if sys.platform == "win32"
+        else f"fb-eden-{installed_version}.x86_64"
+    )
+    tracker.add_problem(OutOfDateVersion(installed_version_str, running_version_str))
 
 
 class SlowHgImportProblem(Problem):
@@ -967,7 +1009,7 @@ def check_slow_hg_import(tracker: ProblemTracker, instance: EdenInstance) -> Non
     threshold = timedelta(seconds=threshold_s)
 
     with instance.get_thrift_client_legacy() as client:
-        max_duration_us = client.getCounter("store.hg.live_import.max_duration_us")
+        max_duration_us = client.getCounter("store.sapling.live_import.max_duration_us")
 
     max_duration = timedelta(microseconds=max_duration_us)
     if max_duration > threshold:

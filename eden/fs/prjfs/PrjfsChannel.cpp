@@ -415,9 +415,14 @@ HRESULT notification(
 void detachAndCompleteCallback(
     ImmediateFuture<folly::Unit> future,
     std::shared_ptr<PrjfsRequestContext> context,
-    std::unique_ptr<detail::PrjfsLiveRequest> liveRequest) {
+    std::unique_ptr<detail::PrjfsLiveRequest> liveRequest,
+    EdenStatsPtr stats,
+    StatsGroupBase::Counter PrjfsStats::*countSuccessful,
+    StatsGroupBase::Counter PrjfsStats::*countFailure) {
   auto completionFuture =
-      context->catchErrors(std::move(future))
+      context
+          ->catchErrors(
+              std::move(future), stats.copy(), countSuccessful, countFailure)
           .ensure([context = std::move(context),
                    liveRequest = std::move(liveRequest)] {});
   if (!completionFuture.isReady()) {
@@ -499,8 +504,8 @@ HRESULT PrjfsChannelInner::startEnumeration(
                                       path = std::move(path)]() mutable {
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    auto stat = &PrjfsStats::openDir;
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(
+        getStats().copy(), &PrjfsStats::openDir, requestWatch);
 
     FB_LOGF(
         getStraceLogger(), DBG7, "opendir({}, guid={})", path, guid.toString());
@@ -514,7 +519,12 @@ HRESULT PrjfsChannelInner::startEnumeration(
   });
 
   detachAndCompleteCallback(
-      std::move(fut), std::move(context), std::move(liveRequest));
+      std::move(fut),
+      std::move(context),
+      std::move(liveRequest),
+      getStats().copy(),
+      &PrjfsStats::openDirSuccessful,
+      &PrjfsStats::openDirFailure);
 
   return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
 }
@@ -586,8 +596,8 @@ HRESULT PrjfsChannelInner::getEnumerationData(
                                       buffer = dirEntryBufferHandle]() mutable {
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    auto stat = &PrjfsStats::readDir;
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(
+        getStats().copy(), &PrjfsStats::readDir, requestWatch);
 
     return enumerator->prepareEnumeration().thenValue(
         [this,
@@ -655,7 +665,12 @@ HRESULT PrjfsChannelInner::getEnumerationData(
   });
 
   detachAndCompleteCallback(
-      std::move(fut), std::move(context), std::move(liveRequest));
+      std::move(fut),
+      std::move(context),
+      std::move(liveRequest),
+      getStats().copy(),
+      &PrjfsStats::readDirSuccessful,
+      &PrjfsStats::readDirFailure);
 
   return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
 }
@@ -673,8 +688,7 @@ HRESULT PrjfsChannelInner::getPlaceholderInfo(
                                       virtualizationContext]() mutable {
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    auto stat = &PrjfsStats::lookup;
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(getStats().copy(), &PrjfsStats::lookup, requestWatch);
 
     FB_LOGF(getStraceLogger(), DBG7, "lookup({})", path);
     return dispatcher_
@@ -742,7 +756,12 @@ HRESULT PrjfsChannelInner::getPlaceholderInfo(
   });
 
   detachAndCompleteCallback(
-      std::move(fut), std::move(context), std::move(liveRequest));
+      std::move(fut),
+      std::move(context),
+      std::move(liveRequest),
+      getStats().copy(),
+      &PrjfsStats::lookupSuccessful,
+      &PrjfsStats::lookupFailure);
 
   return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
 }
@@ -758,8 +777,7 @@ HRESULT PrjfsChannelInner::queryFileName(
                                       path = std::move(path)]() mutable {
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    auto stat = &PrjfsStats::access;
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(getStats().copy(), &PrjfsStats::access, requestWatch);
     FB_LOGF(getStraceLogger(), DBG7, "access({})", path);
     return dispatcher_
         ->access(std::move(path), context->getObjectFetchContext())
@@ -773,7 +791,12 @@ HRESULT PrjfsChannelInner::queryFileName(
   });
 
   detachAndCompleteCallback(
-      std::move(fut), std::move(context), std::move(liveRequest));
+      std::move(fut),
+      std::move(context),
+      std::move(liveRequest),
+      getStats().copy(),
+      &PrjfsStats::accessSuccessful,
+      &PrjfsStats::accessFailure);
 
   return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
 }
@@ -895,9 +918,11 @@ folly::Try<folly::Unit> removeCachedFileImpl(
         result == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)) {
       // The file or a directory in the path is not cached, ignore.
     } else if (result == HRESULT_FROM_WIN32(ERROR_DIR_NOT_EMPTY)) {
+      inner->getStats()->increment(&PrjfsStats::removeCachedFileFailure);
       return folly::Try<folly::Unit>{
           std::system_error(ENOTEMPTY, std::generic_category())};
     } else {
+      inner->getStats()->increment(&PrjfsStats::removeCachedFileFailure);
       return folly::Try<folly::Unit>{makeHResultErrorExplicit(
           result,
           fmt::format(
@@ -907,6 +932,7 @@ folly::Try<folly::Unit> removeCachedFileImpl(
     }
   }
 
+  inner->getStats()->increment(&PrjfsStats::removeCachedFileSuccessful);
   return folly::Try<folly::Unit>{folly::unit};
 }
 
@@ -935,8 +961,7 @@ HRESULT PrjfsChannelInner::getFileData(
                                       length]() mutable {
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    auto stat = &PrjfsStats::read;
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(getStats().copy(), &PrjfsStats::read, requestWatch);
 
     FB_LOGF(
         getStraceLogger(),
@@ -1159,7 +1184,12 @@ HRESULT PrjfsChannelInner::getFileData(
   });
 
   detachAndCompleteCallback(
-      std::move(fut), std::move(context), std::move(liveRequest));
+      std::move(fut),
+      std::move(context),
+      std::move(liveRequest),
+      getStats().copy(),
+      &PrjfsStats::readSuccessful,
+      &PrjfsStats::readFailure);
 
   return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
 }
@@ -1214,12 +1244,20 @@ struct NotificationHandlerEntry {
   constexpr NotificationHandlerEntry(
       NotificationHandler h,
       NotificationArgRenderer r,
-      PrjfsStats::DurationPtr s)
-      : handler{h}, renderer{r}, stat{s} {}
+      PrjfsStats::DurationPtr d,
+      PrjfsStats::CounterPtr cS,
+      PrjfsStats::CounterPtr cF)
+      : handler{h},
+        renderer{r},
+        duration{d},
+        countSuccessful{cS},
+        countFailure{cF} {}
 
   NotificationHandler handler;
   NotificationArgRenderer renderer;
-  PrjfsStats::DurationPtr stat;
+  PrjfsStats::DurationPtr duration;
+  PrjfsStats::CounterPtr countSuccessful;
+  PrjfsStats::CounterPtr countFailure;
 };
 
 std::string newFileCreatedRenderer(
@@ -1295,55 +1333,73 @@ const std::unordered_map<PRJ_NOTIFICATION, NotificationHandlerEntry>
             PRJ_NOTIFICATION_NEW_FILE_CREATED,
             {&PrjfsChannelInner::newFileCreated,
              newFileCreatedRenderer,
-             &PrjfsStats::newFileCreated},
+             &PrjfsStats::newFileCreated,
+             &PrjfsStats::newFileCreatedSuccessful,
+             &PrjfsStats::newFileCreatedFailure},
         },
         {
             PRJ_NOTIFICATION_PRE_DELETE,
             {&PrjfsChannelInner::preDelete,
              preDeleteRenderer,
-             &PrjfsStats::preDelete},
+             &PrjfsStats::preDelete,
+             &PrjfsStats::preDeleteSuccessful,
+             &PrjfsStats::preDeleteFailure},
         },
         {
             PRJ_NOTIFICATION_FILE_OVERWRITTEN,
             {&PrjfsChannelInner::fileOverwritten,
              fileOverwrittenRenderer,
-             &PrjfsStats::fileOverwritten},
+             &PrjfsStats::fileOverwritten,
+             &PrjfsStats::fileOverwrittenSuccessful,
+             &PrjfsStats::fileOverwrittenFailure},
         },
         {
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED,
             {&PrjfsChannelInner::fileHandleClosedFileModified,
              fileHandleClosedFileModifiedRenderer,
-             &PrjfsStats::fileHandleClosedFileModified},
+             &PrjfsStats::fileHandleClosedFileModified,
+             &PrjfsStats::fileHandleClosedFileModifiedSuccessful,
+             &PrjfsStats::fileHandleClosedFileModifiedFailure},
         },
         {
             PRJ_NOTIFICATION_FILE_RENAMED,
             {&PrjfsChannelInner::fileRenamed,
              fileRenamedRenderer,
-             &PrjfsStats::fileRenamed},
+             &PrjfsStats::fileRenamed,
+             &PrjfsStats::fileRenamedSuccessful,
+             &PrjfsStats::fileRenamedFailure},
         },
         {
             PRJ_NOTIFICATION_PRE_RENAME,
             {&PrjfsChannelInner::preRename,
              preRenameRenderer,
-             &PrjfsStats::preRenamed},
+             &PrjfsStats::preRenamed,
+             &PrjfsStats::preRenamedSuccessful,
+             &PrjfsStats::preRenamedFailure},
         },
         {
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED,
             {&PrjfsChannelInner::fileHandleClosedFileDeleted,
              fileHandleClosedFileDeletedRenderer,
-             &PrjfsStats::fileHandleClosedFileDeleted},
+             &PrjfsStats::fileHandleClosedFileDeleted,
+             &PrjfsStats::fileHandleClosedFileDeletedSuccessful,
+             &PrjfsStats::fileHandleClosedFileDeletedFailure},
         },
         {
             PRJ_NOTIFICATION_PRE_SET_HARDLINK,
             {&PrjfsChannelInner::preSetHardlink,
              preSetHardlinkRenderer,
-             &PrjfsStats::preSetHardlink},
+             &PrjfsStats::preSetHardlink,
+             &PrjfsStats::preSetHardlinkSuccessful,
+             &PrjfsStats::preSetHardlinkFailure},
         },
         {
             PRJ_NOTIFICATION_FILE_PRE_CONVERT_TO_FULL,
             {&PrjfsChannelInner::preConvertToFull,
              preConvertToFullRenderer,
-             &PrjfsStats::preConvertToFull},
+             &PrjfsStats::preConvertToFull,
+             &PrjfsStats::preConvertToFullSuccessful,
+             &PrjfsStats::preConvertToFullFailure},
         },
 };
 } // namespace
@@ -1463,7 +1519,9 @@ HRESULT PrjfsChannelInner::notification(
     XLOG(WARN) << "Unrecognized notification: " << notificationType;
     return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
   } else {
-    auto stat = it->second.stat;
+    auto duration = it->second.duration;
+    auto countSuccessful = it->second.countSuccessful;
+    auto countFailure = it->second.countFailure;
     auto handler = it->second.handler;
     auto renderer = it->second.renderer;
 
@@ -1481,7 +1539,7 @@ HRESULT PrjfsChannelInner::notification(
 
     auto requestWatch =
         std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>(nullptr);
-    context->startRequest(getStats().copy(), stat, requestWatch);
+    context->startRequest(getStats().copy(), duration, requestWatch);
 
     FB_LOG(getStraceLogger(), DBG7, renderer(relPath, destPath, isDirectory));
     auto fut = (this->*handler)(
@@ -1494,11 +1552,31 @@ HRESULT PrjfsChannelInner::notification(
       // The notification is ready, this is usually coming from pre*
       // notifications to deny the operation, in that case EdenFS should return
       // the error code instead of pushing the operation to the background.
-      return tryToHResult(std::move(fut).getTry(0ms));
+      auto result = tryToHResult(std::move(fut).getTry(0ms));
+      if (result == S_OK) {
+        if (getStats() && countSuccessful) {
+          getStats()->increment(countSuccessful);
+        }
+      } else {
+        if (getStats() && countFailure) {
+          getStats()->increment(countFailure);
+        }
+      }
+      return result;
     } else {
       folly::futures::detachOn(
           dispatcher_->getNotificationExecutor(),
-          std::move(fut).deferEnsure([context] {}));
+          std::move(fut)
+              .deferError([this, countFailure](folly::exception_wrapper&& ew) {
+                if (getStats() && countFailure) {
+                  getStats()->increment(countFailure);
+                }
+                ew.throw_exception();
+              })
+              .deferEnsure([context] {}));
+      if (getStats() && countSuccessful) {
+        getStats()->increment(countSuccessful);
+      }
       return S_OK;
     }
   }
@@ -1739,6 +1817,7 @@ folly::Try<folly::Unit> PrjfsChannel::addDirectoryPlaceholder(
       // trigger a recursive lookup call and fail, raising this error. This is
       // harmless and thus we can just ignore.
     } else {
+      inner->getStats()->increment(&PrjfsStats::addDirectoryPlaceholderFailure);
       return folly::Try<folly::Unit>{makeHResultErrorExplicit(
           result,
           fmt::format(
@@ -1748,6 +1827,7 @@ folly::Try<folly::Unit> PrjfsChannel::addDirectoryPlaceholder(
     }
   }
 
+  inner->getStats()->increment(&PrjfsStats::addDirectoryPlaceholderSuccessful);
   return folly::Try<folly::Unit>{folly::unit};
 }
 

@@ -53,7 +53,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
 use tokio::process::Command;
-use tokio_stream::wrappers::LinesStream;
 
 use crate::git_reader::GitRepoReader;
 use crate::gitlfs::GitImportLfs;
@@ -240,36 +239,13 @@ impl GitimportTarget {
         }
     }
 
-    /// Returns the number of commits to import
-    pub async fn get_nb_commits(
-        &self,
-        git_command_path: &Path,
-        repo_path: &Path,
-    ) -> Result<usize, Error> {
-        let mut rev_list = self
-            .build_rev_list(git_command_path, repo_path)
-            .arg("--count")
-            .spawn()?;
-
-        self.write_filter_list(&mut rev_list).await?;
-
-        // stdout is a single line that parses as number of commits
-        let stdout = BufReader::new(rev_list.stdout.take().context("stdout not set up")?);
-        let mut lines = stdout.lines();
-        if let Some(line) = lines.next_line().await? {
-            Ok(line.parse()?)
-        } else {
-            bail!("No lines returned by git rev-list");
-        }
-    }
-
-    /// Returns a stream of commit hashes to import, ordered so that all
+    /// Returns a Vec of commit hashes to import, ordered so that all
     /// of a commit's parents are listed first
     pub(crate) async fn list_commits(
         &self,
         git_command_path: &Path,
         repo_path: &Path,
-    ) -> Result<impl Stream<Item = Result<ObjectId, Error>>, Error> {
+    ) -> Result<Vec<Result<ObjectId, Error>>, Error> {
         let mut rev_list = self
             .build_rev_list(git_command_path, repo_path)
             .arg("--topo-order")
@@ -279,15 +255,17 @@ impl GitimportTarget {
         self.write_filter_list(&mut rev_list).await?;
 
         let stdout = BufReader::new(rev_list.stdout.take().context("stdout not set up")?);
-        let lines_stream = LinesStream::new(stdout.lines());
+        let mut lines = stdout.lines();
 
-        Ok(lines_stream.err_into().and_then(|line| async move {
-            // rev-list with --boundary option returns boundary commits prefixed with `-`
-            // here we remove that prefix to get uniformed list of commits
-            line.replace('-', "")
-                .parse()
-                .context("Reading from git rev-list")
-        }))
+        let mut vec = Vec::new();
+        while let Some(line) = lines.next_line().await? {
+            vec.push(
+                line.replace('-', "")
+                    .parse()
+                    .context("Reading from git rev-list"),
+            );
+        }
+        Ok(vec)
     }
 
     async fn write_filter_list(&self, rev_list: &mut Child) -> Result<(), Error> {
@@ -336,6 +314,7 @@ impl TagMetadata {
     pub async fn new(
         ctx: &CoreContext,
         oid: ObjectId,
+        maybe_tag_name: Option<String>,
         reader: &GitRepoReader,
     ) -> Result<Self, Error> {
         let Tag {
@@ -355,7 +334,10 @@ impl TagMetadata {
             .take()
             .map(|tagger| format_signature(tagger.to_ref()));
         let message = decode_message(&message, &None, ctx.logger())?;
-        let name = decode_message(&name, &None, ctx.logger())?;
+        let name = match maybe_tag_name {
+            Some(name) => name,
+            None => decode_message(&name, &None, ctx.logger())?,
+        };
         let pgp_signature = pgp_signature
             .take()
             .map(|signature| Bytes::from(signature.to_vec()));
@@ -424,6 +406,21 @@ fn format_signature(sig: gix_actor::SignatureRef) -> String {
     format!("{} <{}>", sig.name, sig.email)
 }
 
+pub fn decode_with_bom<'a>(
+    encoding: &'static Encoding,
+    bytes: &'a [u8],
+) -> (std::borrow::Cow<'a, str>, &'static Encoding, bool) {
+    // Sniff the BOM to see if it overrides the encoding we think we should use
+    let encoding = match Encoding::for_bom(bytes) {
+        Some((encoding, _bom_length)) => encoding,
+        None => encoding,
+    };
+    // If the encoding is UTF_8, we need to keep the BOM as valid UTF_8 should be
+    // round-trippable
+    let (cow, had_errors) = encoding.decode_without_bom_handling(bytes);
+    (cow, encoding, had_errors)
+}
+
 /// Decode a git commit message
 ///
 /// Git choses to keep the raw user-provided bytes for the commit message.
@@ -444,6 +441,7 @@ fn decode_message(
     encoding: &Option<BString>,
     logger: &Logger,
 ) -> Result<String, Error> {
+    let explicit_encoding_provided = encoding.is_some();
     let mut encoding_or_utf8 = encoding.clone().unwrap_or_else(|| BString::from("utf-8"));
     // remove single quotes so that "'utf8'" will be accepted
     encoding_or_utf8.retain(|c| *c != 39);
@@ -454,9 +452,9 @@ fn decode_message(
             String::from_utf8_lossy(&encoding_or_utf8)
         )
     })?;
-    let (decoded, actual_encoding, replacement) = encoding.decode(message);
+    let (decoded, actual_encoding, replacement) = decode_with_bom(encoding, message);
     let message = decoded.to_string();
-    if actual_encoding != encoding {
+    if explicit_encoding_provided && actual_encoding != encoding {
         // Decode performs BOM sniffing to detect the actual encoding for this byte string.
         // We expect it to match the encoding declared in the commit metadata.
         bail!("Unexpected encoding: expected {encoding:?}, got {actual_encoding:?}");
@@ -652,6 +650,15 @@ pub trait GitUploader: Clone + Send + Sync + 'static {
     /// Returns a change representing a deletion
     fn deleted() -> Self::Change;
 
+    /// Preload a number of commits, allowing us to batch the
+    /// lookups in the bonsai_git_mapping table, largely reducing
+    /// the I/O load
+    async fn preload_uploaded_commits(
+        &self,
+        ctx: &CoreContext,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<(gix_hash::ObjectId, ChangesetId)>, Error>;
+
     /// Looks to see if we can elide importing a commit
     /// If you can give us the ChangesetId for a given git object,
     /// then we assume that it's already imported and skip it
@@ -735,21 +742,12 @@ mod tests {
     use super::BString;
     use super::Logger;
 
-    const ASCII_BSTR: &[u8] = b"Hello, World!".as_slice();
-    const ASCII_STR: &str = "Hello, World!";
-    const UTF8_UNICODE_BSTR: &[u8] =
-        b"Hello, \xce\xba\xe1\xbd\xb9\xcf\x83\xce\xbc\xce\xB5!".as_slice();
-    const UTF8_UNICODE_STR: &str = "Hello, κόσμε!";
-    const LATIN1_ACCENTED_BSTR: &[u8] = b"Hello, R\xe9mi-\xc9tienne!".as_slice();
-    const UTF8_ACCENTED_BSTR: &[u8] = b"Hello, R\xc3\xa9mi-\xc3\x89tienne!".as_slice();
-    const BROKEN_LATIN1_FROM_UTF8_ACCENTED_STR: &str = "Hello, RÃ©mi-Ã‰tienne!";
-    const UTF8_ACCENTED_STR: &str = "Hello, Rémi-Étienne!";
-    const UTF8_ACCENTED_STR_WITH_REPLACEMENT_CHARACTER: &str = "Hello, R�mi-�tienne!";
-
     fn should_decode_into(message: &[u8], encoding: &Option<BString>, expected: &str) {
         let logger = Logger::root(slog::Discard, o!());
         let m = decode_message(message, encoding, &logger);
-        assert!(m.is_ok());
+        if m.is_err() {
+            panic!("{:?}", m);
+        }
         assert_eq!(expected, &m.unwrap())
     }
     fn should_fail_to_decode(message: &[u8], encoding: &Option<BString>) {
@@ -761,47 +759,113 @@ mod tests {
     #[test]
     fn test_decode_commit_message_given_invalid_encoding_should_fail() {
         should_fail_to_decode(
-            ASCII_BSTR,
+            b"Hello, World!",
             &Some(BString::from("not a valid encoding label")),
         );
     }
     #[test]
     fn test_decode_commit_message_given_ascii_as_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
-            should_decode_into(ASCII_BSTR, &encoding, ASCII_STR);
+            should_decode_into(b"Hello, World!", &encoding, "Hello, World!");
         }
     }
     #[test]
     fn test_decode_commit_message_given_valid_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
-            should_decode_into(UTF8_UNICODE_BSTR, &encoding, UTF8_UNICODE_STR);
-            should_decode_into(UTF8_ACCENTED_BSTR, &encoding, UTF8_ACCENTED_STR);
+            should_decode_into(
+                b"Hello, \xce\xba\xe1\xbd\xb9\xcf\x83\xce\xbc\xce\xB5!",
+                &encoding,
+                "Hello, κόσμε!",
+            );
+            should_decode_into(
+                b"Hello, R\xc3\xa9mi-\xc3\x89tienne!", // UTF-8 encoded
+                &encoding,                             // UTF-8 encoding
+                "Hello, Rémi-Étienne!",                // Legibly decoded
+            );
         }
     }
     #[test]
     fn test_decode_commit_message_given_malformed_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
             should_decode_into(
-                LATIN1_ACCENTED_BSTR,
-                &encoding,
-                UTF8_ACCENTED_STR_WITH_REPLACEMENT_CHARACTER,
+                b"Hello, R\xe9mi-\xc9tienne!", // Latin 1 encoded
+                &encoding,                     // UTF-8 encoding
+                "Hello, R�mi-�tienne!", // We have to use replacement characters to encode this
+                                        // latin1 string in UTF-8
             );
         }
     }
     #[test]
     fn test_decode_commit_message_given_valid_latin1() {
         should_decode_into(
-            LATIN1_ACCENTED_BSTR,
-            &Some(BString::from("iso-8859-1")),
-            UTF8_ACCENTED_STR,
+            b"Hello, R\xe9mi-\xc9tienne!",      // Latin 1 encoded
+            &Some(BString::from("iso-8859-1")), // Latin 1 encoding
+            "Hello, Rémi-Étienne!",             // We decode just fine into legible UTF-8
         );
     }
     #[test]
     fn test_decode_commit_message_given_malformed_latin1() {
         should_decode_into(
-            UTF8_ACCENTED_BSTR,
-            &Some(BString::from("iso-8859-1")),
-            BROKEN_LATIN1_FROM_UTF8_ACCENTED_STR,
+            b"Hello, R\xc3\xa9mi-\xc3\x89tienne!".as_slice(), // UTF-8 encoded
+            &Some(BString::from("iso-8859-1")),               // Latin 1 encoding
+            "Hello, RÃ©mi-Ã‰tienne!", // Broken decoding, this is the best we can do
+        );
+    }
+    #[test]
+    fn test_decode_utf8_with_bom() {
+        // We can sniff the UTF-8 BOM mark
+        assert_eq!(
+            encoding_rs::Encoding::for_bom(b"\xef\xbb\xbf"),
+            Some((encoding_rs::UTF_8, 3))
+        );
+        for encoding in [None, Some(BString::from("utf-8"))] {
+            should_decode_into(
+                b"\xef\xbb\xbfHello, World!",
+                &encoding,
+                "\u{feff}Hello, World!",
+            );
+        }
+    }
+    #[test]
+    fn test_decode_non_utf8_with_bom() {
+        // We can sniff the UTF-16BE BOM mark
+        assert_eq!(
+            encoding_rs::Encoding::for_bom(b"\xfe\xff"),
+            Some((encoding_rs::UTF_16BE, 2))
+        );
+        for encoding in [None, Some(BString::from("utf-16be"))] {
+            should_decode_into(
+                b"\xfe\xff\xd8\x34\xdd\x1e\x00 \x00H\x00i\x00!",
+                &encoding,
+                "\u{feff}𝄞 Hi!",
+            );
+        }
+        // Mismatch between the encoding in the BOM and the declared encoding
+        should_fail_to_decode(
+            b"\xfe\xff\xd8\x34\xdd\x1e\x00 \x00H\x00i\x00!",
+            &Some(BString::from("utf-8")),
+        );
+    }
+    #[test]
+    fn test_decode_gb18030_with_bom_shows_the_limits_of_our_implementation() {
+        // b"\x84\x31\x95\x33" is the BOM mark that indicates a GB18030 encoding. An encoding for
+        // chinese characters.
+        // Currently, BOM-sniffing doesn't work for this esoteric encoding due to limitations of
+        // encoding_rs.
+        // This means we would need for the encoding to be explicitly specified to be able to
+        // decode such strings without falling back to replacement characters
+        assert_eq!(encoding_rs::Encoding::for_bom(b"\x84\x31\x95\x33"), None);
+        should_decode_into(b"\x84\x31\x95\x33Hello, \xfe\x55!", &None, "�1�3Hello, �U!");
+        // Explicit gb18030 encoding
+        should_decode_into(
+            b"\x84\x31\x95\x33Hello, \xfe\x55!",
+            &Some(BString::from("gb18030")),
+            "\u{feff}Hello, 㑳!",
+        );
+        should_decode_into(
+            b"\x84\x31\x95\x33Hello, \xfe\x55!", // GB18030 encoded
+            &Some(BString::from("utf-8")),       // UTF-8 encoding
+            "�1�3Hello, �U!",                    // We have to use replacement characters
         );
     }
 }

@@ -14,10 +14,10 @@ use cloned::cloned;
 use futures::stream;
 use futures::stream::StreamExt;
 use futures::Stream;
+use scs_client_raw::thrift;
+use scs_client_raw::ScsClient;
 use serde::Serialize;
-use source_control as thrift;
 
-use crate::connection::Connection;
 use crate::render::Render;
 
 #[derive(Serialize)]
@@ -164,18 +164,19 @@ impl Render for DiffOutput {
 }
 
 async fn make_file_diff_request(
-    connection: &Connection,
+    connection: &ScsClient,
     commit: &thrift::CommitSpecifier,
     other_commit_id: Option<thrift::CommitId>,
     paths: Vec<thrift::CommitFileDiffsParamsPathPair>,
     diff_size_limit: Option<i64>,
     diff_format: thrift::DiffFormat,
+    context: i64,
 ) -> Result<DiffOutput> {
     let params = thrift::CommitFileDiffsParams {
         other_commit_id,
         paths,
         format: diff_format,
-        context: 3,
+        context,
         diff_size_limit,
         ..Default::default()
     };
@@ -218,12 +219,13 @@ async fn make_file_diff_request(
 /// Given the paths and sizes of files to diff returns the stream of renderable
 /// structs. The sizes are used to avoid hitting size limit when doing batch requests.
 pub(crate) fn diff_files(
-    connection: &Connection,
+    connection: &ScsClient,
     commit: thrift::CommitSpecifier,
     other_commit_id: Option<thrift::CommitId>,
     paths_sizes: impl IntoIterator<Item = (thrift::CommitFileDiffsParamsPathPair, i64)>,
     diff_size_limit: Option<i64>,
     diff_format: thrift::DiffFormat,
+    context: i64,
 ) -> impl Stream<Item = Result<impl Render<Args = ()>>> {
     let mut size_sum: i64 = 0;
     let mut path_count: i64 = 0;
@@ -256,6 +258,7 @@ pub(crate) fn diff_files(
                 paths,
                 diff_size_limit,
                 diff_format,
+                context,
             )
             .await
         }

@@ -224,24 +224,6 @@ struct TriviallyRelocatable {}
 struct ScopedEnumAsUnionType {}
 
 /**
- * Indicates a typedef should be 'strong', and require an explicit cast to
- * the underlying type.
- *
- * Currently only works for integer typedefs, for example:
- *
- *     @cpp.StrongType
- *     typedef i32 MyId;
- *
- * Will cause an enum class to be used instead of a typedef in the genearte code, for example:
- *
- *     enum class MyId : ::std::int32_t {};
- *
- */
-@thrift.Experimental
-@scope.Typedef
-struct StrongType {}
-
-/**
  * An annotation that intercepts field access with C++ field interceptor.
  * Use with *caution* since this may introduce substantial performance overhead on each field access.
  *
@@ -358,3 +340,16 @@ struct ProcessInEbThreadUnsafe {}
  */
 @scope.Struct
 struct RuntimeAnnotation {}
+
+/**
+ * Causes uses of the given structured type to be replaced with `CursorSerializationWrapper` to allow use of cursor-based serialization.
+ * Must add `cpp_include "thrift/lib/cpp2/protocol/CursorBasedSerializer.h"` to files that use this annotation.
+ * See documentation for this class in CursorBasedSerializer.h
+ * Can only be applied to top-level structs (used as return type or sole argument to an RPC or serialized directly), not to types used as struct fields or container elements.
+ */
+@scope.Struct
+@scope.Union
+@scope.Typedef
+@scope.Transitive
+@Adapter{name = "::apache::thrift::CursorSerializationAdapter"}
+struct UseCursorSerialization {}

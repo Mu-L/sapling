@@ -16,7 +16,9 @@
 from __future__ import absolute_import
 
 import collections
-from typing import Optional, Sized
+from typing import Optional, Sized, Tuple
+
+import bindings
 
 from . import error, pycompat
 from .i18n import _
@@ -34,7 +36,13 @@ def bisect(repo, state):
     'good' is True if bisect is searching for a first good changeset, False
     if searching for a first bad one.
     """
+    if repo.ui.configbool("experimental", "bisect2"):
+        return _bisect2(repo, state)
+    else:
+        return _bisect1(repo, state)
 
+
+def _bisect1(repo, state):
     changelog = repo.changelog
     clparents = changelog.parentrevs
     skip = _state_to_revs(repo, state, "skip")
@@ -134,6 +142,95 @@ def bisect(repo, state):
     return ([best_node], tot, good, badnode, goodnode)
 
 
+def _bisect2(repo, state):
+    """bisect algorithm based on segmented changelog"""
+
+    # States:
+    # - skip: user provided "skip" nodes. Not lazy.
+    # - skip_revs: user provided "skip" revset. Might be expensive/lazy.
+    # - good: marked as good nodes
+    # - bad: marked as bad ndoes
+    # - badtogood: True if bad is root, good is head; False if bad is head
+    # - roots, heads: defines the bisect range based on bad and good
+    # - rootnode, headnode: current (small) bisect range, for display only
+    # - candidate: bisect range
+    # - unskipped: bisect range, excluding "fast" skipped nodes
+    # - bestnode: the best node to test next
+    cl = repo.changelog
+    dag = cl.dag
+    skip, skip_revs = _state_to_nodes_revs(repo, state, "skip")
+    good = dag.sort(state["good"])
+    bad = dag.sort(state["bad"])
+
+    badtogood = bool(dag.range(bad, good))
+    if badtogood:
+        roots, heads = bad, good
+    else:
+        roots, heads = good, bad
+
+    # rootnode and headnode are for display purpose only.
+    rootnode = roots.first()  # DESC order, first = max
+    headnode = heads.last()  # DESC order, last = min
+
+    bestnode, untested, first_heads = dag.suggest_bisect(roots, heads, skip)
+    total = len(untested) + 1
+    if bestnode is None:
+        if not untested:
+            if len(good) == 1 and len(bad) == 1 and len(dag.range(roots, heads)) < 1:
+                raise error.Abort(_("starting revisions are not directly related"))
+            overlap = first_heads & dag.ancestors(roots)
+            if overlap:
+                raise error.Abort(
+                    _("inconsistent state, %s is good and bad") % short(overlap.first())
+                )
+
+        return (
+            list((first_heads + untested).iterrev()),
+            0,
+            badtogood,
+            headnode,
+            rootnode,
+        )
+
+    # Handle a lazy skip_revs.
+    if skip_revs is not None:
+        # To avoid applying the (potentially slow) lazy skip calculation to the
+        # entire "roots::heads" (or "unskipped") set, we test the lazy skip
+        # condition around the "bestnode" commit.
+        unskipped = untested - skip
+        ancestors = dag.ancestors([bestnode]) & unskipped
+        not_ancestors = unskipped - ancestors
+        zip_set = ancestors.union_zip(not_ancestors.reverse())
+
+        # PERF: We reuse the revset prefetch fields from "skip_revs". This
+        # helps reduce round-trips for revset iteration (by look ahead and
+        # batch fetch text, hash, associated code review states). However, more
+        # complex revsets that need file/tree data (ex. modifies(path)) won't
+        # be batched this way. We need new infra to express dynamic, complex
+        # prefetch needs.
+        bar = bindings.progress.model.ProgressBar(
+            _("skipping"), len(unskipped), _("commits")
+        )
+        inc = bar.increase_position
+        for ctx in cl.torevset(zip_set).prefetch(*skip_revs.prefetchfields()).iterctx():
+            if ctx.rev() in skip_revs:
+                inc(1)
+                continue
+            bestnode = ctx.node()
+            break
+        else:
+            # everything is skipped
+            return (
+                list((first_heads + untested).iterrev()),
+                0,
+                badtogood,
+                headnode,
+                rootnode,
+            )
+
+    return ([bestnode], total, badtogood, headnode, rootnode)
+
+
 def checksparsebisectskip(repo, candidatenode, badnode, goodnode) -> str:
     """
     Checks if the candidate node can be skipped as the contents haven't changed
@@ -221,6 +318,31 @@ def checkstate(state) -> bool:
         raise error.Abort(_("cannot bisect (no known good revisions)"))
     else:
         raise error.Abort(_("cannot bisect (no known bad revisions)"))
+
+
+def _state_to_nodes_revs(
+    repo, state, kind
+) -> Tuple["bindings.dag.nameset", Optional["sapling.smartset.abstractsmartset"]]:
+    """Return (nodes, revset | None).
+    'nodes' is the non-lazy Rust set, 'revset' could be a 'lazy' set.
+    """
+    items = state[kind]
+    nodes = []
+    revset_exprs = []
+
+    for item in items:
+        if isinstance(item, bytes):
+            nodes.append(item)
+        elif item.startswith("revset:"):
+            revset_exprs.append(item[7:])
+        else:
+            raise error.Abort(_("invalid node: %s, kind: %s") % (item, kind))
+
+    lazy_set = None
+    if revset_exprs:
+        lazy_set = repo.revs("%lr", revset_exprs)
+
+    return repo.changelog.dag.sort(nodes), lazy_set
 
 
 def _state_to_revs(repo, state, kind):

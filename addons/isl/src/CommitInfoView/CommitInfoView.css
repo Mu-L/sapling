@@ -195,14 +195,6 @@
   gap: var(--halfpad);
 }
 
-.min-height-text-area::part(control) {
-  overflow: hidden;
-  /* Match vscode-text-field */
-  margin: 2px 0;
-  padding: 4px 9px;
-  min-height: 26px;
-}
-
 .commit-info-section {
   margin: var(--pad);
   margin-top: calc(2 * var(--pad));
@@ -318,7 +310,7 @@
   text-decoration: underline;
 }
 
-.commit-info-tokenized-field .token vscode-button {
+.commit-info-tokenized-field .token button {
   margin-right: calc(-1 * var(--pad));
 }
 

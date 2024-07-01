@@ -1,6 +1,5 @@
-#debugruntest-compatible
 
-#require diff no-eden
+#require diff
 
 #testcases ruststatus scmstore
 
@@ -9,7 +8,6 @@
   $ setconfig scmstore.status=true
 #endif
 
-  $ configure modernclient
   $ newclientrepo repo1
   $ mkdir a b a/1 b/1 b/2
   $ touch in_root a/in_a b/in_b a/1/in_a_1 b/1/in_b_1 b/2/in_b_2
@@ -459,6 +457,12 @@ hg status of binary file starting with '\1\n', a separator for metadata:
   $ hg status -A --rev 'desc(modify)':'desc(add)' 010a
   C 010a
 
+#if osx eden
+
+For some reason the repo6 cannot be created when using EdenFS on macOS for some
+reason, even though creating even more repos is not an issue on test-rust-checkout.t
+
+#else
 test "hg status" with "directory pattern" which matches against files
 only known on target revision.
 
@@ -600,4 +604,5 @@ Ignore suspiciously modified symlinks.
 
 Force code to think we don't support symlinks to excercise code we want to test.
   $ SL_DEBUG_DISABLE_SYMLINKS=1 hg status --config unsafe.filtersuspectsymlink=true
+#endif
 #endif

@@ -19,7 +19,7 @@ import os
 import re
 import stat
 import sys
-from typing import Callable, List, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 import bindings
 
@@ -27,7 +27,6 @@ from . import (
     annotate,
     encoding,
     error,
-    extensions,
     fileset,
     git,
     match as matchmod,
@@ -56,6 +55,15 @@ from .node import (
     wdirrev,
 )
 from .pycompat import encodeutf8, isint, range
+
+filectx_or_bytes = Union["basefilectx", bytes]
+
+
+def filedata(data: filectx_or_bytes) -> bytes:
+    if isinstance(data, bytes):
+        return data
+    else:
+        return data.data()
 
 
 propertycache = util.propertycache
@@ -816,6 +824,9 @@ class basefilectx:
     def _flags(self):
         return self._changectx.flags(self._path)
 
+    def data(self) -> bytes:
+        raise NotImplementedError()
+
     def flags(self):
         return self._flags
 
@@ -882,12 +893,13 @@ class basefilectx:
         return self._path
 
     def content_sha256(self):
-        if extensions.isenabled(
-            self._repo.ui, "remotefilelog"
-        ) and self._repo.ui.configbool("scmstore", "status"):
-            return self._repo.fileslog.filestore.fetch_contentsha256(
-                [(self.path(), self.filenode())]
-            )[0][1]
+        # TODO: The config is not enabled, figure out a replacement.
+        # if extensions.isenabled(
+        #    self._repo.ui, "remotefilelog"
+        # ) and self._repo.ui.configbool("scmstore", "status"):
+        #    return self._repo.fileslog.filestore.fetch_contentsha256(
+        #        [(self.path(), self.filenode())]
+        #    )[0][1]
         return hashlib.sha256(self.data()).digest()
 
     def isbinary(self):
@@ -906,7 +918,7 @@ class basefilectx:
         """whether this filectx represents a file not in self._changectx
 
         This is mainly for merge code to detect change/delete conflicts. This is
-        expected to be True for all subclasses of basectx."""
+        expected to be True for all subclasses of absentfilectx."""
         return False
 
     _customcmp = False
@@ -2212,9 +2224,11 @@ class workingfilectx(committablefilectx):
         """wraps unlink for a repo's working directory"""
         self._repo.wvfs.unlinkpath(self._path, ignoremissing=ignoremissing)
 
-    def write(self, data, flags, backgroundclose=False):
+    def write(self, data: filectx_or_bytes, flags, backgroundclose=False):
         """wraps repo.wwrite"""
-        self._repo.wwrite(self._path, data, flags, backgroundclose=backgroundclose)
+        self._repo.wwrite(
+            self._path, filedata(data), flags, backgroundclose=backgroundclose
+        )
 
     def markcopied(self, src):
         """marks this file a copy of `src`"""
@@ -2257,6 +2271,9 @@ class overlayworkingctx(committablectx):
     def __init__(self, repo):
         super(overlayworkingctx, self).__init__(repo)
         self._repo = repo
+        self._reuse_filenode = repo.ui.configbool(
+            "experimental", "reuse-filenodes", True
+        )
         self.clean()
 
     def setbase(self, wrappedctx):
@@ -2271,7 +2288,7 @@ class overlayworkingctx(committablectx):
         if self.isdirty(path):
             if self._cache[path]["exists"]:
                 if self._cache[path]["data"] is not None:
-                    return self._cache[path]["data"]
+                    return filedata(self._cache[path]["data"])
                 else:
                     # Must fallback here, too, because we only set flags.
                     return self._wrappedctx[path].data()
@@ -2362,9 +2379,7 @@ class overlayworkingctx(committablectx):
             if self._cache[path]["exists"]:
                 return self._cache[path]["flags"]
             else:
-                raise error.ProgrammingError(
-                    "No such file or directory: %s" % self._path
-                )
+                raise error.ProgrammingError("No such file or directory: %s" % path)
         else:
             return self._wrappedctx[path].flags()
 
@@ -2378,7 +2393,7 @@ class overlayworkingctx(committablectx):
         except error.ManifestLookupError:
             return False
 
-    def write(self, path, data, flags=""):
+    def write(self, path, data: filectx_or_bytes, flags=""):
         if data is None:
             raise error.ProgrammingError("data must be non-None")
         self._markdirty(path, exists=True, data=data, date=util.makedate(), flags=flags)
@@ -2402,7 +2417,7 @@ class overlayworkingctx(committablectx):
             # If this path exists and is a symlink, "follow" it by calling
             # exists on the destination path.
             if self._cache[path]["exists"] and "l" in self._cache[path]["flags"]:
-                return self.exists(self._cache[path]["data"].strip())
+                return self.exists(filedata(self._cache[path]["data"]).strip())
             else:
                 return self._cache[path]["exists"]
 
@@ -2421,11 +2436,9 @@ class overlayworkingctx(committablectx):
     def size(self, path):
         if self.isdirty(path):
             if self._cache[path]["exists"]:
-                return len(self._cache[path]["data"])
+                return len(filedata(self._cache[path]["data"]))
             else:
-                raise error.ProgrammingError(
-                    "No such file or directory: %s" % self._path
-                )
+                raise error.ProgrammingError("No such file or directory: %s" % path)
         return self._wrappedctx[path].size()
 
     def tomemctx(
@@ -2469,6 +2482,7 @@ class overlayworkingctx(committablectx):
                     self.data(path),
                     copied=self._cache[path]["copied"],
                     flags=self.flags(path),
+                    filenode=self._cache[path]["filenode"],
                 )
             else:
                 # Returning None, but including the path in `files`, is
@@ -2515,7 +2529,8 @@ class overlayworkingctx(committablectx):
             try:
                 underlying = self._wrappedctx[path]
                 if (
-                    underlying.data() == cache["data"]
+                    cache["data"] is not None
+                    and underlying.data() == filedata(cache["data"])
                     and underlying.flags() == cache["flags"]
                 ):
                     keys.append(path)
@@ -2527,13 +2542,26 @@ class overlayworkingctx(committablectx):
             del self._cache[path]
         return keys
 
-    def _markdirty(self, path, exists, data=None, date=None, flags="", copied=None):
+    def _markdirty(
+        self,
+        path,
+        exists,
+        data: Optional[filectx_or_bytes] = None,
+        date=None,
+        flags="",
+        copied=None,
+    ):
+        filenode = None
+        if self._reuse_filenode and isinstance(data, basefilectx):
+            filenode = data.filenode()
+
         self._cache[path] = {
             "exists": exists,
             "data": data,
             "date": date,
             "flags": flags,
             "copied": copied,
+            "filenode": filenode,
         }
 
     def filectx(self, path, filelog=None):
@@ -2591,7 +2619,7 @@ class overlayworkingfilectx(committablefilectx):
     def setflags(self, islink, isexec):
         return self._parent.setflags(self._path, islink, isexec)
 
-    def write(self, data, flags, backgroundclose=False):
+    def write(self, data: filectx_or_bytes, flags, backgroundclose=False):
         return self._parent.write(self._path, data, flags)
 
     def remove(self, ignoremissing=False):
@@ -2759,7 +2787,7 @@ class memctx(committablectx):
         date=None,
         extra=None,
         branch=None,
-        editor=False,
+        editor=None,
         loginfo=None,
         mutinfo=None,
     ):
@@ -2792,6 +2820,27 @@ class memctx(committablectx):
         if editor:
             self._text = editor(self._repo, self)
             self._repo.savecommitmessage(self._text)
+
+    @classmethod
+    def mirrorformutation(
+        cls,
+        ctx,
+        op,
+        parents=None,
+    ):
+
+        extra = ctx.extra().copy()
+        extra[op + "_source"] = ctx.hex()
+        mutinfo = mutation.record(ctx.repo(), extra, [ctx.node()], op)
+        loginfo = {"predecessors": ctx.hex(), "mutation": op}
+
+        return cls.mirror(
+            ctx,
+            parents=parents,
+            mutinfo=mutinfo,
+            loginfo=loginfo,
+            extra=extra,
+        )
 
     @classmethod
     def mirror(
@@ -2991,6 +3040,7 @@ class memfilectx(committablefilectx):
         isexec=False,
         copied=None,
         flags=None,
+        filenode=None,
     ):
         """
         path is the normalized file path relative to repository root.
@@ -3002,6 +3052,7 @@ class memfilectx(committablefilectx):
         revision being committed, or None."""
         super(memfilectx, self).__init__(repo, path, None, changectx)
         self._data = data
+        self._filenode = filenode
         if flags is None:
             self._flags = (islink and "l" or "") + (isexec and "x" or "")
         else:
@@ -3023,9 +3074,12 @@ class memfilectx(committablefilectx):
         # need to figure out what to do here
         del self._changectx[self._path]
 
-    def write(self, data, flags):
+    def write(self, data: filectx_or_bytes, flags):
         """wraps repo.wwrite"""
-        self._data = data
+        self._data = filedata(data)
+
+    def filenode(self):
+        return self._filenode
 
 
 class overlayfilectx(committablefilectx):
@@ -3264,7 +3318,7 @@ class arbitraryfilectx:
     def remove(self):
         util.unlink(self._path)
 
-    def write(self, data, flags):
+    def write(self, data: filectx_or_bytes, flags):
         assert not flags
-        with open(self._path, "w") as f:
-            f.write(data)
+        with open(self._path, "wb") as f:
+            f.write(filedata(data))

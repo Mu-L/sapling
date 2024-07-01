@@ -10,8 +10,10 @@ import type {CommitMessageFields, FieldConfig, FieldsBeingEdited} from './types'
 
 import {temporaryCommitTitle} from '../CommitTitle';
 import {Internal} from '../Internal';
-import {atomResetOnCwdChange} from '../repositoryData';
+import {codeReviewProvider} from '../codeReview/CodeReviewInfo';
 import {arraysEqual} from '../utils';
+import {OSSCommitMessageFieldSchema} from './OSSCommitMessageFieldsSchema';
+import {atom} from 'jotai';
 import {notEmpty} from 'shared/utils';
 
 export function emptyCommitMessageFields(schema: Array<FieldConfig>): CommitMessageFields {
@@ -32,13 +34,20 @@ export function allFieldsBeingEdited(schema: Array<FieldConfig>): FieldsBeingEdi
   return Object.fromEntries(schema.map(config => [config.key, true]));
 }
 
+function trimEmpty(a: Array<string>): Array<string> {
+  return a.filter(s => s.trim() !== '');
+}
+
 function fieldEqual(
   config: FieldConfig,
   a: Partial<CommitMessageFields>,
   b: Partial<CommitMessageFields>,
 ): boolean {
   return config.type === 'field'
-    ? arraysEqual((a[config.key] ?? []) as Array<string>, (b[config.key] ?? []) as Array<string>)
+    ? arraysEqual(
+        trimEmpty((a[config.key] ?? []) as Array<string>),
+        trimEmpty((b[config.key] ?? []) as Array<string>),
+      )
     : a[config.key] === b[config.key];
 }
 
@@ -103,9 +112,9 @@ export function commitMessageFieldsToString(
   return schema
     .filter(config => config.key === 'Title' || isFieldNonEmpty(fields[config.key]))
     .map(config => {
+      const sep = config.type === 'field' ? ': ' : ':\n'; // long fields have keys on their own line, but fields can use the same line
       // stringified messages of the form Key: value, except the title or generic description don't need a label
-      const prefix =
-        config.key === 'Title' || config.key === 'Description' ? '' : config.key + ': ';
+      const prefix = config.key === 'Title' || config.key === 'Description' ? '' : config.key + sep;
 
       if (config.key === 'Title') {
         const value = fields[config.key] as string;
@@ -181,6 +190,31 @@ export function mergeCommitMessageFields(
           const merged =
             av.trim() === bv.trim() ? av : av + (config.type === 'title' ? ', ' : '\n') + bv;
           return [config.key, merged];
+        }
+      })
+      .filter(notEmpty),
+  );
+}
+
+/**
+ * Merge two message fields, but always take A's fields if both are non-empty.
+ */
+export function mergeOnlyEmptyMessageFields(
+  schema: Array<FieldConfig>,
+  a: CommitMessageFields,
+  b: CommitMessageFields,
+): CommitMessageFields {
+  return Object.fromEntries(
+    schema
+      .map(config => {
+        const isANonEmpty = isFieldNonEmpty(a[config.key]);
+        const isBNonEmpty = isFieldNonEmpty(b[config.key]);
+        if (!isANonEmpty && !isBNonEmpty) {
+          return undefined;
+        } else if (!isANonEmpty || !isBNonEmpty) {
+          return [config.key, isANonEmpty ? a[config.key] : b[config.key]];
+        } else {
+          return [config.key, a[config.key]];
         }
       })
       .filter(notEmpty),
@@ -299,22 +333,17 @@ export function parseCommitMessageFields(
   return result;
 }
 
-export const OSSDefaultFieldSchema: Array<FieldConfig> = [
-  {key: 'Title', type: 'title', icon: 'milestone'},
-  {key: 'Description', type: 'textarea', icon: 'note'},
-];
-
 /**
  * Schema defining what fields we expect to be in a CommitMessageFields object,
  * and some information about those fields.
- * This is determined by an sl config on the server, hence it lives as an atom.
  */
-export const commitMessageFieldsSchema = atomResetOnCwdChange<Array<FieldConfig>>(
-  getDefaultCommitMessageSchema(),
-);
+export const commitMessageFieldsSchema = atom(get => {
+  const provider = get(codeReviewProvider);
+  return provider?.commitMessageFieldsSchema ?? getDefaultCommitMessageSchema();
+});
 
 export function getDefaultCommitMessageSchema() {
-  return Internal.CommitMessageFieldSchema ?? OSSDefaultFieldSchema;
+  return Internal.CommitMessageFieldSchemaForGitHub ?? OSSCommitMessageFieldSchema;
 }
 
 export function editedMessageSubset(

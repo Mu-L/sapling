@@ -14,6 +14,7 @@ use bookmark_renaming::get_bookmark_renamers;
 use bookmark_renaming::BookmarkRenamer;
 use bookmark_renaming::BookmarkRenamers;
 use bookmarks::BookmarkKey;
+use context::CoreContext;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use metaconfig_types::CommitSyncConfig;
 use metaconfig_types::CommitSyncConfigVersion;
@@ -25,24 +26,51 @@ use movers::get_movers;
 use movers::Mover;
 use movers::Movers;
 
+use crate::reporting::log_warning;
+
 // TODO(T169306120): rename this module
 
-pub async fn get_strip_git_submodules_by_version(
+pub async fn get_git_submodule_action_by_version(
+    ctx: &CoreContext,
     live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
     version: &CommitSyncConfigVersion,
-    source_repo_id: RepositoryId, // Treat this as small_repo for now
+    // TODO(T179530927): stop treating source repo always as small repo
+    source_repo_id: RepositoryId,
+    target_repo_id: RepositoryId,
 ) -> Result<GitSubmodulesChangesAction, Error> {
     let commit_sync_config = live_commit_sync_config
         .get_commit_sync_config_by_version(source_repo_id, version)
         .await?;
+
     let small_repo_configs = commit_sync_config.small_repos;
     if let Some(small_repo_config) = small_repo_configs.get(&source_repo_id) {
+        // If sync direction is forward, small repo would be the source
         return Ok(small_repo_config
             .submodule_config
             .git_submodules_action
             .clone());
     };
 
+    if let Some(small_repo_config) = small_repo_configs.get(&target_repo_id) {
+        // If sync direction is backwards, small repo would be the target
+        let small_repo_action = small_repo_config
+            .submodule_config
+            .git_submodules_action
+            .clone();
+
+        return Ok(small_repo_action);
+    };
+
+    // If the action if not found above, there might be something wrong. We
+    // should still fallback to the default action to avoid ever syncing submodule
+    // file changes to the large repo, but let's at least log a warning.
+    log_warning(
+        ctx,
+        format!(
+            "Couldn't find git submodule action for source repo id {}, target repo id {} and commit sync version {}",
+            source_repo_id, target_repo_id, version,
+        ),
+    );
     Ok(GitSubmodulesChangesAction::default())
 }
 

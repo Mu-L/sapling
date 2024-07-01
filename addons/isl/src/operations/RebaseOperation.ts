@@ -7,7 +7,7 @@
 
 import type {DagCommitInfo} from '../dag/dagCommitInfo';
 import type {Dag} from '../previews';
-import type {ExactRevset, Hash, SucceedableRevset} from '../types';
+import type {ExactRevset, Hash, OptimisticRevset, SucceedableRevset} from '../types';
 
 import {latestSuccessor} from '../SuccessionTracker';
 import {t} from '../i18n';
@@ -17,8 +17,8 @@ import deepEqual from 'fast-deep-equal';
 
 export class RebaseOperation extends Operation {
   constructor(
-    private source: ExactRevset | SucceedableRevset,
-    private destination: ExactRevset | SucceedableRevset,
+    private source: SucceedableRevset | ExactRevset | OptimisticRevset,
+    private destination: SucceedableRevset | ExactRevset | OptimisticRevset,
   ) {
     super('RebaseOperation');
   }
@@ -49,7 +49,7 @@ export class RebaseOperation extends Operation {
     }
     const src = dag.descendants(srcHash);
     const srcHashes = src.toHashes().toArray();
-    const prefix = `${REBASE_PREVIEW}:${destHash}:`;
+    const prefix = `${REBASE_PREVIEW_HASH_PREFIX}:${destHash}:`;
     const rewriteHash = (h: Hash) => (src.contains(h) ? prefix + h : h);
     const date = new Date();
     const newCommits = srcHashes.flatMap(h => {
@@ -112,4 +112,4 @@ export class RebaseOperation extends Operation {
   }
 }
 
-const REBASE_PREVIEW = 'OPTIMISTIC_REBASE_PREVIEW';
+export const REBASE_PREVIEW_HASH_PREFIX = 'OPTIMISTIC_REBASE_PREVIEW';

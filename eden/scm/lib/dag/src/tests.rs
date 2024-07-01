@@ -29,6 +29,12 @@ mod drawdag;
 mod test_dag;
 
 #[cfg(test)]
+mod test_add_heads;
+
+#[cfg(test)]
+mod test_bisect;
+
+#[cfg(test)]
 mod test_integrity;
 
 #[cfg(test)]
@@ -45,6 +51,9 @@ mod test_discontinuous;
 
 #[cfg(test)]
 mod test_server;
+
+#[cfg(test)]
+mod test_virtual;
 
 #[cfg(test)]
 pub mod dummy_dag;
@@ -497,17 +506,17 @@ Lv1: R0-0[] R1-8[0]"#
     assert_eq!(
         format!("{:?}", &sparse_id_map),
         r#"IdMap {
-  D: 2,
-  B: 3,
-  J: 8,
-  H: 9,
-  L: 11,
   A: 0,
   C: 1,
+  D: 2,
+  B: 3,
   E: 4,
   F: 5,
   G: 6,
   I: 7,
+  J: 8,
+  H: 9,
+  L: 11,
 }
 "#
     );
@@ -766,7 +775,7 @@ fn test_namedag_reassign_master() -> crate::Result<()> {
 
     // Second flush, making B master without adding new vertexes.
     let heads =
-        VertexListWithOptions::from(vec![VertexName::from("B")]).with_highest_group(Group::MASTER);
+        VertexListWithOptions::from(vec![VertexName::from("B")]).with_desired_group(Group::MASTER);
     r(dag.flush(&heads)).unwrap();
     assert_eq!(format!("{:?}", r(dag.vertex_id("A".into()))?), "0");
     assert_eq!(format!("{:?}", r(dag.vertex_id("B".into()))?), "1");

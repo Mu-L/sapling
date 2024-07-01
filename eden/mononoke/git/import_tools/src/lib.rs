@@ -21,9 +21,11 @@ use anyhow::bail;
 use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Error;
+use borrowed::borrowed;
 use bytes::Bytes;
 use cloned::cloned;
 use context::CoreContext;
+use futures::stream;
 use futures::try_join;
 use futures::Stream;
 use futures::StreamExt;
@@ -69,15 +71,6 @@ pub const TAG_REF: &str = "tag";
 pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 pub const TAG_REF_PREFIX: &str = "refs/tags/";
 
-/// Enum that represents the types of Git object that are to be stored
-/// in Mononoke
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitObjectStorageType {
-    #[allow(dead_code)]
-    RawObjectsOnly,
-    PackfileItemsAndRawObjects,
-}
-
 // TODO: Try to produce copy-info?
 async fn find_file_changes<S, U>(
     ctx: &CoreContext,
@@ -85,7 +78,6 @@ async fn find_file_changes<S, U>(
     reader: &GitRepoReader,
     uploader: U,
     changes: S,
-    object_storage_type: GitObjectStorageType,
 ) -> Result<SortedVectorMap<NonRootMPath, U::Change>, Error>
 where
     S: Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>>,
@@ -107,39 +99,25 @@ where
                                     .await
                                     .map(|change| (path, change))
                             } else {
-                                let object = reader.get_object(&oid).await?;
+                                let object =
+                                    reader.get_object(&oid).await.context("reader.get_object")?;
                                 let blob = object
                                     .parsed
                                     .try_into_blob()
                                     .map_err(|_| format_err!("{} is not a blob", oid))?;
-                                if let GitObjectStorageType::PackfileItemsAndRawObjects =
-                                    object_storage_type
-                                {
-                                    let upload_packfile =
-                                        uploader.upload_packfile_base_item(&ctx, oid, object.raw);
-                                    let upload_git_blob = uploader.upload_file(
-                                        &ctx,
-                                        &lfs,
-                                        &path,
-                                        ty,
-                                        oid,
-                                        Bytes::from(blob.data),
-                                    );
-                                    let (_, change) = try_join!(upload_packfile, upload_git_blob)?;
-                                    anyhow::Ok((path, change))
-                                } else {
-                                    uploader
-                                        .upload_file(
-                                            &ctx,
-                                            &lfs,
-                                            &path,
-                                            ty,
-                                            oid,
-                                            Bytes::from(blob.data),
-                                        )
-                                        .await
-                                        .map(|change| (path, change))
-                                }
+
+                                let upload_packfile =
+                                    uploader.upload_packfile_base_item(&ctx, oid, object.raw);
+                                let upload_git_blob = uploader.upload_file(
+                                    &ctx,
+                                    &lfs,
+                                    &path,
+                                    ty,
+                                    oid,
+                                    Bytes::from(blob.data),
+                                );
+                                let (_, change) = try_join!(upload_packfile, upload_git_blob)?;
+                                anyhow::Ok((path, change))
                             }
                         }
                         BonsaiDiffFileChange::Deleted(path) => Ok((path, U::deleted())),
@@ -201,17 +179,25 @@ pub async fn is_annotated_tag(
         .is_some())
 }
 
+pub fn stored_tag_name(tag_name: String) -> String {
+    tag_name
+        .strip_prefix("refs/")
+        .map(|s| s.to_string())
+        .unwrap_or(tag_name)
+}
+
 pub async fn create_changeset_for_annotated_tag<Uploader: GitUploader>(
     ctx: &CoreContext,
     uploader: &Uploader,
     path: &Path,
     prefs: &GitimportPreferences,
     tag_id: &ObjectId,
+    maybe_tag_name: Option<String>,
     original_changeset_id: &ChangesetId,
 ) -> Result<ChangesetId, Error> {
     let reader = GitRepoReader::new(&prefs.git_command_path, path).await?;
     // Get the parsed Git Tag
-    let tag_metadata = TagMetadata::new(ctx, *tag_id, &reader)
+    let tag_metadata = TagMetadata::new(ctx, *tag_id, maybe_tag_name, &reader)
         .await
         .with_context(|| format_err!("Failed to create TagMetadata from git tag {}", tag_id))?;
     // Create the corresponding changeset for the Git Tag at Mononoke end
@@ -271,10 +257,15 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
     };
     let dry_run = prefs.dry_run;
 
-    let reader = GitRepoReader::new(&prefs.git_command_path, path).await?;
+    let reader = GitRepoReader::new(&prefs.git_command_path, path)
+        .await
+        .context("GitRepoReader::new")?;
     let roots = target.get_roots();
-    // TODO - remove this
-    let nb_commits_to_import = target.get_nb_commits(&prefs.git_command_path, path).await?;
+    let all_commits = target
+        .list_commits(&prefs.git_command_path, path)
+        .await
+        .context("target.list_commits")?;
+    let nb_commits_to_import = all_commits.len();
     if 0 == nb_commits_to_import {
         info!(ctx.logger(), "Nothing to import for repo {}.", repo_name);
         return Ok(GitimportAccumulator::new());
@@ -283,27 +274,45 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
     let acc = RwLock::new(GitimportAccumulator::new());
     let backfill_derivation = prefs.backfill_derivation.clone();
 
-    // Kick off a stream that consumes the walk and prepared commits. Then, produce the Bonsais.
-    target
-        .list_commits(&prefs.git_command_path, path)
+    // How many commits to query from bonsai git mapping per SQL query.
+    const SQL_CONCURRENCY: usize = 10_000;
+    let mappings: Vec<(ObjectId, ChangesetId)> = stream::iter(&all_commits)
+        // Ignore any error. This is an optional optimization
+        .filter_map(|res| async { res.as_ref().ok() })
+        .chunks(SQL_CONCURRENCY)
+        .map(|v| v.into_iter().cloned().collect::<Vec<_>>())
+        .map(|oids| {
+            borrowed!(uploader);
+            async move {
+                uploader
+                    .preload_uploaded_commits(ctx, &oids)
+                    .await
+                    .context("preload_uploaded_commits")
+            }
+        })
+        .buffered(prefs.concurrency)
+        .try_collect::<Vec<_>>()
         .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    acc.write().expect("lock poisoned").inner.extend(mappings);
+    let n_existing_commits = acc.read().expect("lock poisoned").len();
+    if n_existing_commits > 0 {
+        info!(
+            ctx.logger(),
+            "GitRepo:{} {} of {} commit(s) already exist",
+            repo_name,
+            n_existing_commits,
+            nb_commits_to_import,
+        );
+    }
+    // Kick off a stream that consumes the walk and prepared commits. Then, produce the Bonsais.
+    stream::iter(all_commits)
         .try_filter_map({
-            let acc = &acc;
-            let uploader = &uploader;
-            let repo_name = &repo_name;
+            borrowed!(acc);
             move |oid| async move {
-                if let Some(bcs_id) = uploader.check_commit_uploaded(ctx, &oid).await? {
-                    acc.write().expect("lock poisoned").insert(oid, bcs_id);
-                    let git_sha1 = oid_to_sha1(&oid)?;
-                    info!(
-                        ctx.logger(),
-                        "GitRepo:{} commit {} of {} - Oid:{} => Bid:{} (already exists)",
-                        repo_name,
-                        acc.read().expect("lock poisoned").len(),
-                        nb_commits_to_import,
-                        git_sha1.to_brief(),
-                        bcs_id.to_brief()
-                    );
+                if let Some(_bcs_id) = acc.read().expect("lock poisoned").get(&oid) {
                     Ok(None)
                 } else {
                     Ok(Some(oid))
@@ -320,7 +329,7 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
                         .with_context(|| format!("While extracting {}", oid))?;
 
                     let diff = extracted_commit.diff(&ctx, &reader, submodules);
-                    let file_changes = find_file_changes(&ctx, &lfs, &reader, uploader, diff, GitObjectStorageType::PackfileItemsAndRawObjects).await?;
+                    let file_changes = find_file_changes(&ctx, &lfs, &reader, uploader, diff).await.context("find_file_changes")?;
                     Result::<_, Error>::Ok((extracted_commit, file_changes))
                     }
                 })
@@ -428,7 +437,7 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
                         file_changes,
                         dry_run,
                     )
-                    .await?;
+                    .await.context("generate_changeset_for_commit")?;
                 acc.write().expect("lock poisoned").insert(oid, bcs_id);
 
                 let git_sha1 = oid_to_sha1(&oid)?;
@@ -450,7 +459,7 @@ pub async fn gitimport_acc<Uploader: GitUploader>(
         .map(|v| v.into_iter().collect::<Result<Vec<_>, Error>>())
         .try_for_each(|v| async {
             cloned!(backfill_derivation, ctx, uploader);
-            task::spawn(async move { uploader.finalize_batch(&ctx, dry_run, backfill_derivation, v).await }).await?
+            task::spawn(async move { uploader.finalize_batch(&ctx, dry_run, backfill_derivation, v).await.context("finalize_batch") }).await?
         })
         .await?;
 
@@ -638,15 +647,7 @@ pub async fn import_tree_as_single_bonsai_changeset(
         .with_context(|| format!("While extracting {}", git_cs_id))?;
 
     let diff = extracted_commit.diff_root(ctx, &reader, prefs.submodules);
-    let file_changes = find_file_changes(
-        ctx,
-        &prefs.lfs,
-        &reader,
-        uploader.clone(),
-        diff,
-        GitObjectStorageType::PackfileItemsAndRawObjects,
-    )
-    .await?;
+    let file_changes = find_file_changes(ctx, &prefs.lfs, &reader, uploader.clone(), diff).await?;
 
     // Before generating the corresponding changeset at Mononoke end, upload the raw git commit.
     uploader

@@ -40,8 +40,11 @@ use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
 use cross_repo_sync::CommitSyncOutcome;
 use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::InMemoryRepo;
+use cross_repo_sync::Large;
 use cross_repo_sync::Repo as CrossRepo;
 use cross_repo_sync::SubmoduleDeps;
+use cross_repo_sync::SubmoduleExpansionData;
 use cross_repo_sync::Syncers;
 use derived_data_utils::derived_data_utils;
 use environment::MononokeEnvironment;
@@ -82,7 +85,6 @@ use mononoke_types::RepositoryId;
 use movers::DefaultAction;
 use movers::Mover;
 use pushrebase::do_pushrebase_bonsai;
-use repo_derived_data::RepoDerivedDataArc;
 use segmented_changelog::seedheads_from_config;
 use segmented_changelog::SeedHead;
 use segmented_changelog::SegmentedChangelogTailer;
@@ -233,20 +235,34 @@ async fn rewrite_file_paths(
 
     for (index, bcs) in gitimport_changesets.iter().enumerate() {
         let bcs_id = bcs.get_changeset_id();
+
+        let large_repo_id = Large(repo.repo_identity().id());
+        let fallback_repos = vec![];
+        let large_in_memory_repo = InMemoryRepo::from_repo(repo, fallback_repos)?;
+        let submodule_expansion_data = match submodule_deps {
+            SubmoduleDeps::ForSync(ref deps) => Some(SubmoduleExpansionData {
+                submodule_deps: deps,
+                x_repo_submodule_metadata_file_prefix: DEFAULT_GIT_SUBMODULE_METADATA_FILE_PREFIX,
+                large_repo_id,
+                large_repo: large_in_memory_repo,
+                dangling_submodule_pointers: vec![],
+            }),
+            SubmoduleDeps::NotNeeded | SubmoduleDeps::NotAvailable => None,
+        };
+
         let rewritten_bcs_opt = rewrite_commit(
             ctx,
             bcs.clone().into_mut(),
             &remapped_parents,
             mover.clone(),
             repo,
-            &submodule_deps,
             Default::default(),
             Default::default(),
-            DEFAULT_GIT_SUBMODULE_METADATA_FILE_PREFIX.to_string(),
+            submodule_expansion_data,
         )
         .await?;
 
-        if let Some(rewritten_bcs_mut) = rewritten_bcs_opt {
+        if let Some(rewritten_bcs_mut) = rewritten_bcs_opt.rewritten {
             let rewritten_bcs = rewritten_bcs_mut.freeze()?;
             let rewritten_bcs_id = rewritten_bcs.get_changeset_id();
             remapped_parents.insert(bcs_id.clone(), rewritten_bcs_id);

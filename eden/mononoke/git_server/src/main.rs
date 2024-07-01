@@ -23,12 +23,16 @@ use anyhow::Result;
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_tag_mapping::BonsaiTagMapping;
 use bookmarks::Bookmarks;
+use bookmarks_cache::BookmarksCache;
 use clap::Parser;
 use clientinfo::ClientEntryPoint;
 use cloned::cloned;
 use cmdlib_caching::CachelibSettings;
 use commit_graph::CommitGraph;
 use connection_security_checker::ConnectionSecurityChecker;
+use environment::BookmarkCacheDerivedData;
+use environment::BookmarkCacheKind;
+use environment::BookmarkCacheOptions;
 use executor_lib::args::ShardedExecutorArgs;
 use fbinit::FacebookInit;
 use futures::channel::oneshot;
@@ -42,16 +46,22 @@ use gotham_ext::middleware::LoadMiddleware;
 use gotham_ext::middleware::LogMiddleware;
 use gotham_ext::middleware::MetadataMiddleware;
 use gotham_ext::middleware::PostResponseMiddleware;
+use gotham_ext::middleware::RequestContextMiddleware;
+use gotham_ext::middleware::ScubaMiddleware;
 use gotham_ext::middleware::ServerIdentityMiddleware;
 use gotham_ext::middleware::TimerMiddleware;
 use gotham_ext::middleware::TlsSessionDataMiddleware;
 use gotham_ext::serve;
 use http::HeaderValue;
+use metaconfig_parser::RepoConfigs;
 use metaconfig_types::RepoConfig;
 use metaconfig_types::ShardedService;
+use mononoke_app::args::McrouterAppExtension;
+use mononoke_app::args::ReadonlyArgs;
 use mononoke_app::args::RepoFilterAppExtension;
 use mononoke_app::args::ShutdownTimeoutArgs;
 use mononoke_app::args::TLSArgs;
+use mononoke_app::args::WarmBookmarksCacheExtension;
 use mononoke_app::fb303::AliveService;
 use mononoke_app::fb303::Fb303AppExtension;
 use mononoke_app::MononokeApp;
@@ -64,9 +74,11 @@ use repo_permission_checker::RepoPermissionChecker;
 use slog::info;
 use tokio::net::TcpListener;
 
+use crate::middleware::OdsMiddleware;
 use crate::middleware::RequestContentEncodingMiddleware;
 use crate::middleware::ResponseContentTypeMiddleware;
 use crate::model::GitServerContext;
+use crate::scuba::MononokeGitScubaHandler;
 use crate::service::build_router;
 use crate::sharding::MononokeGitServerProcess;
 mod command;
@@ -75,6 +87,7 @@ mod errors;
 mod middleware;
 mod model;
 mod read;
+mod scuba;
 mod service;
 mod sharding;
 mod util;
@@ -122,6 +135,9 @@ pub struct Repo {
 
     #[facet]
     repo_permission_checker: dyn RepoPermissionChecker,
+
+    #[facet]
+    pub warm_bookmarks_cache: dyn BookmarksCache,
 }
 
 /// Mononoke Git Server
@@ -149,6 +165,15 @@ struct GitServerArgs {
     /// Args for sharding of repos on Mononoke Git Server
     #[clap(flatten)]
     sharded_executor_args: ShardedExecutorArgs,
+    /// Flag determining if the server should be read-only
+    #[clap(flatten)]
+    readonly: ReadonlyArgs,
+    /// Flag determining if the server should skip enforcing authorization
+    #[clap(long)]
+    skip_authorization: bool,
+    /// Whether or not to use test-friendly logging
+    #[clap(long)]
+    test_friendly_logging: bool,
 }
 
 #[derive(Clone)]
@@ -164,6 +189,10 @@ impl GitRepos {
     pub(crate) fn get(&self, repo_name: &str) -> Option<Arc<Repo>> {
         self.repo_mgr.repos().get_by_name(repo_name)
     }
+
+    pub(crate) fn repo_configs(&self) -> Arc<RepoConfigs> {
+        self.repo_mgr.configs().repo_configs()
+    }
 }
 
 #[fbinit::main]
@@ -174,6 +203,13 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     };
 
     let app = MononokeAppBuilder::new(fb)
+        .with_default_scuba_dataset("mononoke_git_server")
+        .with_bookmarks_cache(BookmarkCacheOptions {
+            cache_kind: BookmarkCacheKind::Local,
+            derived_data: BookmarkCacheDerivedData::GitOnly,
+        })
+        .with_app_extension(WarmBookmarksCacheExtension {})
+        .with_app_extension(McrouterAppExtension {})
         .with_app_extension(Fb303AppExtension {})
         .with_app_extension(RepoFilterAppExtension {})
         .with_cachelib_settings(cachelib_settings)
@@ -201,8 +237,15 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
         })
         .transpose()?;
     let acl_provider = app.environment().acl_provider.clone();
+    let scuba = app.environment().scuba_sample_builder.clone();
     let common = app.repo_configs().common.clone();
     let tls_session_data_log = args.tls_session_data_log_file.clone();
+    let enforce_authorization = !args.skip_authorization;
+    let log_middleware = if args.test_friendly_logging {
+        LogMiddleware::test_friendly()
+    } else {
+        LogMiddleware::slog(logger.clone())
+    };
     let will_exit = Arc::new(AtomicBool::new(false));
     let runtime = app.runtime().clone();
     // Service name is used for shallow or deep sharding. If sharding itself is disabled, provide
@@ -238,7 +281,8 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
             // We use the listen_host rather than the ip of listener.local_addr()
             // because the certs user passed will be referencing listen_host
             let bound_addr = format!("{}:{}", listen_host, listener.local_addr()?.port());
-            let git_server_context = GitServerContext::new(app.new_basic_context(), repos);
+            let git_server_context =
+                GitServerContext::new(repos, enforce_authorization, logger.clone());
 
             let router = build_router(git_server_context);
 
@@ -256,10 +300,19 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
                     ClientEntryPoint::MononokeGitServer,
                 ))
                 .add(RequestContentEncodingMiddleware {})
+                .add(RequestContextMiddleware::new(
+                    fb,
+                    logger.clone(),
+                    scuba.clone(),
+                    None,
+                    args.readonly.readonly,
+                ))
                 .add(ResponseContentTypeMiddleware {})
                 .add(PostResponseMiddleware::default())
                 .add(LoadMiddleware::new())
-                .add(LogMiddleware::slog(logger.clone()))
+                .add(log_middleware)
+                .add(OdsMiddleware::new())
+                .add(<ScubaMiddleware<MononokeGitScubaHandler>>::new(scuba))
                 .add(TimerMiddleware::new())
                 .add(ConfigInfoMiddleware::new(configs))
                 .build(router);

@@ -6,12 +6,14 @@
  */
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 
 use futures::StreamExt;
 
 use super::hints::Flags;
+use super::id_static::IdStaticSet;
 use super::AsyncNameSetQuery;
 use super::BoxVertexStream;
 use super::Hints;
@@ -91,7 +93,8 @@ impl StopCondition {
 
 impl IntersectionSet {
     pub fn new(lhs: NameSet, rhs: NameSet) -> Self {
-        // More efficient if `lhs` is smaller. Swap `lhs` and `rhs` if `lhs` is `FULL`.
+        // More efficient if `lhs` is smaller. But `lhs` order matters.
+        // Swap `lhs` and `rhs` if `lhs` is `FULL`.
         let (lhs, rhs) = if lhs.hints().contains(Flags::FULL)
             && !rhs.hints().contains(Flags::FULL)
             && !rhs.hints().contains(Flags::FILTER)
@@ -203,6 +206,16 @@ impl AsyncNameSetQuery for IntersectionSet {
         Ok(iter.into_stream())
     }
 
+    async fn size_hint(&self) -> (u64, Option<u64>) {
+        let lhs_max = self.lhs.size_hint().await.1;
+        let rhs_max = self.rhs.size_hint().await.1;
+        let max = match (lhs_max, rhs_max) {
+            (Some(l), Some(r)) => Some(l.min(r)),
+            _ => None,
+        };
+        (0, max)
+    }
+
     async fn contains(&self, name: &VertexName) -> Result<bool> {
         Ok(self.lhs.contains(name).await? && self.rhs.contains(name).await?)
     }
@@ -224,6 +237,13 @@ impl AsyncNameSetQuery for IntersectionSet {
 
     fn hints(&self) -> &Hints {
         &self.hints
+    }
+
+    fn specialized_flatten_id(&self) -> Option<Cow<IdStaticSet>> {
+        let lhs = self.lhs.specialized_flatten_id()?;
+        let rhs = self.rhs.specialized_flatten_id()?;
+        let result = IdStaticSet::from_edit_spans(&lhs, &rhs, |a, b| a.intersection(b))?;
+        Some(Cow::Owned(result))
     }
 }
 
@@ -260,7 +280,7 @@ mod tests {
         assert_eq!(shorten_iter(ni(set.iter())), ["33", "44"]);
         assert_eq!(shorten_iter(ni(set.iter_rev())), ["44", "33"]);
         assert!(!nb(set.is_empty())?);
-        assert_eq!(nb(set.count())?, 2);
+        assert_eq!(nb(set.count_slow())?, 2);
         assert_eq!(shorten_name(nb(set.first())?.unwrap()), "33");
         assert_eq!(shorten_name(nb(set.last())?.unwrap()), "44");
         for &b in b"\x11\x22\x55\x66".iter() {
@@ -309,12 +329,17 @@ mod tests {
         assert_eq!(shorten_iter(ni(set.iter_rev())), ["70", "50", "40", "20"]);
     }
 
+    #[test]
+    fn test_size_hint_sets() {
+        check_size_hint_sets(|a, b| IntersectionSet::new(a, b));
+    }
+
     quickcheck::quickcheck! {
         fn test_intersection_quickcheck(a: Vec<u8>, b: Vec<u8>) -> bool {
             let set = intersection(&a, &b);
             check_invariants(&set).unwrap();
 
-            let count = nb(set.count()).unwrap();
+            let count = nb(set.count_slow()).unwrap() as usize;
             assert!(count <= a.len(), "len({:?}) = {} should <= len({:?})" , &set, count, &a);
             assert!(count <= b.len(), "len({:?}) = {} should <= len({:?})" , &set, count, &b);
 

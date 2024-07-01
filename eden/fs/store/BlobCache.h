@@ -15,7 +15,7 @@ namespace facebook::eden {
 
 class ReloadableConfig;
 
-using BlobInterestHandle = ObjectInterestHandle<Blob>;
+using BlobInterestHandle = ObjectInterestHandle<Blob, BlobCacheStats>;
 
 /**
  * An in-memory LRU cache for loaded blobs. It is parameterized by both a
@@ -29,7 +29,10 @@ using BlobInterestHandle = ObjectInterestHandle<Blob>;
  *
  * It is safe to use this object from arbitrary threads.
  */
-class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
+class BlobCache : public ObjectCache<
+                      Blob,
+                      ObjectCacheFlavor::InterestHandle,
+                      BlobCacheStats> {
   struct PrivateTag {};
 
  public:
@@ -39,10 +42,17 @@ class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
     return std::make_shared<BlobCache>(
         PrivateTag{}, std::move(config), std::move(stats));
   }
-  static std::shared_ptr<BlobCache>
-  create(size_t maximumSize, size_t minimumCount, EdenStatsPtr stats) {
+  static std::shared_ptr<BlobCache> create(
+      size_t maximumSize,
+      size_t minimumCount,
+      std::shared_ptr<ReloadableConfig> config,
+      EdenStatsPtr stats) {
     return std::make_shared<BlobCache>(
-        PrivateTag{}, maximumSize, minimumCount, std::move(stats));
+        PrivateTag{},
+        maximumSize,
+        minimumCount,
+        std::move(config),
+        std::move(stats));
   }
 
   explicit BlobCache(
@@ -53,8 +63,9 @@ class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
       PrivateTag,
       size_t maximumSize,
       size_t minimumCount,
+      std::shared_ptr<ReloadableConfig> config,
       EdenStatsPtr stats);
-  ~BlobCache() = default;
+  ~BlobCache();
 
   /**
    * If a blob for the given hash is in cache, return it. If the blob is not in
@@ -70,13 +81,7 @@ class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
    */
   GetResult get(
       const ObjectId& hash,
-      Interest interest = Interest::LikelyNeededAgain) {
-    auto handle = getInterestHandle(hash, interest);
-    if (handle.object) {
-      stats_->increment(&ObjectStoreStats::getBlobFromMemory);
-    }
-    return handle;
-  }
+      Interest interest = Interest::LikelyNeededAgain);
 
   /**
    * Inserts a blob into the cache for future lookup. If the new total size
@@ -89,12 +94,19 @@ class BlobCache : public ObjectCache<Blob, ObjectCacheFlavor::InterestHandle> {
   BlobInterestHandle insert(
       ObjectId id,
       ObjectPtr blob,
-      Interest interest = Interest::LikelyNeededAgain) {
-    return insertInterestHandle(std::move(id), std::move(blob), interest);
-  }
+      Interest interest = Interest::LikelyNeededAgain);
 
  private:
+  /**
+   * Populated via EdenConfig at object creation time. This could be changed to
+   * be reloadable if the minimum and maximum cache sizes are also changed to be
+   * reloadable.
+   */
+  bool enabled_;
+
   EdenStatsPtr stats_;
+
+  void registerStats();
 };
 
 } // namespace facebook::eden

@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -99,23 +100,34 @@ impl SourceControlServiceImpl {
             .into_config_format(&self.mononoke)?;
         let target_repo_id = RepositoryId::new(target.repo_id.try_into().unwrap());
         self.check_write_allowed(&ctx, target_repo_id).await?;
+        let repo_configs = self.configs.repo_configs();
+        let (_, target_repo_config) = repo_configs
+            .get_repo_config(target_repo_id)
+            .ok_or_else(|| MononokeError::InvalidRequest("repo not found".to_string()))?;
 
         let new_config = params.new_config.into_config_format(&self.mononoke)?;
         self.verify_repos_by_config(&new_config)?;
         let megarepo_configs = self.megarepo_api.configs();
         megarepo_configs
-            .add_config_version(ctx.clone(), new_config.clone())
+            .add_config_version(
+                ctx.clone(),
+                Arc::new(target_repo_config.clone()),
+                new_config.clone(),
+            )
             .await?;
 
         // We've seen cases where config is not readable immediately after
         // it was written. Let's try reading a few times before returning
         let mut latest_error = None;
         for _ in 0..10 {
-            let res = megarepo_configs.get_config_by_version(
-                ctx.clone(),
-                new_config.target.clone(),
-                new_config.version.clone(),
-            );
+            let res = megarepo_configs
+                .get_config_by_version(
+                    ctx.clone(),
+                    Arc::new(target_repo_config.clone()),
+                    new_config.target.clone(),
+                    new_config.version.clone(),
+                )
+                .await;
             match res {
                 Ok(_) => {
                     latest_error = None;

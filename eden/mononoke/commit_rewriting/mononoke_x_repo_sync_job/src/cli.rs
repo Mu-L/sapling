@@ -9,12 +9,15 @@ use anyhow::Result;
 use clap::command;
 use clap::Args;
 use clap::Parser;
+use cmdlib_logging::ScubaLoggingArgs;
 use fbinit::FacebookInit;
 use mononoke_app::args::ChangesetArgs;
 use mononoke_app::args::SourceAndTargetRepoArgs;
 use mononoke_app::fb303::Fb303AppExtension;
 use mononoke_app::MononokeApp;
 use mononoke_app::MononokeAppBuilder;
+
+use crate::reporting::SCUBA_TABLE;
 
 #[derive(Debug, Args)]
 #[clap(about = "Import all commits from a small repo into a large one before setting up live sync")]
@@ -27,6 +30,14 @@ pub struct InitialImportCommandArgs {
 
     #[clap(long)]
     pub no_progress_bar: bool,
+
+    /// Disable automatic derivation of fsnodes as commits are synced
+    #[clap(long)]
+    pub no_automatic_derivation: bool,
+
+    /// Size of the bulk derivation batch during the initial import
+    #[clap(long, default_value_t = 100)]
+    pub derivation_batch_size: usize,
 }
 
 #[derive(Debug, Args)]
@@ -41,6 +52,17 @@ pub struct OnceCommandArgs {
     // Performs mapping version change.
     #[clap(long = "unsafe-change-version-to")]
     pub new_version: Option<String>,
+    // ************************************************************************
+    // THIS IS UNSAFE AND SHOULD ONLY BE USED IF YOU KNOW WHAT YOU ARE DOING.
+    // MAKE SURE YOU RUN WORKING COPY VALIDATION BEFORE USING THIS FLAG.
+    //
+    // Forces the commit to be synced to the target bookmark, instead of the
+    // synced version of its parent.
+    //
+    // Can only be used if a new mapping version if specified.
+    // ************************************************************************
+    #[clap(long, requires("new_version"))]
+    pub unsafe_force_rewrite_parent_to_target_bookmark: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -84,10 +106,25 @@ pub struct ForwardSyncerArgs {
 
     #[command(subcommand)]
     pub command: ForwardSyncerCommand,
+
+    // TODO(gustavoavena): remove the default scuba logging after all tw
+    // tasks have been updated.
+    /// Temporary argument that does nothing but is needed to maintain backwards
+    /// compatibility.
+    #[clap(long)]
+    pub log_to_scuba: bool,
 }
 
 pub fn create_app(fb: FacebookInit) -> Result<MononokeApp> {
+    // TODO(gustavoavena): remove the default scuba logging after all tw
+    // tasks have been updated.
+    let default_scuba_logging_args = ScubaLoggingArgs {
+        scuba_dataset: Some(SCUBA_TABLE.to_string()),
+        no_default_scuba_dataset: false,
+        warm_bookmark_cache_scuba_dataset: None,
+    };
     let app: MononokeApp = MononokeAppBuilder::new(fb)
+        .with_arg_defaults(default_scuba_logging_args)
         .with_app_extension(Fb303AppExtension {})
         .build::<ForwardSyncerArgs>()?;
 

@@ -19,7 +19,8 @@ class Object {
   }
 };
 
-using SimpleObjectCache = ObjectCache<Object, ObjectCacheFlavor::Simple>;
+using SimpleObjectCache =
+    ObjectCache<Object, ObjectCacheFlavor::Simple, FakeStats>;
 
 // 40 characters per line, 6 lines. 240 characters total.
 std::string longObjectBase =
@@ -35,7 +36,8 @@ std::string shortObjectBase = "f";
 
 void getSimple(benchmark::State& st, const std::string& objectBase) {
   size_t numObjects = 100000;
-  auto cache = SimpleObjectCache::create(40 * 1024 * 1024, 1);
+  auto cache =
+      SimpleObjectCache::create(40 * 1024 * 1024, 1, makeRefPtr<EdenStats>());
 
   std::vector<ObjectId> ids;
   ids.reserve(numObjects);
@@ -68,7 +70,8 @@ BENCHMARK(longGetSimple);
 
 void insertSimple(benchmark::State& st, const std::string& objectBase) {
   size_t numObjects = 100000;
-  auto cache = SimpleObjectCache::create(40 * 1024 * 1024, 1);
+  auto cache =
+      SimpleObjectCache::create(40 * 1024 * 1024, 1, makeRefPtr<EdenStats>());
   std::vector<ObjectId> ids;
   ids.reserve(numObjects);
   std::vector<std::shared_ptr<Object>> vec;

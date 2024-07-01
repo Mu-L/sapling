@@ -16,6 +16,7 @@ use megarepo_configs::SyncConfigVersion;
 use megarepo_configs::SyncTargetConfig;
 use megarepo_configs::Target;
 use megarepo_error::MegarepoError;
+use metaconfig_types::RepoConfig;
 use slog::info;
 use slog::Logger;
 
@@ -43,17 +44,10 @@ impl TestMononokeMegarepoConfigs {
 
 #[async_trait]
 impl MononokeMegarepoConfigs for TestMononokeMegarepoConfigs {
-    fn get_target_config_versions(
+    async fn get_config_by_version(
         &self,
         _ctx: CoreContext,
-        _target: Target,
-    ) -> Result<Vec<SyncConfigVersion>, MegarepoError> {
-        unimplemented!("TestMononokeMegarepoConfigs::get_target_config_versions")
-    }
-
-    fn get_config_by_version(
-        &self,
-        _ctx: CoreContext,
+        _repo_config: Arc<RepoConfig>,
         target: Target,
         version: SyncConfigVersion,
     ) -> Result<SyncTargetConfig, MegarepoError> {
@@ -68,6 +62,7 @@ impl MononokeMegarepoConfigs for TestMononokeMegarepoConfigs {
     async fn add_config_version(
         &self,
         ctx: CoreContext,
+        _repo_config: Arc<RepoConfig>,
         config: SyncTargetConfig,
     ) -> Result<(), MegarepoError> {
         verify_config(&ctx, &config).map_err(MegarepoError::request)?;

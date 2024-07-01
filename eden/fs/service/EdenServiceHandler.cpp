@@ -25,9 +25,11 @@
 #include <folly/logging/Logger.h>
 #include <folly/logging/xlog.h>
 #include <folly/stop_watch.h>
+#include <re2/re2.h>
 #include <thrift/lib/cpp/util/EnumUtils.h>
 #include <thrift/lib/cpp2/server/ThriftServer.h>
 
+#include "ThriftGetObjectImpl.h"
 #include "eden/common/telemetry/SessionInfo.h"
 #include "eden/common/telemetry/Tracing.h"
 #include "eden/common/utils/Bug.h"
@@ -53,6 +55,7 @@
 #include "eden/fs/journal/JournalDelta.h"
 #include "eden/fs/model/Blob.h"
 #include "eden/fs/model/BlobMetadata.h"
+#include "eden/fs/model/GlobEntry.h"
 #include "eden/fs/model/Hash.h"
 #include "eden/fs/model/Tree.h"
 #include "eden/fs/model/TreeEntry.h"
@@ -74,14 +77,14 @@
 #include "eden/fs/store/DiffContext.h"
 #include "eden/fs/store/FilteredBackingStore.h"
 #include "eden/fs/store/LocalStore.h"
-#include "eden/fs/store/LocalStoreCachedBackingStore.h"
 #include "eden/fs/store/ObjectFetchContext.h"
 #include "eden/fs/store/ObjectStore.h"
 #include "eden/fs/store/PathLoader.h"
 #include "eden/fs/store/ScmStatusDiffCallback.h"
 #include "eden/fs/store/TreeCache.h"
+#include "eden/fs/store/TreeLookupProcessor.h"
 #include "eden/fs/store/filter/GlobFilter.h"
-#include "eden/fs/store/hg/HgQueuedBackingStore.h"
+#include "eden/fs/store/hg/SaplingBackingStore.h"
 #include "eden/fs/telemetry/LogEvent.h"
 #include "eden/fs/telemetry/TaskTrace.h"
 #include "eden/fs/utils/Clock.h"
@@ -391,6 +394,52 @@ ImmediateFuture<ReturnType> wrapImmediateFuture(
   return std::move(f).ensure([logHelper = std::move(logHelper)]() {});
 }
 
+/**
+ * Lives as long as a suffix glob request and primarily exists to record logging
+ * and telemetry.
+ */
+class SuffixGlobRequestScope {
+ public:
+  SuffixGlobRequestScope(SuffixGlobRequestScope&&) = delete;
+  SuffixGlobRequestScope& operator=(SuffixGlobRequestScope&&) = delete;
+
+  SuffixGlobRequestScope(
+      std::string globberLogString,
+      const std::shared_ptr<ServerState>& serverState,
+      const ObjectFetchContextPtr& context)
+      : globberLogString_{std::move(globberLogString)},
+        serverState_{serverState},
+        context_{context} {}
+
+  ~SuffixGlobRequestScope() {
+    // Logging completion time for the request
+    auto elapsed = itcTimer_.elapsed();
+    auto duration = std::chrono::duration<double>{elapsed}.count();
+    std::string client_cmdline;
+    if (auto clientPid = context_->getClientPid()) {
+      // TODO: we should look up client scope here instead of command line
+      // since it will give move context into the overarching process or
+      // system producing the expensive query
+      client_cmdline = serverState_->getProcessInfoCache()
+                           ->lookup(clientPid.value().get())
+                           .get()
+                           .name;
+      std::replace(client_cmdline.begin(), client_cmdline.end(), '\0', ' ');
+    }
+
+    XLOG(WARN) << "EdenFS asked to evaluate suffix glob by caller "
+               << client_cmdline << ":" << globberLogString_
+               << ": duration=" << duration << "s";
+    serverState_->getStructuredLogger()->logEvent(
+        SuffixGlob{duration, globberLogString_, std::move(client_cmdline)});
+  }
+
+ private:
+  std::string globberLogString_;
+  const std::shared_ptr<ServerState>& serverState_;
+  const ObjectFetchContextPtr& context_;
+  folly::stop_watch<std::chrono::microseconds> itcTimer_ = {};
+}; // namespace
 #undef EDEN_MICRO
 
 RelativePath relpathFromUserPath(StringPiece userPath) {
@@ -1447,57 +1496,49 @@ apache::thrift::ServerStream<FsEvent> EdenServiceHandler::traceFsEvents(
 
 /**
  * Helper function to get a cast a BackingStore shared_ptr to a
- * HgQueuedBackingStore shared_ptr. Returns an error if the type of backingStore
- * provided is not truly an HgQueuedBackingStore. Used in
- * EdenServiceHandler::traceHgEvents and
- * EdenServiceHandler::getRetroactiveHgEvents.
+ * SaplingBackingStore shared_ptr. Returns an error if the type of backingStore
+ * provided is not truly an SaplingBackingStore. Used in
+ * EdenServiceHandler::traceHgEvents,
+ * EdenServiceHandler::getRetroactiveHgEvents and
+ * EdenServiceHandler::debugOutstandingHgEvents.
  */
-std::shared_ptr<HgQueuedBackingStore> castToHgQueuedBackingStore(
+std::shared_ptr<SaplingBackingStore> castToSaplingBackingStore(
     std::shared_ptr<BackingStore>& backingStore,
     AbsolutePathPiece mountPath) {
-  std::shared_ptr<HgQueuedBackingStore> hgBackingStore{nullptr};
+  std::shared_ptr<SaplingBackingStore> saplingBackingStore{nullptr};
 
-  // TODO: remove these dynamic casts in favor of a QueryInterface method
-  // BackingStore -> LocalStoreCachedBackingStore
-  auto localStoreCachedBackingStore =
-      std::dynamic_pointer_cast<LocalStoreCachedBackingStore>(backingStore);
-  if (!localStoreCachedBackingStore) {
-    // BackingStore -> HgQueuedBackingStore
-    hgBackingStore =
-        std::dynamic_pointer_cast<HgQueuedBackingStore>(backingStore);
+  // If FilteredFS is enabled, we'll see a FilteredBackingStore first
+  auto filteredBackingStore =
+      std::dynamic_pointer_cast<FilteredBackingStore>(backingStore);
+  if (filteredBackingStore) {
+    // FilteredBackingStore -> SaplingBackingStore
+    saplingBackingStore = std::dynamic_pointer_cast<SaplingBackingStore>(
+        filteredBackingStore->getBackingStore());
   } else {
-    // If FilteredFS is enabled, we'll see a FilteredBackingStore next
-    auto filteredBackingStore = std::dynamic_pointer_cast<FilteredBackingStore>(
-        localStoreCachedBackingStore->getBackingStore());
-    if (filteredBackingStore) {
-      // FilteredBackingStore -> HgQueuedBackingStore
-      hgBackingStore = std::dynamic_pointer_cast<HgQueuedBackingStore>(
-          filteredBackingStore->getBackingStore());
-    } else {
-      // LocalStoreCachedBackingStore -> HgQueuedBackingStore
-      hgBackingStore = std::dynamic_pointer_cast<HgQueuedBackingStore>(
-          localStoreCachedBackingStore->getBackingStore());
-    }
+    // BackingStore -> SaplingBackingStore
+    saplingBackingStore =
+        std::dynamic_pointer_cast<SaplingBackingStore>(backingStore);
   }
 
-  if (!hgBackingStore) {
+  if (!saplingBackingStore) {
     // typeid() does not evaluate expressions
     auto& r = *backingStore.get();
     throw newEdenError(
         EdenErrorType::GENERIC_ERROR,
         fmt::format(
-            "mount {} must use HgQueuedBackingStore, type is {}",
+            "mount {} must use SaplingBackingStore, type is {}",
             mountPath,
             typeid(r).name()));
   }
 
-  return hgBackingStore;
+  return saplingBackingStore;
 }
 
 /**
  * Helper function to convert an HgImportTraceEvent to a thrift HgEvent type.
- * Used in EdenServiceHandler::traceHgEvents and
- * EdenServiceHandler::getRetroactiveHgEvents.
+ * Used in EdenServiceHandler::traceHgEvents,
+ * EdenServiceHandler::getRetroactiveHgEvents and
+ * EdenServiceHandler::debugOutstandingHgEvents.
  */
 void convertHgImportTraceEventToHgEvent(
     const HgImportTraceEvent& event,
@@ -1555,6 +1596,22 @@ void convertHgImportTraceEventToHgEvent(
       break;
   }
 
+  if (event.fetchedSource.has_value()) {
+    switch (event.fetchedSource.value()) {
+      case ObjectFetchContext::FetchedSource::Local:
+        te.fetchedSource_ref() = FetchedSource::LOCAL;
+        break;
+      case ObjectFetchContext::FetchedSource::Remote:
+        te.fetchedSource_ref() = FetchedSource::REMOTE;
+        break;
+      case ObjectFetchContext::FetchedSource::Unknown:
+        te.fetchedSource_ref() = FetchedSource::UNKNOWN;
+        break;
+    }
+  } else {
+    te.fetchedSource_ref() = FetchedSource::NOT_AVAILABLE_YET;
+  }
+
   te.unique_ref() = event.unique;
 
   te.manifestNodeId_ref() = event.manifestNodeId.toString();
@@ -1571,8 +1628,8 @@ apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
   auto helper = INSTRUMENT_THRIFT_CALL(DBG3, *mountPoint);
   auto mountHandle = lookupMount(mountPoint);
   auto backingStore = mountHandle.getObjectStore().getBackingStore();
-  std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-      castToHgQueuedBackingStore(
+  std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+      castToSaplingBackingStore(
           backingStore, mountHandle.getEdenMount().getPath());
 
   struct Context {
@@ -1586,7 +1643,7 @@ apache::thrift::ServerStream<HgEvent> EdenServiceHandler::traceHgEvents(
         // on disconnect, release context and the TraceSubscriptionHandle
       });
 
-  context->subHandle = hgBackingStore->getTraceBus().subscribeFunction(
+  context->subHandle = saplingBackingStore->getTraceBus().subscribeFunction(
       fmt::format(
           "hgtrace-{}", mountHandle.getEdenMount().getPath().basename()),
       [publisher_2 = ThriftStreamPublisherOwner{std::move(publisher)},
@@ -2000,6 +2057,7 @@ EdenServiceHandler::streamSelectedChangesSince(
     // pass filtered backing store to object store
     auto objectStore = ObjectStore::create(
         backingStore,
+        server_->getLocalStore(),
         server_->getTreeCache(),
         server_->getServerState()->getStats().copy(),
         server_->getServerState()->getProcessInfoCache(),
@@ -2828,30 +2886,87 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_removeRecursively(
 }
 
 namespace {
-ImmediateFuture<std::unique_ptr<Glob>> detachIfBackgrounded(
-    ImmediateFuture<std::unique_ptr<Glob>> globFuture,
+
+template <typename ReturnType>
+ImmediateFuture<std::unique_ptr<ReturnType>> detachIfBackgrounded(
+    ImmediateFuture<std::unique_ptr<ReturnType>> future,
     const std::shared_ptr<ServerState>& serverState,
     bool background) {
   if (!background) {
-    return globFuture;
+    return future;
   } else {
     folly::futures::detachOn(
-        serverState->getThreadPool().get(), std::move(globFuture).semi());
-    return ImmediateFuture<std::unique_ptr<Glob>>(std::make_unique<Glob>());
+        serverState->getThreadPool().get(), std::move(future).semi());
+    return ImmediateFuture<std::unique_ptr<ReturnType>>(
+        std::make_unique<ReturnType>());
   }
 }
 
+template <typename ReturnType>
+folly::SemiFuture<std::unique_ptr<ReturnType>> serialDetachIfBackgrounded(
+    ImmediateFuture<std::unique_ptr<ReturnType>> future,
+    const std::shared_ptr<apache::thrift::ThriftServer>& thriftServer,
+    const std::shared_ptr<const EdenConfig>& edenConfig,
+    bool background) {
+  folly::Executor::KeepAlive<> serial;
+  if (edenConfig->thriftUseSmallSerialExecutor.getValue()) {
+    serial = folly::SmallSerialExecutor::create(
+        thriftServer->getThreadManager().get());
+  } else {
+    serial =
+        folly::SerialExecutor::create(thriftServer->getThreadManager().get());
+  }
+
+  if (background) {
+    folly::futures::detachOn(serial, std::move(future).semi());
+    future = ImmediateFuture<std::unique_ptr<ReturnType>>(
+        std::make_unique<ReturnType>());
+  }
+
+  if (future.isReady()) {
+    return std::move(future).semi();
+  }
+
+  return std::move(future).semi().via(serial);
+}
+
 ImmediateFuture<folly::Unit> detachIfBackgrounded(
-    ImmediateFuture<folly::Unit> globFuture,
+    ImmediateFuture<folly::Unit> future,
     const std::shared_ptr<ServerState>& serverState,
     bool background) {
   if (!background) {
-    return globFuture;
+    return future;
   } else {
     folly::futures::detachOn(
-        serverState->getThreadPool().get(), std::move(globFuture).semi());
+        serverState->getThreadPool().get(), std::move(future).semi());
     return ImmediateFuture<folly::Unit>(folly::unit);
   }
+}
+
+folly::SemiFuture<folly::Unit> serialDetachIfBackgrounded(
+    ImmediateFuture<folly::Unit> future,
+    const std::shared_ptr<apache::thrift::ThriftServer>& thriftServer,
+    const std::shared_ptr<const EdenConfig>& edenConfig,
+    bool background) {
+  folly::Executor::KeepAlive<> serial;
+  if (edenConfig->thriftUseSmallSerialExecutor.getValue()) {
+    serial = folly::SmallSerialExecutor::create(
+        thriftServer->getThreadManager().get());
+  } else {
+    serial =
+        folly::SerialExecutor::create(thriftServer->getThreadManager().get());
+  }
+
+  if (background) {
+    folly::futures::detachOn(serial, std::move(future).semi());
+    future = ImmediateFuture<folly::Unit>(folly::unit);
+  }
+
+  if (future.isReady()) {
+    return std::move(future).semi();
+  }
+
+  return std::move(future).semi().via(serial);
 }
 
 void maybeLogExpensiveGlob(
@@ -2998,7 +3113,7 @@ EdenServiceHandler::semifuture_predictiveGlobFiles(
     // typeid() does not evaluate expressions
     auto& r = *backingStore.get();
     throw std::runtime_error(folly::to<std::string>(
-        "mount must use HgQueuedBackingStore, type is ", typeid(r).name()));
+        "mount must use SaplingBackingStore, type is ", typeid(r).name()));
   }
 
   auto repo = repo_optional.value();
@@ -3035,7 +3150,7 @@ EdenServiceHandler::semifuture_predictiveGlobFiles(
   }
 
   auto& fetchContext = helper->getPrefetchFetchContext();
-  bool background = *params->background();
+  bool isBackground = *params->background();
 
   auto future =
       ImmediateFuture{
@@ -3063,8 +3178,24 @@ EdenServiceHandler::semifuture_predictiveGlobFiles(
             }
             return tryGlob;
           });
-  return detachIfBackgrounded(std::move(future), serverState, background)
-      .semi();
+
+  if (server_->getServerState()
+          ->getEdenConfig()
+          ->runSerialPrefetch.getValue()) {
+    // The glob code has a very large fan-out that can easily overload the
+    // Thrift CPU worker pool. To combat with that, we limit the execution to a
+    // single thread by using `folly::SerialExecutor` so the glob queries will
+    // not overload the executor.
+    return serialDetachIfBackgrounded<Glob>(
+        std::move(future),
+        server_->getServer(),
+        server_->getServerState()->getEdenConfig(),
+        isBackground);
+  } else {
+    return detachIfBackgrounded<Glob>(
+               std::move(future), serverState, isBackground)
+        .semi();
+  }
 }
 
 folly::SemiFuture<std::unique_ptr<Glob>>
@@ -3096,37 +3227,223 @@ EdenServiceHandler::semifuture_globFiles(std::unique_ptr<GlobParams> params) {
       context,
       server_->getServerState());
 
-  auto globFut = std::move(backgroundFuture)
-                     .thenValue([mountHandle,
+  std::unique_ptr<SuffixGlobRequestScope> suffixGlobRequestScope;
+  auto edenConfig = server_->getServerState()->getEdenConfig();
+
+  auto globFilesOrErrorFuture =
+      std::move(backgroundFuture).thenValue([](auto&&) {
+        return folly::Try<std::unique_ptr<Glob>>{newEdenError(
+            EINVAL,
+            EdenErrorType::ARGUMENT_ERROR,
+            "No suffix queries in input globs, using fallback.")};
+      });
+  if (edenConfig->enableEdenAPISuffixQuery.getValue()) {
+    // Matches **/*.suffix
+    // Captures the .suffix
+    static const re2::RE2 suffixRegex("\\*\\*/\\*(\\.[A-z0-9]+)");
+    std::vector<std::string> suffixGlobs;
+    std::vector<std::string> nonSuffixGlobs;
+
+    // Copying to new vectors, since we want to keep the original around
+    // in case we need to fall back to the legacy pathway
+    for (const auto& glob : *params->globs_ref()) {
+      std::string capture;
+      if (re2::RE2::FullMatch(glob, suffixRegex, &capture)) {
+        suffixGlobs.push_back(capture);
+      } else {
+        nonSuffixGlobs.push_back(glob);
+      }
+    }
+
+    if (!suffixGlobs.empty() && nonSuffixGlobs.empty()) {
+      // Only use BSSM if there are only suffix queries
+      XLOG(DBG3)
+          << "globFiles request is only suffix globs, offloading to EdenAPI";
+      auto suffixGlobLogString = globber.logString(suffixGlobs);
+      suffixGlobRequestScope = std::make_unique<SuffixGlobRequestScope>(
+          suffixGlobLogString, server_->getServerState(), context);
+
+      // Do this again because the previous value has been consumed
+      ImmediateFuture<folly::Unit> backgroundFuture2{std::in_place};
+      if (isBackground) {
+        backgroundFuture2 = makeNotReadyImmediateFuture();
+      }
+
+      // Attempt to resolve all EdenAPI futures. If any of
+      // them result in an error we will fall back to local lookup
+      auto combinedFuture =
+          std::move(backgroundFuture2)
+              .thenValue([revisions = params->revisions_ref().value(),
+                          mountHandle,
+                          suffixGlobs = std::move(suffixGlobs),
+                          context = context.copy()](auto&&) mutable {
+                auto& store = mountHandle.getObjectStore();
+                auto rootId =
+                    mountHandle.getEdenMountPtr()->getCheckedOutRootId();
+                std::vector<ImmediateFuture<BackingStore::GetGlobFilesResult>>
+                    globFilesResultFutures;
+                for (auto& id : revisions) {
+                  // ID is either a 20b binary hash or a 40b human readable
+                  // text version globFiles takes as input the human readable
+                  // version, so convert using the store's parse method
+                  globFilesResultFutures.push_back(store.getGlobFiles(
+                      store.parseRootId(id), suffixGlobs, context));
+                }
+                if (revisions.empty()) {
+                  // Use current commit hash
+                  XLOG(DBG3) << "No commit hash in input, using current hash";
+                  globFilesResultFutures.push_back(store.getGlobFiles(
+                      rootId, std::move(suffixGlobs), context));
+                }
+                return collectAllSafe(std::move(globFilesResultFutures));
+              });
+
+      globFilesOrErrorFuture =
+          std::move(combinedFuture)
+              .thenValue([mountHandle,
+                          wantDtype = params->wantDtype_ref().value(),
+                          includeDotfiles =
+                              params->includeDotfiles_ref().value(),
+                          &context](auto&& globResults) mutable {
+                // Offload suffix queries to EdenAPI
+                // params ignored in this pathway:
+                // Commands related to prefetching or the working copy
+                //   - prefetchFiles
+                //   - suppressFileList
+                //   - prefetchMetadata
+                //   - Sync
+                // - searchRoot - root is always the repository root
+                // - predictiveGlob - This pathway only accepts suffixes
+                // - listOnlyFiles - Only files will be returned
+                auto edenMount = mountHandle.getEdenMountPtr();
+                std::vector<ImmediateFuture<GlobEntry>> globEntryFuts;
+                for (auto& glob : globResults) {
+                  std::string originHash =
+                      mountHandle.getObjectStore().renderRootId(glob.rootId);
+                  for (auto& entry : glob.globFiles) {
+                    if (!includeDotfiles) {
+                      bool skip_due_to_dotfile = false;
+                      auto rp = RelativePath(std::string_view{entry});
+                      for (auto component : rp.components()) {
+                        // Use facebook::eden string_view
+                        if (string_view{component.view()}.starts_with(".")) {
+                          XLOG(DBG4) << "Skipping dotfile: " << component.view()
+                                     << " in " << entry;
+                          skip_due_to_dotfile = true;
+                          break;
+                        }
+                      }
+                      if (skip_due_to_dotfile) {
+                        continue;
+                      }
+                    }
+
+                    if (wantDtype) {
+                      // TODO(T192408118) get the root tree a single time per
+                      // glob instead of per-entry
+                      globEntryFuts.emplace_back(
+                          edenMount->getObjectStore()
+                              ->getRootTree(
+                                  std::move(glob.rootId), context.copy())
+                              .thenValue(
+                                  [entry, edenMount, context = context.copy()](
+                                      auto&& tree) mutable {
+                                    auto stringPiece =
+                                        folly::StringPiece{entry};
+                                    return ::facebook::eden::getTreeOrTreeEntry(
+                                        std::move(tree.tree),
+                                        RelativePath{stringPiece},
+                                        edenMount->getObjectStore(),
+                                        std::move(context));
+                                  })
+                              .thenValue([entry, originHash](
+                                             auto&& treeEntry) mutable {
+                                if (TreeEntry* treeEntryPtr =
+                                        std::get_if<TreeEntry>(&treeEntry)) {
+                                  auto dtype = treeEntryPtr->getDtype();
+                                  return ImmediateFuture<GlobEntry>{GlobEntry{
+                                      std::move(entry),
+                                      static_cast<OsDtype>(dtype),
+                                      std::move(originHash)}};
+                                } else {
+                                  EDEN_BUG()
+                                      << "Received a Tree when expecting TreeEntry for path "
+                                      << entry;
+                                }
+                              }));
+                    } else {
+                      globEntryFuts.emplace_back(ImmediateFuture<GlobEntry>{
+                          folly::Try<GlobEntry>{GlobEntry{
+                              std::move(entry), DT_UNKNOWN, originHash}}});
+                    }
+                  }
+                }
+                return collectAllSafe(std::move(globEntryFuts))
+                    .thenValue([wantDtype](auto&& globEntries) {
+                      auto glob = std::make_unique<Glob>();
+                      for (GlobEntry& globEntry : globEntries) {
+                        glob->matchingFiles_ref().value().emplace_back(
+                            globEntry.file);
+                        if (wantDtype) {
+                          // This can happen if a file is missing on disk but
+                          // exists on the server. Instead of silently failing
+                          // use the local lookup.
+                          if (globEntry.dType == DT_UNKNOWN) {
+                            throw newEdenError(
+                                ENOENT,
+                                EdenErrorType::POSIX_ERROR,
+                                "could not get Dtype for file ",
+                                globEntry.file);
+                          }
+                          glob->dtypes_ref().value().emplace_back(
+                              globEntry.dType);
+                        }
+                        glob->originHashes_ref().value().emplace_back(
+                            globEntry.originHash);
+                      }
+                      return std::move(glob);
+                    });
+              });
+    }
+  }
+  auto globFut = std::move(globFilesOrErrorFuture)
+                     .thenError([mountHandle,
                                  serverState = server_->getServerState(),
                                  globs = std::move(*params->globs()),
                                  globber = std::move(globber),
                                  &context](auto&&) mutable {
+                       // Fallback to local if
+                       // - No suffixes given, or the config is diabled
+                       // and globFilesOrErrorFuture is the default value
+                       // - An error was encountered while using the
+                       // SaplingRemoteAPI method
+                       XLOG(DBG3) << "Using local globFiles";
+                       // TODO: Insert ODS log for globs here
                        return globber.glob(
                            mountHandle.getEdenMountPtr(),
                            serverState,
                            std::move(globs),
                            context);
                      });
+
   globFut = std::move(globFut).ensure(
-      [mountHandle, helper = std::move(helper), params = std::move(params)] {});
-
-  globFut = detachIfBackgrounded(
-      std::move(globFut), server_->getServerState(), isBackground);
-
-  if (globFut.isReady()) {
-    return std::move(globFut).semi();
-  }
+      [mountHandle,
+       helper = std::move(helper),
+       params = std::move(params),
+       suffixGlobRequestScope = std::move(suffixGlobRequestScope)] {});
 
   // The glob code has a very large fan-out that can easily overload the Thrift
   // CPU worker pool. To combat with that, we limit the execution to a single
   // thread by using `folly::SerialExecutor` so the glob queries will not
   // overload the executor.
-  auto serial = folly::SerialExecutor::create(
-      server_->getServer()->getThreadManager().get());
-  return std::move(globFut).semi().via(serial);
+  return serialDetachIfBackgrounded<Glob>(
+      std::move(globFut),
+      server_->getServer(),
+      server_->getServerState()->getEdenConfig(),
+      isBackground);
 }
 
+// DEPRECATED. Use semifuture_prefetchFilesV2 instead.
 folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_prefetchFiles(
     std::unique_ptr<PrefetchParams> params) {
   auto mountHandle = lookupMount(params->mountPoint());
@@ -3181,22 +3498,96 @@ folly::SemiFuture<folly::Unit> EdenServiceHandler::semifuture_prefetchFiles(
     // Thrift CPU worker pool. To combat with that, we limit the execution to a
     // single thread by using `folly::SerialExecutor` so the glob queries will
     // not overload the executor.
-    auto serial = folly::SerialExecutor::create(
-        server_->getServer()->getThreadManager().get());
-
-    if (isBackground) {
-      folly::futures::detachOn(serial, std::move(globFut).semi());
-      globFut = ImmediateFuture<folly::Unit>(folly::unit);
-    }
-
-    if (globFut.isReady()) {
-      return std::move(globFut).semi();
-    }
-
-    return std::move(globFut).semi().via(serial);
+    return serialDetachIfBackgrounded(
+        std::move(globFut),
+        server_->getServer(),
+        server_->getServerState()->getEdenConfig(),
+        isBackground);
   } else {
     return detachIfBackgrounded(
                std::move(globFut), server_->getServerState(), isBackground)
+        .semi();
+  }
+}
+
+folly::SemiFuture<std::unique_ptr<PrefetchResult>>
+EdenServiceHandler::semifuture_prefetchFilesV2(
+    std::unique_ptr<PrefetchParams> params) {
+  TaskTraceBlock block{"EdenServiceHandler::prefetchFilesV2"};
+  auto mountHandle = lookupMount(params->mountPoint());
+  if (!params->revisions_ref().value().empty()) {
+    params->revisions_ref() = resolveRootsWithLastFilter(
+        params->revisions_ref().value(), mountHandle);
+  }
+  ThriftGlobImpl globber{*params};
+  auto helper = INSTRUMENT_THRIFT_CALL(
+      DBG2,
+      *params->mountPoint_ref(),
+      toLogArg(*params->globs_ref()),
+      globber.logString());
+  auto& context = helper->getFetchContext();
+  auto isBackground = *params->background();
+  auto returnPrefetchedFiles = *params->returnPrefetchedFiles();
+
+  ImmediateFuture<folly::Unit> backgroundFuture{std::in_place};
+  if (isBackground) {
+    backgroundFuture = makeNotReadyImmediateFuture();
+  }
+
+  maybeLogExpensiveGlob(
+      *params->globs(),
+      *params->searchRoot_ref(),
+      globber,
+      context,
+      server_->getServerState());
+
+  auto globFut =
+      std::move(backgroundFuture)
+          .thenValue([mountHandle,
+                      serverState = server_->getServerState(),
+                      globs = std::move(*params->globs()),
+                      globber = std::move(globber),
+                      context = helper->getPrefetchFetchContext().copy()](
+                         auto&&) mutable {
+            return globber.glob(
+                mountHandle.getEdenMountPtr(),
+                serverState,
+                std::move(globs),
+                context);
+          });
+
+  // If returnPrefetchedFiles is set then return the list of globs
+  auto prefetchResult = std::move(globFut)
+                            .thenValue([returnPrefetchedFiles](
+                                           std::unique_ptr<Glob> glob) mutable {
+                              std::unique_ptr<PrefetchResult> result =
+                                  std::make_unique<PrefetchResult>();
+                              if (!returnPrefetchedFiles) {
+                                return result;
+                              }
+                              result->prefetchedFiles_ref() = std::move(*glob);
+                              return result;
+                            })
+                            .ensure([mountHandle,
+                                     helper = std::move(helper),
+                                     params = std::move(params)] {});
+  if (server_->getServerState()
+          ->getEdenConfig()
+          ->runSerialPrefetch.getValue()) {
+    // The glob code has a very large fan-out that can easily overload the
+    // Thrift CPU worker pool. To combat with that, we limit the execution to a
+    // single thread by using `folly::SerialExecutor` so the glob queries will
+    // not overload the executor.
+    return serialDetachIfBackgrounded<PrefetchResult>(
+        std::move(prefetchResult),
+        server_->getServer(),
+        server_->getServerState()->getEdenConfig(),
+        isBackground);
+  } else {
+    return detachIfBackgrounded<PrefetchResult>(
+               std::move(prefetchResult),
+               server_->getServerState(),
+               isBackground)
         .semi();
   }
 }
@@ -3484,13 +3875,13 @@ EdenServiceHandler::semifuture_debugGetBlob(
         "debugGetScmBlob",
         *server_->getServerState()->getStats());
     auto backingStore = edenMount->getObjectStore()->getBackingStore();
-    std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-        castToHgQueuedBackingStore(backingStore, edenMount->getPath());
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
 
     blobFutures.emplace_back(transformToBlobFromOrigin(
         edenMount,
         id,
-        hgBackingStore->getBlobLocal(proxyHash),
+        saplingBackingStore->getBlobLocal(proxyHash),
         DataFetchOrigin::LOCAL_BACKING_STORE));
   }
   if (originFlags.contains(FROMWHERE_REMOTE_BACKING_STORE)) {
@@ -3500,12 +3891,12 @@ EdenServiceHandler::semifuture_debugGetBlob(
         "debugGetScmBlob",
         *server_->getServerState()->getStats());
     auto backingStore = edenMount->getObjectStore()->getBackingStore();
-    std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-        castToHgQueuedBackingStore(backingStore, edenMount->getPath());
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
     blobFutures.emplace_back(transformToBlobFromOrigin(
         edenMount,
         id,
-        hgBackingStore->getBlobRemote(proxyHash),
+        saplingBackingStore->getBlobRemote(proxyHash),
         DataFetchOrigin::REMOTE_BACKING_STORE));
   }
   if (originFlags.contains(FROMWHERE_ANYWHERE)) {
@@ -3570,11 +3961,11 @@ EdenServiceHandler::semifuture_debugGetBlobMetadata(
         "debugGetScmBlob",
         *server_->getServerState()->getStats());
     auto backingStore = edenMount->getObjectStore()->getBackingStore();
-    std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-        castToHgQueuedBackingStore(backingStore, edenMount->getPath());
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
 
     auto metadata =
-        hgBackingStore->getLocalBlobMetadata(proxyHash).value_or(nullptr);
+        saplingBackingStore->getLocalBlobMetadata(proxyHash).value_or(nullptr);
 
     blobFutures.emplace_back(transformToBlobMetadataFromOrigin(
         edenMount,
@@ -3589,12 +3980,12 @@ EdenServiceHandler::semifuture_debugGetBlobMetadata(
         "debugGetScmBlob",
         *server_->getServerState()->getStats());
     auto backingStore = edenMount->getObjectStore()->getBackingStore();
-    std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-        castToHgQueuedBackingStore(backingStore, edenMount->getPath());
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
 
     blobFutures.emplace_back(
-        ImmediateFuture{
-            hgBackingStore->getBlobMetadataImpl(id, proxyHash, fetchContext)}
+        ImmediateFuture{saplingBackingStore->getBlobMetadataEnqueue(
+                            id, proxyHash, fetchContext)}
             .thenValue([edenMount, id](BackingStore::GetBlobMetaResult result) {
               return transformToBlobMetadataFromOrigin(
                   edenMount,
@@ -3621,6 +4012,105 @@ EdenServiceHandler::semifuture_debugGetBlobMetadata(
                    response->metadatas() = std::move(blobs);
                    return response;
                  }))
+      .semi();
+}
+
+folly::SemiFuture<std::unique_ptr<DebugGetScmTreeResponse>>
+EdenServiceHandler::semifuture_debugGetTree(
+    std::unique_ptr<DebugGetScmTreeRequest> request) {
+  const auto& mountid = request->mountId();
+  const auto& idStr = request->id();
+  const auto& origins = request->origins();
+  auto helper =
+      INSTRUMENT_THRIFT_CALL(DBG2, *mountid, logHash(*idStr), *origins);
+
+  auto mountHandle = lookupMount(*mountid);
+  auto edenMount = mountHandle.getEdenMountPtr();
+  auto id = edenMount->getObjectStore()->parseObjectId(*idStr);
+  auto originFlags = DataFetchOriginFlags::raw(*origins);
+  auto store = edenMount->getObjectStore();
+
+  std::vector<ImmediateFuture<ScmTreeWithOrigin>> treeFutures;
+
+  if (originFlags.contains(FROMWHERE_MEMORY_CACHE)) {
+    treeFutures.emplace_back(transformToTreeFromOrigin(
+        edenMount,
+        id,
+        folly::Try<std::shared_ptr<const Tree>>{store->getTreeCache()->get(id)},
+        DataFetchOrigin::MEMORY_CACHE));
+  }
+
+  if (originFlags.contains(FROMWHERE_DISK_CACHE)) {
+    auto localStore = server_->getLocalStore();
+    treeFutures.emplace_back(localStore->getTree(id).thenTry(
+        [edenMount, id, store](auto&& tree) mutable {
+          return transformToTreeFromOrigin(
+              std::move(edenMount),
+              id,
+              std::move(tree),
+              DataFetchOrigin::DISK_CACHE);
+        }));
+  }
+
+  if (originFlags.contains(FROMWHERE_LOCAL_BACKING_STORE)) {
+    auto proxyHash = HgProxyHash::load(
+        server_->getLocalStore().get(),
+        id,
+        "debugGetTree",
+        *server_->getServerState()->getStats());
+
+    auto backingStore = edenMount->getObjectStore()->getBackingStore();
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
+
+    treeFutures.emplace_back(transformToTreeFromOrigin(
+        edenMount,
+        id,
+        folly::Try<std::shared_ptr<const Tree>>{
+            saplingBackingStore->getTreeLocal(id, proxyHash)},
+        DataFetchOrigin::LOCAL_BACKING_STORE));
+  }
+
+  if (originFlags.contains(FROMWHERE_REMOTE_BACKING_STORE)) {
+    auto proxyHash = HgProxyHash::load(
+        server_->getLocalStore().get(),
+        id,
+        "debugGetTree",
+        *server_->getServerState()->getStats());
+    auto backingStore = edenMount->getObjectStore()->getBackingStore();
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+        castToSaplingBackingStore(backingStore, edenMount->getPath());
+    treeFutures.emplace_back(transformToTreeFromOrigin(
+        edenMount,
+        id,
+        saplingBackingStore->getTreeRemote(
+            proxyHash.path().copy(),
+            proxyHash.revHash(),
+            id,
+            helper->getFetchContext()),
+        DataFetchOrigin::REMOTE_BACKING_STORE));
+  }
+
+  if (originFlags.contains(FROMWHERE_ANYWHERE)) {
+    treeFutures.emplace_back(store->getTree(id, helper->getFetchContext())
+                                 .thenTry([edenMount, id](auto&& tree) mutable {
+                                   return transformToTreeFromOrigin(
+                                       std::move(edenMount),
+                                       id,
+                                       std::move(tree),
+                                       DataFetchOrigin::ANYWHERE);
+                                 }));
+  }
+
+  return wrapImmediateFuture(
+             std::move(helper),
+             collectAllSafe(std::move(treeFutures))
+                 .thenValue([](std::vector<ScmTreeWithOrigin> trees) {
+                   auto response = std::make_unique<DebugGetScmTreeResponse>();
+                   response->trees() = std::move(trees);
+                   return response;
+                 }))
+      .ensure([mountHandle] {})
       .semi();
 }
 
@@ -3863,7 +4353,30 @@ void EdenServiceHandler::debugOutstandingThriftRequests(
 
   const auto requestsLockedPtr = outstandingThriftRequests_.rlock();
   for (const auto& item : *requestsLockedPtr) {
-    outstandingRequests.push_back(populateThriftRequestMetadata(item.second));
+    outstandingRequests.emplace_back(
+        populateThriftRequestMetadata(item.second));
+  }
+}
+
+void EdenServiceHandler::debugOutstandingHgEvents(
+    std::vector<HgEvent>& outstandingEvents,
+    std::unique_ptr<std::string> mountPoint) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
+
+  auto mountHandle = lookupMount(mountPoint);
+
+  auto backingStore = mountHandle.getObjectStore().getBackingStore();
+  std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+      castToSaplingBackingStore(
+          backingStore, mountHandle.getEdenMount().getPath());
+  const auto hgEvents = saplingBackingStore->getOutstandingHgEvents();
+
+  auto processInfoCache =
+      mountHandle.getEdenMount().getServerState()->getProcessInfoCache();
+  for (const auto& event : hgEvents) {
+    HgEvent thriftEvent;
+    convertHgImportTraceEventToHgEvent(event, *processInfoCache, thriftEvent);
+    outstandingEvents.emplace_back(thriftEvent);
   }
 }
 
@@ -3984,23 +4497,25 @@ void EdenServiceHandler::stopRecordingBackingStoreFetch(
   auto helper = INSTRUMENT_THRIFT_CALL(DBG3);
   for (const auto& backingStore : server_->getBackingStores()) {
     auto filePaths = backingStore->stopRecordingFetch();
-    // recording is only implemented for HgQueuedBackingStore at the moment
-    // TODO: remove these dynamic casts in favor of a QueryInterface method
-    // BackingStore -> LocalStoreCachedBackingStore
-    std::shared_ptr<HgQueuedBackingStore> hgBackingStore{nullptr};
-    auto localStoreCachedBackingStore =
-        std::dynamic_pointer_cast<LocalStoreCachedBackingStore>(backingStore);
-    if (!localStoreCachedBackingStore) {
-      // BackingStore -> HgQueuedBackingStore
-      hgBackingStore =
-          std::dynamic_pointer_cast<HgQueuedBackingStore>(backingStore);
+
+    std::shared_ptr<SaplingBackingStore> saplingBackingStore{nullptr};
+
+    // If FilteredFS is enabled, we'll see a FilteredBackingStore first
+    auto filteredBackingStore =
+        std::dynamic_pointer_cast<FilteredBackingStore>(backingStore);
+    if (filteredBackingStore) {
+      // FilteredBackingStore -> SaplingBackingStore
+      saplingBackingStore = std::dynamic_pointer_cast<SaplingBackingStore>(
+          filteredBackingStore->getBackingStore());
     } else {
-      // LocalStoreCachedBackingStore -> HgQueuedBackingStore
-      hgBackingStore = std::dynamic_pointer_cast<HgQueuedBackingStore>(
-          localStoreCachedBackingStore->getBackingStore());
+      // BackingStore -> SaplingBackingStore
+      saplingBackingStore =
+          std::dynamic_pointer_cast<SaplingBackingStore>(backingStore);
     }
-    if (hgBackingStore) {
-      (*results.fetchedFilePaths_ref())["HgQueuedBackingStore"].insert(
+
+    // recording is only implemented for SaplingBackingStore at the moment
+    if (saplingBackingStore) {
+      (*results.fetchedFilePaths_ref())["SaplingBackingStore"].insert(
           filePaths.begin(), filePaths.end());
     }
   }
@@ -4051,10 +4566,10 @@ void EdenServiceHandler::debugCompactLocalStorage() {
 }
 
 // TODO(T119221752): add more BackingStore subclasses to this command. We
-// currently only support HgQueuedBackingStores
+// currently only support SaplingBackingStores
 int64_t EdenServiceHandler::debugDropAllPendingRequests() {
   auto helper = INSTRUMENT_THRIFT_CALL(DBG1);
-  auto stores = server_->getHgQueuedBackingStores();
+  auto stores = server_->getSaplingBackingStores();
   int64_t numDropped = 0;
   for (auto& store : stores) {
     numDropped += store->dropAllPendingRequestsFromQueue();
@@ -4205,10 +4720,10 @@ void EdenServiceHandler::getStatInfo(
     result.mountPointJournalInfo_ref() = mountPointJournalInfo;
   }
 
+  auto counters = fb303::ServiceData::get()->getCounters();
   if (statsMask & eden_constants::STATS_COUNTERS_) {
     // Get the counters and set number of inodes unloaded by periodic unload
     // job.
-    auto counters = fb303::ServiceData::get()->getCounters();
     result.counters_ref() = counters;
     size_t periodicUnloadCount{0};
     for (auto& handle : server_->getMountPoints()) {
@@ -4244,7 +4759,7 @@ void EdenServiceHandler::getStatInfo(
   }
 
   if (statsMask & eden_constants::STATS_CACHE_STATS_) {
-    const auto blobCacheStats = server_->getBlobCache()->getStats();
+    const auto blobCacheStats = server_->getBlobCache()->getStats(counters);
     result.blobCacheStats_ref() = CacheStats{};
     result.blobCacheStats_ref()->entryCount_ref() = blobCacheStats.objectCount;
     result.blobCacheStats_ref()->totalSizeInBytes_ref() =
@@ -4255,7 +4770,7 @@ void EdenServiceHandler::getStatInfo(
         blobCacheStats.evictionCount;
     result.blobCacheStats_ref()->dropCount_ref() = blobCacheStats.dropCount;
 
-    const auto treeCacheStats = server_->getTreeCache()->getStats();
+    const auto treeCacheStats = server_->getTreeCache()->getStats(counters);
     result.treeCacheStats_ref() = CacheStats{};
     result.treeCacheStats_ref()->entryCount_ref() = treeCacheStats.objectCount;
     result.treeCacheStats_ref()->totalSizeInBytes_ref() =
@@ -4264,6 +4779,7 @@ void EdenServiceHandler::getStatInfo(
     result.treeCacheStats_ref()->missCount_ref() = treeCacheStats.missCount;
     result.treeCacheStats_ref()->evictionCount_ref() =
         treeCacheStats.evictionCount;
+    result.treeCacheStats_ref()->dropCount_ref() = treeCacheStats.dropCount;
   }
 }
 
@@ -4419,7 +4935,7 @@ void EdenServiceHandler::getRetroactiveThriftRequestEvents(
   for (auto const& event : bufferEvents) {
     ThriftRequestEvent thriftEvent;
     convertThriftRequestTraceEventToThriftRequestEvent(event, thriftEvent);
-    thriftEvents.push_back(std::move(thriftEvent));
+    thriftEvents.emplace_back(std::move(thriftEvent));
   }
 
   result.events() = std::move(thriftEvents);
@@ -4430,18 +4946,18 @@ void EdenServiceHandler::getRetroactiveHgEvents(
     std::unique_ptr<GetRetroactiveHgEventsParams> params) {
   auto mountHandle = lookupMount(params->mountPoint());
   auto backingStore = mountHandle.getObjectStore().getBackingStore();
-  std::shared_ptr<HgQueuedBackingStore> hgBackingStore =
-      castToHgQueuedBackingStore(
+  std::shared_ptr<SaplingBackingStore> saplingBackingStore =
+      castToSaplingBackingStore(
           backingStore, mountHandle.getEdenMount().getPath());
 
   std::vector<HgEvent> thriftEvents;
-  auto bufferEvents = hgBackingStore->getActivityBuffer().getAllEvents();
+  auto bufferEvents = saplingBackingStore->getActivityBuffer().getAllEvents();
   thriftEvents.reserve(bufferEvents.size());
   for (auto const& event : bufferEvents) {
     HgEvent thriftEvent{};
     convertHgImportTraceEventToHgEvent(
         event, *server_->getServerState()->getProcessInfoCache(), thriftEvent);
-    thriftEvents.push_back(std::move(thriftEvent));
+    thriftEvents.emplace_back(std::move(thriftEvent));
   }
 
   result.events() = std::move(thriftEvents);
@@ -4467,7 +4983,7 @@ void EdenServiceHandler::getRetroactiveInodeEvents(
     InodeEvent thriftEvent{};
     ConvertInodeTraceEventToThriftInodeEvent(event, thriftEvent);
     thriftEvent.path() = event.getPath();
-    thriftEvents.push_back(std::move(thriftEvent));
+    thriftEvents.emplace_back(std::move(thriftEvent));
   }
 
   result.events() = std::move(thriftEvents);
@@ -4504,6 +5020,7 @@ std::optional<folly::exception_wrapper> getFaultError(
 } // namespace
 
 void EdenServiceHandler::injectFault(unique_ptr<FaultDefinition> fault) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
   auto& injector = server_->getServerState()->getFaultInjector();
   if (*fault->block_ref()) {
     injector.injectBlock(
@@ -4552,12 +5069,14 @@ void EdenServiceHandler::injectFault(unique_ptr<FaultDefinition> fault) {
 }
 
 bool EdenServiceHandler::removeFault(unique_ptr<RemoveFaultArg> fault) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
   auto& injector = server_->getServerState()->getFaultInjector();
   return injector.removeFault(
       *fault->keyClass_ref(), *fault->keyValueRegex_ref());
 }
 
 int64_t EdenServiceHandler::unblockFault(unique_ptr<UnblockFaultArg> info) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
   auto& injector = server_->getServerState()->getFaultInjector();
   auto error = getFaultError(info->errorType_ref(), info->errorMessage_ref());
 
@@ -4582,6 +5101,16 @@ int64_t EdenServiceHandler::unblockFault(unique_ptr<UnblockFaultArg> info) {
   } else {
     return injector.unblock(keyClass, keyValueRegex);
   }
+}
+
+void EdenServiceHandler::getBlockedFaults(
+    GetBlockedFaultsResponse& out,
+    std::unique_ptr<GetBlockedFaultsRequest> request) {
+  auto helper = INSTRUMENT_THRIFT_CALL(DBG2);
+  auto& injector = server_->getServerState()->getFaultInjector();
+  auto result = injector.getBlockedFaults(*request->keyclass_ref());
+
+  out.keyValues() = std::move(result);
 }
 
 void EdenServiceHandler::reloadConfig() {
@@ -4636,7 +5165,7 @@ EdenServiceHandler::streamStartStatus() {
       // We raced with eden start completing. Let's re-collect the status and
       // return as if EdenFS has completed. The EdenFS status should be set
       // before the startup logger completes, so at this point the status
-      // should be something other than starting. Client should not nessecarily
+      // should be something other than starting. Client should not necessarily
       // rely on this though.
       fillDaemonInfo(result);
       return {

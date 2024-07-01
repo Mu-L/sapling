@@ -16,9 +16,8 @@ import {
   simulateMessageFromServer,
   openCommitInfoSidebar,
 } from '../../testUtils';
-import {render, waitFor} from '@testing-library/react';
+import {render, waitFor, act} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import {act} from 'react-dom/test-utils';
 import * as utils from 'shared/utils';
 
 describe('AmendOperation', () => {
@@ -48,7 +47,7 @@ describe('AmendOperation', () => {
     });
   });
 
-  it('on error, restores edited commit message to try again', () => {
+  it('on error, restores edited commit message to try again', async () => {
     act(() => openCommitInfoSidebar());
     act(() => {
       CommitInfoTestUtils.clickToEditTitle();
@@ -62,9 +61,7 @@ describe('AmendOperation', () => {
     });
 
     jest.spyOn(utils, 'randomId').mockImplementationOnce(() => '1111');
-    act(() => {
-      CommitInfoTestUtils.clickAmendButton();
-    });
+    await CommitInfoTestUtils.clickAmendButton();
 
     CommitInfoTestUtils.expectIsNOTEditingTitle();
 
@@ -88,7 +85,7 @@ describe('AmendOperation', () => {
     });
   });
 
-  it('on error, merges messages when restoring edited commit message to try again', () => {
+  it('on error, merges messages when restoring edited commit message to try again', async () => {
     act(() => openCommitInfoSidebar());
 
     act(() => {
@@ -103,9 +100,7 @@ describe('AmendOperation', () => {
     });
 
     jest.spyOn(utils, 'randomId').mockImplementationOnce(() => '2222');
-    act(() => {
-      CommitInfoTestUtils.clickAmendButton();
-    });
+    await CommitInfoTestUtils.clickAmendButton();
     CommitInfoTestUtils.expectIsNOTEditingTitle();
 
     act(() => {

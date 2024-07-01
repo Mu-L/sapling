@@ -46,14 +46,14 @@ use crate::context::ServerContext;
 use crate::handlers::build_router;
 use crate::middleware::OdsMiddleware;
 use crate::middleware::RequestDumperMiddleware;
-use crate::scuba::EdenApiScubaHandler;
+use crate::scuba::SaplingRemoteApiScubaHandler;
 
-pub type EdenApi = MononokeHttpHandler<Router>;
+pub type SaplingRemoteApi = MononokeHttpHandler<Router>;
 
 pub fn build(
     fb: FacebookInit,
     logger: Logger,
-    mut scuba: MononokeScubaSampleBuilder,
+    scuba: MononokeScubaSampleBuilder,
     mononoke: Arc<Mononoke>,
     will_exit: Arc<AtomicBool>,
     test_friendly_loging: bool,
@@ -62,7 +62,7 @@ pub fn build(
     configs: Arc<MononokeConfigs>,
     common_config: &CommonConfig,
     readonly: bool,
-) -> Result<EdenApi, Error> {
+) -> Result<SaplingRemoteApi, Error> {
     let ctx = ServerContext::new(mononoke, will_exit);
 
     let log_middleware = if test_friendly_loging {
@@ -84,7 +84,7 @@ pub fn build(
             fb,
             logger.clone(),
             common_config.internal_identity.clone(),
-            ClientEntryPoint::EdenApi,
+            ClientEntryPoint::SaplingRemoteApi,
         ))
         .add(ServerIdentityMiddleware::new(HeaderValue::from_static(
             "edenapi_server",
@@ -97,14 +97,14 @@ pub fn build(
             rate_limiter,
             readonly,
         ))
-        .add(RequestDumperMiddleware::new(fb))
+        .add(RequestDumperMiddleware::new(
+            fb,
+            common_config.edenapi_dumper_scuba_table.clone(),
+        ))
         .add(LoadMiddleware::new())
         .add(log_middleware)
         .add(OdsMiddleware::new())
-        .add(<ScubaMiddleware<EdenApiScubaHandler>>::new({
-            scuba.add("log_tag", "EdenAPI Request Processed");
-            scuba
-        }))
+        .add(<ScubaMiddleware<SaplingRemoteApiScubaHandler>>::new(scuba))
         .add(TimerMiddleware::new())
         .build(router);
 

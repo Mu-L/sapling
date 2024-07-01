@@ -176,6 +176,7 @@ globalopts = cmdutil._typedflags(
             _("when to paginate (boolean, always, auto, or never)"),
             _("TYPE"),
         ),
+        ("", "reason", [], _("why this runs, usually set by automation (ADVANCED)")),
     ]
 )
 
@@ -806,7 +807,7 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
     else:
         hg.clean(repo, node, show_stats=False)
         repo.dirstate.setbranch(branch)
-        cmdutil.revert(ui, repo, rctx, repo.dirstate.parents(), forcecopytracing=True)
+        cmdutil.revert(ui, repo, rctx, repo.dirstate.parents())
         # Ensure reverse-renames are preserved during the backout. In theory
         # cmdutil.revert() should handle this, but it's extremely complex, so
         # let's just double check it here.
@@ -4391,6 +4392,20 @@ def merge(ui, repo, node=None, **opts):
     if not node:
         node = repo[destutil.destmerge(repo)].node()
 
+    max_distance = ui.configint("merge", "max-distance")
+    if max_distance:
+        # merge distance is computed as the number of commit between the common ancestors and the merge
+        distance = repo.dageval(
+            lambda: len(
+                range(children(gcaall(dot() + lookup(node))), dot() + lookup(node))
+            )
+        )
+        if distance > max_distance:
+            raise error.Abort(
+                _("merging distant ancestors is not supported for this repository"),
+                hint=_("use rebase instead"),
+            )
+
     if opts.get("preview"):
         # find nodes that are ancestors of p2 but not of p1
         p1 = repo.lookup(".")
@@ -5228,7 +5243,7 @@ def remove(ui, repo, *pats, **opts):
 @command(
     "rename|move|mv",
     [
-        ("", "mark", None, _("mark as a rename without actual renaming")),
+        ("", "mark", None, _("mark a rename that has already occurred")),
         ("", "amend", None, _("amend the current commit to mark a rename")),
         ("A", "after", None, _("alias to --mark (DEPRECATED)")),
         ("f", "force", None, _("forcibly copy over an existing managed file")),

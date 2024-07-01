@@ -1,9 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
 
-  $ configure modernclient
   $ newclientrepo
 
   $ setconfig merge.followcopies=1

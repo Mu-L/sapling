@@ -14,19 +14,20 @@ import {Internal} from '../Internal';
 import {Link} from '../Link';
 import {Tooltip} from '../Tooltip';
 import {clipboardCopyLink, clipboardCopyText} from '../clipboard';
+import {Button} from '../components/Button';
 import {T, t} from '../i18n';
 import {CircleEllipsisIcon} from '../icons/CircleEllipsisIcon';
 import {CircleExclamationIcon} from '../icons/CircleExclamationIcon';
 import {configBackedAtom, useAtomGet} from '../jotaiUtils';
 import {PullRevOperation} from '../operations/PullRevOperation';
 import {useRunOperation} from '../operationsState';
+import platform from '../platform';
 import {exactRevset} from '../types';
 import {codeReviewProvider, diffSummary} from './CodeReviewInfo';
 import {DiffCommentsDetails} from './DiffComments';
 import {openerUrlForDiffUrl} from './github/GitHubUrlOpener';
 import {SyncStatus, syncStatusAtom} from './syncStatus';
 import * as stylex from '@stylexjs/stylex';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {useAtomValue} from 'jotai';
 import {Component, Suspense, useState} from 'react';
 import {Icon} from 'shared/Icon';
@@ -41,10 +42,11 @@ export const showDiffNumberConfig = configBackedAtom<boolean>('isl.show-diff-num
  */
 export function DiffInfo({commit, hideActions}: {commit: CommitInfo; hideActions: boolean}) {
   const repo = useAtomValue(codeReviewProvider);
-  const diffId = commit.diffId;
+  const {diffId} = commit;
   if (repo == null || diffId == null) {
     return null;
   }
+
   // Do not show diff info (and "Ship It" button) if there are successors.
   // Users should look at the diff info and buttons from the successor commit instead.
   // But the diff number can still be useful so show it.
@@ -69,6 +71,19 @@ const styles = stylex.create({
       ':hover': 'underline',
     },
   },
+  diffFollower: {
+    alignItems: 'center',
+    display: 'inline-flex',
+    gap: '5px',
+    opacity: '0.9',
+    fontSize: '90%',
+    padding: '0 var(--halfpad)',
+  },
+  diffFollowerIcon: {
+    '::before': {
+      fontSize: '90%',
+    },
+  },
 });
 
 export function DiffBadge({
@@ -90,6 +105,21 @@ export function DiffBadge({
     <Link href={openerUrl} xstyle={styles.diffBadge}>
       <provider.DiffBadgeContent diff={diff} children={children} syncStatus={syncStatus} />
     </Link>
+  );
+}
+
+export function DiffFollower({commit}: {commit: CommitInfo}) {
+  if (!commit.isFollower) {
+    return null;
+  }
+
+  return (
+    <Tooltip title={t('This commit follows the Pull Request of its nearest descendant above')}>
+      <span {...stylex.props(styles.diffFollower)}>
+        <Icon icon="fold-up" size="S" {...stylex.props(styles.diffFollowerIcon)} />
+        <T>follower</T>
+      </span>
+    </Tooltip>
   );
 }
 
@@ -138,6 +168,8 @@ function DiffInfoInner({
       <DiffNumber url={info.url}>{provider.formatDiffNumber(diffId)}</DiffNumber>
       {shouldHideActions ? null : syncStatus === SyncStatus.RemoteIsNewer ? (
         <DownloadNewVersionButton diffId={diffId} provider={provider} />
+      ) : syncStatus === SyncStatus.BothChanged ? (
+        <DownloadNewVersionButton diffId={diffId} provider={provider} bothChanged />
       ) : syncStatus === SyncStatus.LocalIsNewer ? (
         <ResubmitSyncButton commit={commit} provider={provider} />
       ) : null}
@@ -148,19 +180,33 @@ function DiffInfoInner({
 function DownloadNewVersionButton({
   diffId,
   provider,
+  bothChanged,
 }: {
   diffId: DiffId;
   provider: UICodeReviewProvider;
+  bothChanged?: boolean;
 }) {
   const runOperation = useRunOperation();
-  return (
-    <Tooltip
-      title={t('$provider has a newer version of this Diff. Click to download the newer version.', {
+  const tooltip = bothChanged
+    ? t(
+        'Both remote and local verisons have changed.\n\n$provider has a new version of this Diff, but this commit has also changed locally since it was last submitted. You can download the new remote version, but it may not include your other local changes.',
+        {replace: {$provider: provider.label}},
+      )
+    : t('$provider has a newer version of this Diff. Click to download the newer version.', {
         replace: {$provider: provider.label},
-      })}>
-      <VSCodeButton
-        appearance="icon"
-        onClick={() => {
+      });
+
+  return (
+    <Tooltip title={tooltip}>
+      <Button
+        icon
+        onClick={async () => {
+          if (bothChanged) {
+            const confirmed = await platform.confirm(tooltip);
+            if (confirmed !== true) {
+              return;
+            }
+          }
           if (Internal.diffDownloadOperation != null) {
             runOperation(Internal.diffDownloadOperation(exactRevset(diffId)));
           } else {
@@ -169,7 +215,7 @@ function DownloadNewVersionButton({
         }}>
         <Icon icon="cloud-download" slot="start" />
         <T>Download New Version</T>
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }
@@ -187,8 +233,8 @@ function ResubmitSyncButton({
   return (
     <Tooltip
       title={t('This commit has changed locally since it was last submitted. Click to resubmit.')}>
-      <VSCodeButton
-        appearance="icon"
+      <Button
+        icon
         data-testid="commit-submit-button"
         onClick={async () => {
           const confirmation = await confirmShouldSubmit('submit', [commit]);
@@ -204,7 +250,7 @@ function ResubmitSyncButton({
         }}>
         <Icon icon="cloud-upload" slot="start" />
         <T>Submit</T>
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }
@@ -237,12 +283,12 @@ function DiffComments({diff, diffId}: {diff: DiffSummary; diffId: DiffId}) {
   }
   return (
     <Tooltip trigger="click" component={() => <DiffCommentsDetails diffId={diffId} />}>
-      <VSCodeButton appearance="icon">
+      <Button icon>
         <span className="diff-comments-count">
           {diff.commentCount}
           <Icon icon={diff.anyUnresolvedComments ? 'comment-unresolved' : 'comment'} />
         </span>
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }

@@ -1,11 +1,9 @@
-#debugruntest-compatible
 
 #require no-eden
 
 
   $ setconfig config.use-rust=True
 We need to set edenapi.url for now since working copy at the moment requires this to be set
-  $ configure modernclient
 
 Test config:
   $ setconfig testsection.subsection1=foo

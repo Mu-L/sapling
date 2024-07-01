@@ -21,8 +21,7 @@ import {
   COMMIT,
   expectYouAreHerePointAt,
 } from '../testUtils';
-import {fireEvent, render, screen, within} from '@testing-library/react';
-import {act} from 'react-dom/test-utils';
+import {fireEvent, render, screen, within, act} from '@testing-library/react';
 import * as utils from 'shared/utils';
 
 const {clickGoto} = CommitTreeListTestUtils;
@@ -64,18 +63,18 @@ describe('operations', () => {
     jest.spyOn(utils, 'randomId').mockRestore();
   });
 
-  it('shows running operation', () => {
+  it('shows running operation', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
 
     expect(
       within(screen.getByTestId('progress-container')).getByText('sl goto --rev c'),
     ).toBeInTheDocument();
   });
 
-  it('shows stdout from running command', () => {
+  it('shows stdout from running command', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
 
     act(() => {
       simulateMessageFromServer({
@@ -104,12 +103,12 @@ describe('operations', () => {
       });
     });
 
-    expect(screen.queryByText('another message')).toBeInTheDocument();
+    expect(screen.queryByText('another message', {exact: false})).toBeInTheDocument();
   });
 
-  it('shows stderr from running command', () => {
+  it('shows stderr from running command', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
 
     act(() => {
       simulateMessageFromServer({
@@ -127,7 +126,7 @@ describe('operations', () => {
       });
     });
 
-    expect(screen.queryByText('some progress...')).toBeInTheDocument();
+    expect(screen.queryByText('some progress...', {exact: false})).toBeInTheDocument();
 
     act(() => {
       simulateMessageFromServer({
@@ -138,12 +137,12 @@ describe('operations', () => {
       });
     });
 
-    expect(screen.queryByText('another message')).toBeInTheDocument();
+    expect(screen.queryByText('another message', {exact: false})).toBeInTheDocument();
   });
 
-  it('shows abort on long-running commands', () => {
+  it('shows abort on long-running commands', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
     expect(abortButton()).toBeNull();
 
     act(() => {
@@ -152,9 +151,9 @@ describe('operations', () => {
     expect(abortButton()).toBeInTheDocument();
   });
 
-  it('shows successful exit status', () => {
+  it('shows successful exit status', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
 
     act(() => {
       simulateMessageFromServer({
@@ -179,9 +178,9 @@ describe('operations', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows unsuccessful exit status', () => {
+  it('shows unsuccessful exit status', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
 
     act(() => {
       simulateMessageFromServer({
@@ -206,9 +205,9 @@ describe('operations', () => {
     ).toBeInTheDocument();
   });
 
-  it('reacts to abort', () => {
+  it('reacts to abort', async () => {
     mockNextOperationId('1');
-    clickGoto('c');
+    await clickGoto('c');
     act(() => {
       jest.advanceTimersByTime(600000);
     });
@@ -234,9 +233,9 @@ describe('operations', () => {
   });
 
   describe('queued commands', () => {
-    it('optimistically shows queued commands', () => {
+    it('optimistically shows queued commands', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -248,9 +247,9 @@ describe('operations', () => {
       });
 
       mockNextOperationId('2');
-      clickGoto('a');
+      await clickGoto('a');
       mockNextOperationId('3');
-      clickGoto('b');
+      await clickGoto('b');
 
       expect(
         within(screen.getByTestId('queued-commands')).getByText('sl goto --rev a'),
@@ -260,9 +259,9 @@ describe('operations', () => {
       ).toBeInTheDocument();
     });
 
-    it('dequeues when the server starts the next command', () => {
+    it('dequeues when the server starts the next command', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -274,7 +273,7 @@ describe('operations', () => {
       });
 
       mockNextOperationId('2');
-      clickGoto('a');
+      await clickGoto('a');
       expect(
         within(screen.getByTestId('queued-commands')).getByText('sl goto --rev a'),
       ).toBeInTheDocument();
@@ -291,9 +290,9 @@ describe('operations', () => {
       expect(screen.queryByTestId('queued-commands')).not.toBeInTheDocument();
     });
 
-    it('takes queued command info from server', () => {
+    it('takes queued command info from server', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -305,9 +304,9 @@ describe('operations', () => {
       });
 
       mockNextOperationId('2');
-      clickGoto('a');
+      await clickGoto('a');
       mockNextOperationId('3');
-      clickGoto('b');
+      await clickGoto('b');
 
       act(() => {
         simulateMessageFromServer({
@@ -333,9 +332,9 @@ describe('operations', () => {
       ).not.toBeInTheDocument();
     });
 
-    it('error running command cancels queued commands', () => {
+    it('error running command cancels queued commands', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -347,9 +346,9 @@ describe('operations', () => {
       });
 
       mockNextOperationId('2');
-      clickGoto('a');
+      await clickGoto('a');
       mockNextOperationId('3');
-      clickGoto('b');
+      await clickGoto('b');
 
       expect(screen.queryByTestId('queued-commands')).toBeInTheDocument();
       act(() => {
@@ -365,7 +364,7 @@ describe('operations', () => {
       expect(screen.queryByTestId('queued-commands')).not.toBeInTheDocument();
     });
 
-    it('force clears optimistic state after fetching after an operation has finished', () => {
+    it('force clears optimistic state after fetching after an operation has finished', async () => {
       jest.spyOn(tracker, 'track').mockImplementation(() => null);
       const commitsBeforeOperations = {
         value: [
@@ -423,7 +422,7 @@ describe('operations', () => {
 
       dragAndDropCommits('c', 'a');
       fireEvent.click(screen.getByText('Run Rebase'));
-      clickGoto('d'); // checkout d, which is now optimistic from the rebase, since it'll actually become d2.
+      await clickGoto('d'); // checkout d, which is now optimistic from the rebase, since it'll actually become d2.
 
       act(() =>
         simulateMessageFromServer({
@@ -535,9 +534,9 @@ describe('operations', () => {
   });
 
   describe('progress messages', () => {
-    it('shows progress messages', () => {
+    it('shows progress messages', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -560,9 +559,9 @@ describe('operations', () => {
       ).toBeInTheDocument();
     });
 
-    it('hide progress on new stdout', () => {
+    it('hide progress on new stdout', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({
@@ -603,9 +602,9 @@ describe('operations', () => {
   });
 
   describe('inline progress', () => {
-    it('shows progress messages next to commits', () => {
+    it('shows progress messages next to commits', async () => {
       mockNextOperationId('1');
-      clickGoto('c');
+      await clickGoto('c');
 
       act(() => {
         simulateMessageFromServer({

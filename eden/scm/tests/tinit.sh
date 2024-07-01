@@ -51,7 +51,17 @@ newclientrepo() {
   if [ -z "$server" ]; then
       server="test:${reponame}_server"
   fi
-  hg clone --config "init.use-rust=True" --config "clone.use-rust=True" --shallow -q "$server" "$TESTTMP/$reponame"
+  hg clone --config "clone.use-rust=True" --config "remotefilelog.reponame=$reponame" --shallow -q "$server" "$TESTTMP/$reponame"
+
+  local drawdaginput=""
+  while IFS= read line
+  do
+    drawdaginput="${drawdaginput}:${line}\n"
+  done
+  if [ -n "${drawdaginput}" ]; then
+      cd "$TESTTMP/${server#*:}"
+      echo "${drawdaginput}" | drawdag
+  fi
 
   cd "$TESTTMP/$reponame"
   for book in $bookmarks ; do
@@ -117,7 +127,6 @@ clone() {
   fi
 
   hg clone -q --shallow "$serverurl" "$clientname" "$@" \
-    --config "init.use-rust=True" \
     --config "extensions.remotefilelog=" \
     --config "extensions.remotenames=" \
     --config "extensions.treemanifest=" \
@@ -171,13 +180,13 @@ configure() {
       mutation)
         setconfig \
             experimental.evolution=obsolete \
-            mutation.enabled=true mutation.record=true mutation.date="0 0" \
+            mutation.enabled=true mutation.record=true \
             visibility.enabled=true
         ;;
       mutation-norecord)
         setconfig \
             experimental.evolution=obsolete \
-            mutation.enabled=true mutation.record=false mutation.date="0 0" \
+            mutation.enabled=true mutation.record=false \
             visibility.enabled=true
         ;;
       evolution)
@@ -280,7 +289,7 @@ setglobalconfig() {
 # Set config items that enable modern features.
 setmodernconfig() {
   enable remotenames amend
-  setconfig experimental.narrow-heads=true visibility.enabled=true mutation.record=true mutation.enabled=true mutation.date="0 0" experimental.evolution=obsolete remotenames.rename.default=remote
+  setconfig experimental.narrow-heads=true visibility.enabled=true mutation.record=true mutation.enabled=true experimental.evolution=obsolete remotenames.rename.default=remote
 }
 
 # Read config from stdin (usually a heredoc).

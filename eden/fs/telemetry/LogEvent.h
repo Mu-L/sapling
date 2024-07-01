@@ -43,6 +43,20 @@ struct StarGlob {
   }
 };
 
+struct SuffixGlob {
+  static constexpr const char* type = "suffix_glob";
+
+  double duration = 0.0;
+  std::string glob_request;
+  std::string client_cmdline;
+
+  void populate(DynamicEvent& event) const {
+    event.addDouble("duration", duration);
+    event.addString("glob_request", glob_request);
+    event.addString("client_scope", client_cmdline);
+  }
+};
+
 struct MissingProxyHash {
   static constexpr const char* type = "missing_proxy_hash";
 
@@ -134,6 +148,7 @@ struct FinishedCheckout {
 struct FinishedMount {
   static constexpr const char* type = "mount";
 
+  std::string backing_store_type;
   std::string repo_type;
   std::string repo_source;
   std::string fs_channel_type;
@@ -379,6 +394,20 @@ struct FetchMiss {
     event.addString("reason", reason);
     event.addBool("retry", retry);
   }
+};
+
+/**
+ * So that we know how many hosts have EdenFS handling high numbers of fuse
+ * requests at once as we rollout rate limiting.
+ *
+ * This honestly could be an ODS counter, but we don't have ODS on some
+ * platforms (CI), so logging it to scuba so that we have this available to
+ * monitor on all platforms.
+ */
+struct ManyLiveFsChannelRequests {
+  static constexpr const char* type = "high_fschannel_requests";
+
+  void populate(DynamicEvent& /*event*/) const {}
 };
 
 } // namespace facebook::eden

@@ -15,6 +15,7 @@ use bytes::Bytes;
 use futures::future::try_join4;
 use futures::SinkExt;
 use futures::StreamExt;
+use gix_hash::ObjectId;
 use gotham::mime;
 use gotham::state::FromState;
 use gotham::state::State;
@@ -29,6 +30,7 @@ use gotham_ext::response::TryIntoResponse;
 use http::HeaderMap;
 use hyper::Body;
 use hyper::Response;
+use mononoke_types::ChangesetId;
 use packetline::encode::delim_to_write;
 use packetline::encode::flush_to_write;
 use packetline::encode::write_data_channel;
@@ -36,10 +38,14 @@ use packetline::encode::write_text_packetline;
 use packetline::FLUSH_LINE;
 use packfile::pack::DeltaForm;
 use packfile::pack::PackfileWriter;
+use protocol::generator::bonsai_git_mappings_by_bonsai;
 use protocol::generator::fetch_response;
 use protocol::generator::ls_refs_response;
 use protocol::generator::ref_oid_mapping;
+use protocol::generator::shallow_info as fetch_shallow_info;
 use protocol::types::PackfileConcurrency;
+use protocol::types::ShallowInfoResponse;
+use rustc_hash::FxHashSet;
 use tokio::io::ErrorKind;
 use tokio::sync::mpsc;
 use tokio_util::io::CopyToBytes;
@@ -50,24 +56,26 @@ use crate::command::Command;
 use crate::command::FetchArgs;
 use crate::command::LsRefsArgs;
 use crate::command::RequestCommand;
+use crate::model::GitMethod;
+use crate::model::GitMethodInfo;
+use crate::model::GitMethodVariant;
 use crate::model::RepositoryParams;
 use crate::model::RepositoryRequestContext;
 use crate::model::ResponseType;
 use crate::model::Service;
-use crate::GitServerContext;
 
 /// The header for the packfile section of the response
 const PACKFILE_HEADER: &[u8] = b"packfile";
 /// The header for the acknowledgements section of the response
 const ACKNOWLEDGEMENTS_HEADER: &[u8] = b"acknowledgments";
-/// The header for the shallow info section of the response
+/// The header for the wanted-refs section of the response
 const WANTED_REFS_HEADER: &[u8] = b"wanted-refs";
+/// The header for the shallow info section of the response
+const SHALLOW_INFO_HEADER: &[u8] = b"shallow-info";
 /// Acknowledgement that the object sent by the client exists on the server
 const ACK: &str = "ACK";
 /// Acknowledgement that the object sent by the client does not exist on the server
 const NAK: &[u8] = b"NAK";
-/// Flag representing that the server is ready to send the required packfile to the client
-const READY_FLAG: &[u8] = b"ready";
 
 #[derive(Debug, Clone)]
 struct FetchResponseHeaders {
@@ -76,6 +84,7 @@ struct FetchResponseHeaders {
     wanted_refs: Option<Bytes>,
     packfile_uris: Option<Bytes>,
     pack_header: Option<Bytes>,
+    shallow_response: Option<ShallowInfoResponse>,
 }
 
 async fn pack_header() -> Result<Bytes, Error> {
@@ -90,6 +99,7 @@ fn concurrency(context: &RepositoryRequestContext) -> PackfileConcurrency {
             concurrency.trees_and_blobs,
             concurrency.commits,
             concurrency.tags,
+            context.repo_configs.common.git_memory_upper_bound,
         ),
         None => PackfileConcurrency::standard(),
     }
@@ -118,7 +128,6 @@ async fn acknowledgements(
             )
         })?;
     let mut output_buffer = vec![];
-    let mut header = None;
     write_text_packetline(ACKNOWLEDGEMENTS_HEADER, &mut output_buffer).await?;
     if entries.is_empty() && !args.haves.is_empty() {
         // None of the Git Shas provided by the client are recognized by the server
@@ -132,26 +141,67 @@ async fn acknowledgements(
             )
             .await?;
         }
-        // Provide the ready flag to indicate that we are ready to send the required
-        // packfile to the client
-        write_text_packetline(READY_FLAG, &mut output_buffer).await?;
-        // Since we identified at least one Git Sha that was requested by the client,
-        // we are in a position to send the packfile to the client. Populate the header
-        // of the packfile
-        header = Some(pack_header().await?);
     }
-    // Add a delim line to indicate the end of the acknowledgements section. Note that
-    // the delim line will not be followed by a newline character
-    delim_to_write(&mut output_buffer).await?;
-    Ok((Some(Bytes::from(output_buffer)), header))
+    Ok((Some(Bytes::from(output_buffer)), None))
+}
+
+async fn git_commits(
+    context: Arc<RepositoryRequestContext>,
+    bonsais: Vec<ChangesetId>,
+) -> Result<impl Iterator<Item = ObjectId>, Error> {
+    bonsai_git_mappings_by_bonsai(&context.ctx, &context.repo, bonsais)
+        .await
+        .map(|entries| entries.into_values())
+        .with_context(|| {
+            format!(
+                "Failed to fetch bonsai_git_mapping for repo {}",
+                context.repo.name
+            )
+        })
 }
 
 async fn shallow_info(
-    _context: Arc<RepositoryRequestContext>,
-    _args: Arc<FetchArgs>,
-) -> Result<Option<Bytes>, Error> {
-    // TODO(rajshar): Implement shallow-info support
-    Ok(None)
+    context: Arc<RepositoryRequestContext>,
+    args: Arc<FetchArgs>,
+) -> Result<(Option<Bytes>, Option<ShallowInfoResponse>), Error> {
+    let request = args.into_shallow_request();
+    // If the client did not request a shallow clone/fetch, then we can return early
+    if !request.shallow_requested() {
+        return Ok((None, None));
+    }
+    let mut output_buffer = vec![];
+    write_text_packetline(SHALLOW_INFO_HEADER, &mut output_buffer).await?;
+    let response = fetch_shallow_info(
+        context.ctx.clone(),
+        &context.repo,
+        args.into_shallow_request(),
+    )
+    .await?;
+    let boundary_git_commits =
+        git_commits(context.clone(), response.boundary_commits.clone()).await?;
+    for boundary_commit in boundary_git_commits {
+        write_text_packetline(
+            format!("shallow {}", boundary_commit.to_hex()).as_bytes(),
+            &mut output_buffer,
+        )
+        .await?;
+    }
+    let git_commits = git_commits(context.clone(), response.commits.clone())
+        .await?
+        .collect::<FxHashSet<_>>();
+    for client_shallow_commit in request.shallow {
+        if git_commits.contains(&client_shallow_commit) {
+            write_text_packetline(
+                format!("unshallow {}", client_shallow_commit.to_hex()).as_bytes(),
+                &mut output_buffer,
+            )
+            .await?;
+        }
+    }
+    // Add a delim line to indicate the end of the shallow info section. Note that
+    // the delim line will not be followed by a newline character
+    delim_to_write(&mut output_buffer).await?;
+    Ok((Some(Bytes::from(output_buffer)), Some(response)))
 }
 
 async fn wanted_refs(
@@ -214,20 +264,25 @@ impl FetchResponseHeaders {
                 .await
                 .context("Failed to generate packfile uris")
         };
-        let ((acknowledgements, pack_header), shallow_info, wanted_refs, packfile_uris) =
-            try_join4(
-                acknowledgements_future,
-                shallow_info_future,
-                wanted_refs_future,
-                packfile_uris_future,
-            )
-            .await?;
+        let (
+            (acknowledgements, pack_header),
+            (shallow_info, shallow_response),
+            wanted_refs,
+            packfile_uris,
+        ) = try_join4(
+            acknowledgements_future,
+            shallow_info_future,
+            wanted_refs_future,
+            packfile_uris_future,
+        )
+        .await?;
         Ok(Self {
             acknowledgements,
             shallow_info,
             wanted_refs,
             packfile_uris,
             pack_header,
+            shallow_response,
         })
     }
 
@@ -242,6 +297,10 @@ impl Iterator for FetchResponseHeaders {
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(acknowledgements) = self.acknowledgements.take() {
             Some(acknowledgements)
+        } else if !self.include_pack() {
+            // If we are not sending the packfile, we do not send any other section
+            // except acknowledgements
+            None
         } else if let Some(shallow_info) = self.shallow_info.take() {
             Some(shallow_info)
         } else if let Some(wanted_refs) = self.wanted_refs.take() {
@@ -262,6 +321,35 @@ async fn get_body(state: &mut State) -> Result<Bytes, HttpError> {
         .map_err(HttpError::e500)
 }
 
+fn git_method_info(command: &Command, repo: String) -> GitMethodInfo {
+    let (method, variants) = match command {
+        Command::LsRefs(_) => (GitMethod::LsRefs, vec![GitMethodVariant::Standard]),
+        Command::Fetch(ref fetch_args) => {
+            let method = if fetch_args.haves.is_empty() && fetch_args.done {
+                GitMethod::Clone
+            } else {
+                GitMethod::Pull
+            };
+            let mut variants = vec![];
+            if fetch_args.is_shallow() {
+                variants.push(GitMethodVariant::Shallow);
+            }
+            if fetch_args.is_filter() {
+                variants.push(GitMethodVariant::Filter);
+            }
+            if variants.is_empty() {
+                variants.push(GitMethodVariant::Standard);
+            }
+            (method, variants)
+        }
+    };
+    GitMethodInfo {
+        method,
+        variants,
+        repo,
+    }
+}
+
 pub async fn upload_pack(state: &mut State) -> Result<Response<Body>, HttpError> {
     let body_bytes = get_body(state).await?;
     // We got a flush line packet to keep the connection alive. Just return Ok.
@@ -273,8 +361,11 @@ pub async fn upload_pack(state: &mut State) -> Result<Response<Body>, HttpError>
     let request_command =
         RequestCommand::parse_from_packetline(&body_bytes).map_err(HttpError::e400)?;
     let repo_name = RepositoryParams::borrow_from(state).repo_name();
-    let context = GitServerContext::borrow_from(state);
-    let request_context = context.request_context(&repo_name)?;
+    let request_context = RepositoryRequestContext::instantiate(
+        state,
+        git_method_info(&request_command.command, repo_name),
+    )
+    .await?;
     state.put(Service::GitUploadPack);
     state.put(ResponseType::Result);
     match request_command.command {
@@ -317,20 +408,24 @@ pub async fn fetch(
     let sink_writer = SinkWriter::new(CopyToBytes::new(
         PollSender::new(writer).sink_map_err(|_| std::io::Error::from(ErrorKind::BrokenPipe)),
     ));
-    let fetch_response_headers =
+    let mut fetch_response_headers =
         FetchResponseHeaders::from_request(request_context.clone(), args.clone()).await?;
     let include_pack = fetch_response_headers.include_pack();
+    let shallow_response = fetch_response_headers.shallow_response.take();
     let bytes_stream = ResponseStream::new(try_stream! {
-        let mut pack_reader = tokio_stream::wrappers::ReceiverStream::new(reader).ready_chunks(100_000_000);
         for header in fetch_response_headers {
             yield header;
         }
-        while let Some(chunks) = pack_reader.next().await {
-            for chunk in chunks {
-                let mut buf = Vec::with_capacity(chunk.len());
-                // Write the actual packfile content to the data channel
-                write_data_channel(chunk.as_ref(), &mut buf).await?;
-                yield Bytes::from(buf);
+        // Only include the packfile if it is requested by client
+        if include_pack {
+            let mut pack_reader = tokio_stream::wrappers::ReceiverStream::new(reader).ready_chunks(100_000_000);
+            while let Some(chunks) = pack_reader.next().await {
+                for chunk in chunks {
+                    let mut buf = Vec::with_capacity(chunk.len());
+                    // Write the actual packfile content to the data channel
+                    write_data_channel(chunk.as_ref(), &mut buf).await?;
+                    yield Bytes::from(buf);
+                }
             }
         }
         let mut buf = Vec::with_capacity(FLUSH_LINE.len());
@@ -341,14 +436,10 @@ pub async fn fetch(
     tokio::spawn({
         let request_context = request_context.clone();
         async move {
-            // If we don't need to send back a packfile, just return early
-            if !include_pack {
-                return Ok(());
-            }
             let response_stream = fetch_response(
                 request_context.ctx.clone(),
                 &request_context.repo,
-                args.into_request(concurrency(&request_context)),
+                args.into_request(concurrency(&request_context), shallow_response),
             )
             .await?;
             let mut pack_writer = PackfileWriter::new(

@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -7,7 +6,7 @@
   $ enable amend rebase reset
   $ setconfig experimental.evolution=obsolete
   $ setconfig visibility.enabled=true
-  $ setconfig mutation.record=true mutation.enabled=true mutation.date="0 0"
+  $ setconfig mutation.record=true mutation.enabled=true
 
   $ newrepo
   $ drawdag << EOS

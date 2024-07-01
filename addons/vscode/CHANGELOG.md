@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.1.52
+
+### Jun 24 2024
+
+- Fix extra spaces when typing in a TextField
+- Made styling of some components more consistent
+- Don't consider Untitled files as unsaved
+- Fix split confirmation buttons to the top so they can always be clicked on small screens
+- Added ability to create a bookmark from the context menu
+- Fix a crash when selecting an optimistic commit in some cases
+- Made the size of the description in the Commit Info sidebar more consistent
+
+## 0.1.51
+
+### Jun 3 2024
+
+- Fix fields in the commit info view sometimes not focusing when you start editing them
+- Pressing the spacebar while a commit field is focused will now start editing the field
+- Add a config to turn off condensing stacks of obsolete commits
+- Show unsaved files under uncommitted changes, with actions to save all
+- When committing / amending, warn if there are unsaved files that are part of the repo, with option to save all
+- Add "only fill empty fields" option when filling a commit message from a previous commit, and make this the default
+- "Open all files" now won't open generated files by default, unless all changes are to generated files
+- "Open all files" when `workbench.editor.enablePreview` is true now skips using preview mode so more than one file is opened
+- Show number of selected changes that will be amended / commit, like "2/3"
+- Add context menu option to browse your repo at a given public commit, if enabled by the `fbcodereview.code-browser-url` config
+- Similarly, add context menu action to copy a file's url when right clicking on a file, if the `fbcodereview.code-browser-url` config is set up
+- Improve colors in high contrast themes (notably lines connecting to "You are here")
+- Fix commit info view fields not always tokenizing the last token
+
+## 0.1.50
+
+### May 15 2024
+
+- Auto-mark files with conflicts as resolved when saving them
+- Show cwds as relative paths from their repo repository
+- Automatically run custom configured merge tools instead of requiring a button press
+- Fix issue where changing available workspace folders in vscode doesn't update the available cwds in ISL
+- Show Split and Edit Stack modals immediately with a loading spinner
+- Delay loading Split and Edit Stack data until running commands have finished, to prevent stale data
+- Add selection checkboxes when viewing uncommitted changes in "tree" mode
+- Add button to clear out the current commit message in the commit info view
+- Reduce truncation of long bookmarks
+- Fix left/right arrows in interactive split sometimes not moving all selected lines
+
+## 0.1.49
+
+### May 2 2024
+
+- Updates to merge conflict handling
+  - Conflicts in deleted files can now be either deleted or marked as resolved
+  - Conflicts in deleted files are shown more clearly as being deleted, and why
+  - Show the commit being rebased on top of the destination, to make it easier to understand
+    - This feature will require a new version of Sapling to work
+  - Made labels more consistent, now use the terms "Source - being rebased" and "Dest - rebasing onto" consistently
+  - Support for external merge tools, if configured. See `sl help config.merge-tools` for more information.
+  - Automatically run merge drivers before continueing a rebase
+  - Make Continue / Abort conflict buttons more prominent
+- Quickly change your cwd via a dropdown button for the Repository Info & cwd dropdown. You can still open the menu for information.
+- Increase the drag target on the right side of commits so you can more easily drag and drop rebase
+- Purge added files when partially discaring, making discard more consistent
+- Handle commits with no titles, but also prevent them from being created by split
+- Merge driver output with `\r` is rendered better in command output
+
+## 0.1.48
+
+### Apr 19 2024
+
+- Fix wrong avatar briefly showing when making a new commit
+- Throttle Watchman subscription if it's firing too often
+- Only subscribe to Watchman while ISL is open
+- Show "Follower" on commits marked as followers via `sl pr follow` (Thanks to [@rejc2](https://github.com/rejc2)!)
+
+## 0.1.47
+
+### Apr 11 2024
+
+- Allow deleting bookmarks via context menu
+- Allow scrolling the list of shelves
+
 ## 0.1.46
 
 ### Apr 5 2024

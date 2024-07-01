@@ -33,8 +33,8 @@ pub(crate) enum LazyFile {
     /// A local LfsStore entry.
     Lfs(Bytes, LfsPointersEntry),
 
-    /// An EdenApi FileEntry.
-    EdenApi(FileEntry),
+    /// An SaplingRemoteApi FileEntry.
+    SaplingRemoteApi(FileEntry),
 }
 
 impl LazyFile {
@@ -45,18 +45,17 @@ impl LazyFile {
             ContentStore(_, _) => None,
             IndexedLog(ref entry) => Some(entry.key().hgid),
             Lfs(_, ref ptr) => Some(ptr.hgid()),
-            EdenApi(ref entry) => Some(entry.key().hgid),
+            SaplingRemoteApi(ref entry) => Some(entry.key().hgid),
         }
     }
 
     /// Compute's the aux data associated with this file from the content.
     pub(crate) fn aux_data(&mut self) -> Result<FileAuxData> {
-        // TODO(meyer): Implement the rest of the aux data fields
         let aux_data = match self {
             LazyFile::Lfs(content, _) => FileAuxData::from_content(content),
-            LazyFile::EdenApi(entry) if entry.aux_data.is_some() => {
+            LazyFile::SaplingRemoteApi(entry) if entry.aux_data.is_some() => {
                 entry.aux_data().cloned().ok_or_else(|| {
-                    anyhow::anyhow!("Invalid EdenAPI entry in LazyFile. Aux data is empty")
+                    anyhow::anyhow!("Invalid SaplingRemoteAPI entry in LazyFile. Aux data is empty")
                 })?
             }
             _ => {
@@ -74,8 +73,8 @@ impl LazyFile {
             IndexedLog(ref mut entry) => strip_hg_file_metadata(&entry.content()?)?.0,
             Lfs(ref blob, _) => blob.clone(),
             ContentStore(ref blob, _) => strip_hg_file_metadata(blob)?.0,
-            // TODO(meyer): Convert EdenApi to use minibytes
-            EdenApi(ref entry) => strip_hg_file_metadata(&entry.data()?.into())?.0,
+            // TODO(meyer): Convert SaplingRemoteApi to use minibytes
+            SaplingRemoteApi(ref entry) => strip_hg_file_metadata(&entry.data()?.into())?.0,
         })
     }
 
@@ -86,7 +85,7 @@ impl LazyFile {
             IndexedLog(ref mut entry) => strip_hg_file_metadata(&entry.content()?)?,
             Lfs(ref blob, ref ptr) => (blob.clone(), ptr.copy_from().clone()),
             ContentStore(ref blob, _) => strip_hg_file_metadata(blob)?,
-            EdenApi(ref entry) => strip_hg_file_metadata(&entry.data()?.into())?,
+            SaplingRemoteApi(ref entry) => strip_hg_file_metadata(&entry.data()?.into())?,
         })
     }
 
@@ -97,7 +96,7 @@ impl LazyFile {
             IndexedLog(ref entry) => entry.content()?,
             Lfs(ref blob, ref ptr) => rebuild_metadata(blob.clone(), ptr),
             ContentStore(ref blob, _) => blob.clone(),
-            EdenApi(ref entry) => entry.data()?.into(),
+            SaplingRemoteApi(ref entry) => entry.data()?.into(),
         })
     }
 
@@ -110,7 +109,7 @@ impl LazyFile {
                 flags: None,
             },
             ContentStore(_, ref meta) => meta.clone(),
-            EdenApi(ref entry) => entry.metadata()?.clone(),
+            SaplingRemoteApi(ref entry) => entry.metadata()?.clone(),
         })
     }
 
@@ -119,7 +118,7 @@ impl LazyFile {
         use LazyFile::*;
         Ok(match self {
             IndexedLog(ref entry) => Some(entry.clone().with_key(key)),
-            EdenApi(ref entry) => Some(Entry::new(
+            SaplingRemoteApi(ref entry) => Some(Entry::new(
                 key,
                 entry.data()?.into(),
                 entry.metadata()?.clone(),
@@ -151,7 +150,7 @@ impl TryFrom<FileEntry> for LfsPointersEntry {
         if e.metadata()?.is_lfs() {
             Ok(LfsPointersEntry::from_bytes(e.data()?, e.key().hgid)?)
         } else {
-            bail!("failed to convert EdenApi FileEntry to LFS pointer, is_lfs is false")
+            bail!("failed to convert SaplingRemoteApi FileEntry to LFS pointer, is_lfs is false")
         }
     }
 }

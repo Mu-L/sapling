@@ -33,6 +33,7 @@ from . import (
     changegroup,
     changelog2,
     color,
+    commitscheme,
     connectionpool,
     context,
     dirstate as dirstatemod,
@@ -1379,11 +1380,6 @@ class localrepository:
             self.ui._rcfg,
         )
 
-    @util.propertycache
-    def _gitcopytrace(self):
-        gitdir = git.readgitdir(self)
-        return bindings.copytrace.gitcopytrace(gitdir)
-
     def _constructmanifest(self):
         # This is a temporary function while we migrate from manifest to
         # manifestlog. It allows bundlerepo to intercept the manifest creation.
@@ -1461,6 +1457,10 @@ class localrepository:
                 )
 
         return dirstate_reimplementation.eden_dirstate(self, self.ui, self.root)
+
+    @util.propertycache
+    def commitscheme(self):
+        return commitscheme.schemes(self)
 
     def _dirstatevalidate(self, node: bytes) -> bytes:
         self.changelog.rev(node)
@@ -2623,23 +2623,35 @@ class localrepository:
         if (
             metamatched
             and node is not None
-            # some filectxs do not support rawdata or flags
-            and hasattr(fctx, "rawdata")
-            and hasattr(fctx, "rawflags")
-            # some (external) filelogs do not have addrawrevision
-            and hasattr(flog, "addrawrevision")
-            # parents must match to be able to reuse rawdata
+            # "nodemap" is a remotefilelog detail
+            and hasattr(flog, "nodemap")
             and fctx.filelog().parents(node) == (fparent1, fparent2)
         ):
-            # node is different from fparents, no need to check manifest flag
-            changelist.append(fname)
             if node in flog.nodemap:
+                changelist.append(fname)
                 self.ui.debug("reusing %s filelog node (exact match)\n" % fname)
                 return node
-            self.ui.debug("reusing %s filelog rawdata\n" % fname)
-            return flog.addrawrevision(
-                fctx.rawdata(), tr, linkrev, fparent1, fparent2, node, fctx.rawflags()
-            )
+
+            if (
+                # some filectxs do not support rawdata or flags
+                hasattr(fctx, "rawdata")
+                and hasattr(fctx, "rawflags")
+                # some (external) filelogs do not have addrawrevision
+                and hasattr(flog, "addrawrevision")
+                # parents must match to be able to reuse rawdata
+            ):
+                # node is different from fparents, no need to check manifest flag
+                changelist.append(fname)
+                self.ui.debug("reusing %s filelog rawdata\n" % fname)
+                return flog.addrawrevision(
+                    fctx.rawdata(),
+                    tr,
+                    linkrev,
+                    fparent1,
+                    fparent2,
+                    node,
+                    fctx.rawflags(),
+                )
 
         # is the file changed?
         text = fctx.data()

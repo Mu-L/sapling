@@ -7,6 +7,7 @@
 
 
 import os
+from pathlib import Path
 from typing import Optional, Set
 
 from eden.integration.hg.lib.hg_extension_test_base import (
@@ -31,6 +32,17 @@ class FilteredFSBase(FilteredHgTestCase):
 foo
 dir2/README
 filtered_out
+"""
+
+    testFilterIncludeExclude: str = """
+[metadata]
+version: 2
+[include]
+*
+[exclude]
+dir2
+[include]
+dir2/README
 """
 
     testFilterOnlyMetadata: str = """
@@ -82,6 +94,7 @@ bdir/README.md
         # Filter files that determine what is filtered
         repo.write_file("top_level_filter", self.testFilter1)
         repo.write_file("a/nested_filter_file", self.testFilter1)
+        repo.write_file("include_exclude_filter", self.testFilterIncludeExclude)
         repo.write_file("filters/empty_filter", self.testFilterEmpty)
         repo.write_file("filters/metadata_only", self.testFilterOnlyMetadata)
         repo.write_file("filters/v2", self.testFilterV2)
@@ -260,17 +273,17 @@ bdir/README.md
 
         # write to a filtered file
         self.set_active_filter("top_level_filter")
-        self.write_file("foo", "a change")
+        self.repo.write_file("foo", "a change")
 
         # Ensure the filtered file isn't reflected in status
         self.assert_status_empty()
 
     def test_filtered_merge(self) -> None:
         # Set up two commits that will conflict when rebased
-        self.write_file("foo", "a separate change\n")
+        self.repo.write_file("foo", "a separate change\n")
         new1 = self.repo.commit("Change contents of foo")
         self.repo.update(self.initial_commit)
-        self.write_file("foo", "completely different change\n")
+        self.repo.write_file("foo", "completely different change\n")
         new2 = self.repo.commit("Change contents of foo again")
 
         # enable the active filter so "foo" is filtered and attempt rebase
@@ -296,11 +309,69 @@ bdir/README.md
             """,
         )
 
-        self.write_file("foo", "completely different change\na separate change")
+        self.repo.write_file("foo", "completely different change\na separate change")
         self.hg("resolve", "--mark", "foo")
         self.hg("rebase", "--continue")
         self.assertEqual(len(self.repo.log(revset="all()")), 3)
 
-    # Future test cases:
-    # - Reading a filtered file fails
-    # - All sorts of filter edgecases
+    def test_enable_filter_dne(self) -> None:
+        initial_files = {"foo", "dir2/README", "filtered_out", "dir2/not_filtered"}
+        self.set_active_filter("does_not_exist")
+        self.ensure_filtered_and_unfiltered(set(), initial_files)
+
+    def test_checkout_old_commit(self) -> None:
+        self.repo.write_file("new_filter", self.testFilter1)
+        self.repo.commit("Add new filter")
+        self.assert_status_empty()
+
+        # Filtering works as normal for a new filter file
+        initial_files = {"foo", "dir2/README", "filtered_out", "dir2/not_filtered"}
+        filtered_files = {"foo", "dir2/README", "filtered_out"}
+        self.set_active_filter("new_filter")
+        self.ensure_filtered_and_unfiltered(
+            filtered_files, initial_files.difference(filtered_files)
+        )
+
+        # Checking out a commit that's older than the commit that introduced the
+        # filter will not fail; it will simply apply the null filter
+        self.hg("update", self.initial_commit)
+        self.ensure_filtered_and_unfiltered(set(), initial_files)
+
+    def test_ods_counters_exist(self) -> None:
+        self.set_active_filter("top_level_filter")
+        counters = self.get_counters()
+        expected_counters = [
+            "edenffi.ffs.invalid_repo",
+            "edenffi.ffs.lookup_failures",
+            "edenffi.ffs.lookups",
+            "edenffi.ffs.repo_cache_hits",
+            "edenffi.ffs.repo_cache_misses",
+        ]
+        for ec in expected_counters:
+            self.assertIn(ec, counters)
+
+    def test_lookup_failure_counter(self) -> None:
+        self.set_active_filter("top_level_filter")
+        counters = self.get_counters()
+        self.assertEqual(counters["edenffi.ffs.lookup_failures"], 0)
+        self.set_active_filter("does_not_exist")
+        counters = self.get_counters()
+        self.assertGreaterEqual(counters["edenffi.ffs.lookup_failures"], 1)
+
+    def test_commit_filter_change(self) -> None:
+        self.set_active_filter("include_exclude_filter")
+        self.assert_status_empty()
+
+        # Modify the active filter file
+        filter_change = "dir2/not_filtered"
+        new_filter_contents = self.testFilterIncludeExclude + filter_change
+        self.write_file("include_exclude_filter", new_filter_contents)
+        self.assert_status({"include_exclude_filter": "M"})
+        self.repo.commit("Change contents of include_exclude_filter")
+
+        # Status should be empty since the working copy reflects the changes
+        # made to the filter file.
+        self.assert_status_empty()
+
+        # The newly unfiltered files should be unfiltered
+        self.ensure_filtered_and_unfiltered(set(), {"dir2/not_filtered", "dir2/README"})

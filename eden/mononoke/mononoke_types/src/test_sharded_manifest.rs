@@ -108,6 +108,8 @@ impl ShardedMapV2Value for TestShardedManifestEntry {
     type NodeId = ShardedMapV2NodeTestShardedManifestId;
     type Context = ShardedMapV2NodeTestShardedManifestContext;
     type RollupData = MaxBasenameLength;
+
+    const WEIGHT_LIMIT: usize = 5;
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -228,6 +230,18 @@ impl TestShardedManifest {
     ) -> BoxStream<'a, Result<(MPathElement, TestShardedManifestEntry)>> {
         self.subentries
             .into_entries(ctx, blobstore)
+            .and_then(|(k, v)| async move { anyhow::Ok((MPathElement::from_smallvec(k)?, v)) })
+            .boxed()
+    }
+
+    pub fn into_subentries_skip<'a>(
+        self,
+        ctx: &'a CoreContext,
+        blobstore: &'a impl Blobstore,
+        skip: usize,
+    ) -> BoxStream<'a, Result<(MPathElement, TestShardedManifestEntry)>> {
+        self.subentries
+            .into_entries_skip(ctx, blobstore, skip)
             .and_then(|(k, v)| async move { anyhow::Ok((MPathElement::from_smallvec(k)?, v)) })
             .boxed()
     }

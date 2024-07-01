@@ -17,12 +17,12 @@ cpp_binary(
         ":rocksdb",
         ":store",
         "//eden/common/telemetry:structured_logger",
+        "//eden/common/utils:user_info",
         "//eden/common/utils:utils",
         "//eden/fs/config:config",
         "//eden/fs/service:init",
         "//eden/fs/service:server",
         "//eden/fs/telemetry:stats",
-        "//eden/fs/utils:user_info",
         "//folly:range",
         "//folly:stop_watch",
         "//folly:string",
@@ -111,6 +111,7 @@ cpp_library(
         "fbsource//third-party/fmt:fmt",
         "//eden/common/os:os",
         "//eden/common/utils:ref_ptr",
+        "//eden/fs/telemetry:stats",
     ],
 )
 
@@ -141,6 +142,7 @@ cpp_library(
         "//eden/fs/model:model-fwd",
         "//folly:range",
         "//folly/futures:core",
+        "//folly/memory:not_null",
     ],
 )
 
@@ -159,6 +161,7 @@ cpp_library(
         "//folly:varint",
     ],
     exported_deps = [
+        "fbsource//third-party/googletest:gtest_headers",
         ":backing_store_interface",
         "//eden/common/utils:ref_ptr",
         "//eden/common/utils:utils",
@@ -197,6 +200,7 @@ cpp_library(
         "//folly/lang:bits",
     ],
     exported_deps = [
+        "fbsource//third-party/googletest:gtest_headers",
         ":backing_store_interface",
         ":context",
         "//eden/common/utils:case_sensitivity",

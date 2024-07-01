@@ -20,11 +20,6 @@ from .. import clienttelemetry
 from . import constants, fileserverclient, shallowutil
 
 
-# corresponds to uncompressed length of revlog's indexformatng (2 gigs, 4-byte
-# signed integer)
-_maxentrysize = 0x7FFFFFFF
-
-
 class remotefilelognodemap:
     def __init__(self, filename, store):
         self._filename = filename
@@ -82,17 +77,46 @@ class remotefilelog:
         if node is None:
             node = revlog.hash(text, p1, p2)
 
+        if (
+            self.repo.ui.configbool("experimental", "reuse-filenodes", True)
+            and node in self.nodemap
+            and self._localparentsmatch(node, p1, p2)
+        ):
+            self.repo.ui.debug("reusing remotefilelog node %s\n" % hex(node))
+            return node
+
         meta, metaoffset = filelog.parsemeta(text)
         rawtext, validatehash = self._processflags(text, flags, "write")
 
-        if len(rawtext) > _maxentrysize:
-            raise revlog.RevlogError(
-                _("%s: size of %s exceeds maximum size of %s")
+        softlimit = self.repo.ui.configbytes("commit", "file-size-limit", "1GB")
+        hardlimit = self.repo.ui.configbytes("devel", "hard-file-size-limit", "10GB")
+        limit = min(softlimit, hardlimit)
+        if len(rawtext) >= limit:
+            hint = None
+            if support := self.repo.ui.config("ui", "supportcontact"):
+                hint = _("contact %s for help") % support
+            if len(rawtext) < hardlimit:
+                hint = _(" or ").join(
+                    list(
+                        filter(
+                            None,
+                            [
+                                hint,
+                                _(
+                                    "use '--config commit.file-size-limit=N' to override"
+                                ),
+                            ],
+                        )
+                    )
+                )
+            raise error.Abort(
+                _("%s: size of %s exceeds maximum size of %s!")
                 % (
                     self.filename,
                     util.bytecount(len(rawtext)),
-                    util.bytecount(_maxentrysize),
-                )
+                    util.bytecount(limit),
+                ),
+                hint=hint,
             )
 
         return self.addrawrevision(
@@ -106,6 +130,19 @@ class remotefilelog:
             cachedelta,
             _metatuple=(meta, metaoffset),
         )
+
+    def _localparentsmatch(self, node, p1, p2) -> bool:
+        localinfo = self.repo.fileslog.metadatastore.getlocalnodeinfo(
+            self.filename, node
+        )
+        if localinfo is None:
+            return False
+
+        lp1, lp2, _, copyfrom = localinfo
+        if copyfrom:
+            lp1 = nullid
+
+        return (p1, p2) == (lp1, lp2)
 
     def addrawrevision(
         self,
@@ -213,13 +250,6 @@ class remotefilelog:
     __bool__ = __nonzero__
 
     def __len__(self):
-        if self.filename == ".hgtags":
-            # The length of .hgtags is used to fast path tag checking.
-            # remotefilelog doesn't support .hgtags since the entire .hgtags
-            # history is needed.  Use the excludepattern setting to make
-            # .hgtags a normal filelog.
-            return 0
-
         raise RuntimeError("len not supported")
 
     def empty(self):

@@ -14,7 +14,6 @@ use commit_graph_types::edges::ChangesetNode;
 use commit_graph_types::frontier::ChangesetFrontier;
 use commit_graph_types::frontier::ChangesetFrontierWithinDistance;
 use commit_graph_types::storage::Prefetch;
-use commit_graph_types::storage::PrefetchEdge;
 use commit_graph_types::storage::PrefetchTarget;
 use context::CoreContext;
 use futures::future;
@@ -82,8 +81,7 @@ impl CommitGraph {
             .fetch_many_edges(
                 ctx,
                 &cs_ids,
-                Prefetch::Hint(PrefetchTarget {
-                    edge: PrefetchEdge::FirstParent,
+                Prefetch::Hint(PrefetchTarget::LinearAncestors {
                     generation: FIRST_GENERATION,
                     steps: distance + 1,
                 }),
@@ -205,7 +203,15 @@ impl CommitGraph {
                 ctx,
                 frontier,
                 move |node| future::ready(Ok(node.generation < target_generation)),
-                Prefetch::for_skip_tree_traversal(target_generation),
+                if justknobs::eval(
+                    "scm/mononoke:commit_graph_use_skip_tree_exact_prefetching",
+                    None,
+                    None,
+                )? {
+                    Prefetch::for_exact_skip_tree_traversal(target_generation)
+                } else {
+                    Prefetch::for_skip_tree_traversal(target_generation)
+                },
             )
             .await?;
         }

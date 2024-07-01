@@ -1,9 +1,9 @@
-load("@fbcode_macros//build_defs:native_rules.bzl", "buck_filegroup")
+load("@fbcode_macros//build_defs:native_rules.bzl", "buck_command_alias", "buck_filegroup")
 load("@fbcode_macros//build_defs:python_binary.bzl", "python_binary")
 load("@fbcode_macros//build_defs:python_unittest.bzl", "python_unittest")
 load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load("//eden:defs.bzl", "get_integration_test_env_and_deps")
-load("//eden/scm/tests:targets.bzl", "get_blocklist", "get_hg_run_tests_excluded", "get_hg_watchman_run_tests_excluded")
+load("//eden/scm/tests:targets.bzl", "get_blocklist", "get_hg_edenfs_watchman_run_tests_included", "get_hg_run_tests_excluded", "get_hg_watchman_run_tests_excluded")
 
 oncall("mercurial_release")
 
@@ -42,8 +42,8 @@ python_binary(
 
 python_binary(
     name = "run_tests_py_eden",
-    srcs = [f for f in glob(["**/*"]) if not f.endswith("TARGETS") and f != "unittestify.py" and f not in TEST_FILES],
-    main_module = "eden/scm/tests/run-tests",
+    srcs = RUN_TEST_PY_FILES + ["edenfs.py"],
+    main_function = "eden.scm.tests.run-tests.main",
     # The line below is necessary as we have some extensions (e.g., autodiff.py) in the tests directory
     # which include modules like sapling.*, and that makes the linter confused about it
     tags = ["noautodeps"],
@@ -157,6 +157,37 @@ python_unittest(
     ],
 )
 
+# Order is important, we want HGTEST_RUN_TESTS_PY from the Eden env var dict
+EW_ENV = dict(W_ENV)
+
+EW_ENV.update(E_ENV)
+
+EW_ENV["HGTEST_INCLUDED"] = get_hg_edenfs_watchman_run_tests_included()
+
+python_unittest(
+    # @autodeps-skip
+    name = "hg_edenfs_watchman_run_tests",
+    srcs = SRCS,
+    env = EW_ENV,
+    resources = {
+        "//eden/scm/tests:dummyssh3": "dummyssh3.par",
+        "//eden/scm:hg": "hg.sh",
+        "//eden/scm:hgpython": "hgpython.sh",
+        "//watchman:watchman": "watchman",
+    },
+    supports_static_listing = False,
+    runtime_deps = artifacts["deps"],
+    deps = [
+        "//libfb/py:parutil",
+    ],
+)
+
+buck_command_alias(
+    name = "run_tests_py_eden_cli",
+    env = E_ENV,
+    exe = ":run_tests_py_eden",
+)
+
 M_ENV = dict(ENV)
 
 M_ENV["USE_MONONOKE"] = "1"
@@ -170,6 +201,8 @@ M_ENV["HGTEST_CERTDIR"] = "$(location //eden/mononoke/tests/integration/certs/fa
 M_ENV.pop("HGTEST_EXCLUDED")
 
 M_ENV.pop("HGTEST_BLOCKLIST")
+
+M_ENV["DEBUGRUNTEST_DEFAULT_DISABLED"] = "1"
 
 M_ENV["HGTEST_INCLUDED"] = "test_(fb_ext_remotefilelog_(log|getpackv2|worker|rust_lfs|ruststores_lfs_duplicated)|edenapi.*)_t"
 

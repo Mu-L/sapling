@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -11,7 +10,6 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
 
-  $ configure modernclient
   $ enable amend
 
   $ newclientrepo a
@@ -596,7 +594,7 @@ Python utility:
   patching file a
   patching file b
   adding b
-  recording removal of a as rename to b (88% similar)
+  recording removal of a as rename to b (50% similar)
   applied to working directory
   $ echo 'mod b' > b
   $ hg st -C
@@ -1525,4 +1523,3 @@ Python utility:
   $ hg commit -qm remove
   $ hg export --rev 'desc(unicode)' | hg import -
   applying patch from stdin
-

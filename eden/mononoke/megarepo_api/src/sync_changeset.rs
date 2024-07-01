@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -15,7 +16,7 @@ use async_trait::async_trait;
 use blobrepo::save_bonsai_changesets;
 use blobstore::Loadable;
 use changeset_fetcher::ChangesetFetcherRef;
-use changesets::ChangesetsRef;
+use commit_graph::CommitGraphRef;
 use commit_transformation::create_directory_source_to_target_multi_mover;
 use commit_transformation::create_source_to_target_multi_mover;
 use commit_transformation::rewrite_as_squashed_commit;
@@ -377,7 +378,7 @@ impl<'a> SyncChangeset<'a> {
         scuba.log_with_msg("Started saving mutable renames", None);
         self.save_mutable_renames(
             ctx,
-            target_repo.inner_repo().changesets(),
+            target_repo.inner_repo().commit_graph(),
             self.mutable_renames,
             moved_commits.iter().map(|css| &css.mutable_renames),
         )
@@ -482,13 +483,13 @@ async fn validate_can_sync_changeset(
     Ok(())
 }
 
-async fn sync_changeset_to_target(
+async fn sync_changeset_to_target<R: Repo>(
     ctx: &CoreContext,
     mapping: &SourceMappingRules,
     source: &SourceName,
-    source_repo: &impl Repo,
+    source_repo: &R,
     source_cs: BonsaiChangeset,
-    target_repo: &impl Repo,
+    target_repo: &R,
     target_cs_id: ChangesetId,
     target: &Target,
     mut state: CommitRemappingState,
@@ -577,10 +578,17 @@ async fn sync_changeset_to_target(
         .await?;
 
     let rewritten_commit = rewritten_commit.freeze().map_err(MegarepoError::internal)?;
+    let submodule_content_ids = Vec::<(Arc<R>, HashSet<_>)>::new();
     let target_cs_id = rewritten_commit.get_changeset_id();
-    upload_commits(ctx, vec![rewritten_commit], source_repo, target_repo)
-        .await
-        .map_err(MegarepoError::internal)?;
+    upload_commits(
+        ctx,
+        vec![rewritten_commit],
+        source_repo,
+        target_repo,
+        submodule_content_ids,
+    )
+    .await
+    .map_err(MegarepoError::internal)?;
 
     Ok(target_cs_id)
 }

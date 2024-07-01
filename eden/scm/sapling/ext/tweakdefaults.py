@@ -72,8 +72,6 @@ from sapling import (
 from sapling.i18n import _
 from sapling.node import short
 
-from . import rebase
-
 
 wrapcommand = extensions.wrapcommand
 wrapfunction = extensions.wrapfunction
@@ -138,7 +136,6 @@ def extsetup(ui) -> None:
     wrapblame()
 
     entry = wrapcommand(commands.table, "commit", commitcmd)
-    wrapcommand(rebase.cmdtable, "rebase", _rebase)
     wrapfunction(scmutil, "cleanupnodes", cleanupnodeswrapper)
     entry = wrapcommand(commands.table, "pull", pull)
     options = entry[1]
@@ -360,7 +357,7 @@ def pull(orig, ui, repo, *args, **opts):
             rebasemodule.rebase, ui, repo, dest=dest, tool=tool
         )
     if dest and update:
-        ret = ret or commands.update(ui, repo, node=dest, check=True)
+        ret = ret or commands.update(ui, repo, node=dest)
 
     return ret
 
@@ -523,39 +520,6 @@ def _analyzewrapper(orig, x, ui):
     return result
 
 
-def _rebase(orig, ui, repo, *pats, **opts):
-    if not opts.get("date") and not ui.configbool("tweakdefaults", "rebasekeepdate"):
-        opts["date"] = currentdate(ui)
-
-    if opts.get("continue") or opts.get("abort") or opts.get("restack"):
-        return orig(ui, repo, *pats, **opts)
-
-    # 'hg rebase' w/o args should do nothing
-    if not opts.get("dest"):
-        raise error.Abort("you must specify a destination (-d) for the rebase")
-
-    # 'hg rebase' can fast-forward bookmark
-    prev = repo["."]
-
-    # Only fast-forward the bookmark if no source nodes were explicitly
-    # specified.
-    if not (opts.get("base") or opts.get("source") or opts.get("rev")):
-        dests = opts.get("dest")
-        if dests and len(dests) == 1 and dests[0] != prev:
-            dest = scmutil.revsingle(repo, dests[0])
-            common = dest.ancestor(prev)
-            if prev == common and dest != prev:
-                activebookmark = repo._activebookmark
-                result = hg.updatetotally(ui, repo, dest.node(), activebookmark)
-                if activebookmark:
-                    with repo.wlock():
-                        bookmarks.update(repo, [prev.node()], dest.node())
-                ui.status(_("nothing to rebase - fast-forwarded to %s\n") % dest)
-                return result
-
-    return orig(ui, repo, *pats, **opts)
-
-
 # set of commands which define their own formatter and prints the hash changes
 formattercommands: Set[str] = {"fold", "importstack"}
 
@@ -683,8 +647,11 @@ def statuscmd(orig, ui, repo, *pats, **opts):
             message = _("--root-relative not supported with patterns")
             hint = _("run from the repo root instead")
             raise error.Abort(message, hint=hint)
-    elif ui.plain():
-        pass
+
+    # Only default rootrel if it wasn't specified by user.
+    if rootrel is None:
+        rootrel = ui.plain()
+
     # Here's an ugly hack! If users are passing "re:" to make status relative,
     # hgwatchman will never refresh the full state and status will become and
     # remain slow after a restart or 24 hours. Here, we check for this and
@@ -693,14 +660,10 @@ def statuscmd(orig, ui, repo, *pats, **opts):
     # only pattern passed.
     #
     # Also set pats to [''] if pats is empty because that makes status relative.
-    elif not pats or (len(pats) == 1 and pats[0] == "re:"):
+    if not rootrel and not pats or (len(pats) == 1 and pats[0] == "re:"):
         pats = [""]
 
-    with (
-        ui.configoverride({("commands", "status.relative"): "false"})
-        if rootrel
-        else util.nullcontextmanager()
-    ):
+    with ui.configoverride({("commands", "status.relative"): str(not rootrel)}):
         return orig(ui, repo, *pats, **opts)
 
 

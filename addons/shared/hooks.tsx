@@ -54,12 +54,33 @@ export function useDeepMemo<T>(construct: () => T, dependencies: React.Dependenc
 /**
  * Returns a react ref that you can pass to an element to autofocus it on mount.
  */
-export function useAutofocusRef(): React.MutableRefObject<HTMLElement | null> {
-  const ref = useRef<HTMLElement | null>(null);
+export function useAutofocusRef<T extends HTMLElement>(): React.MutableRefObject<T | null> {
+  const ref = useRef<T | null>(null);
   useEffect(() => {
     if (ref.current != null) {
       ref.current.focus();
     }
   }, [ref]);
   return ref;
+}
+
+/**
+ * Returns the last (different) value of a given variable from a previous render.
+ */
+export function usePrevious<T>(value: T, equalityFn?: (a: T, b: T) => boolean): T | undefined {
+  const ref = useRef<{value: T; prev: T | undefined}>({
+    value,
+    prev: undefined,
+  });
+
+  const current = ref.current.value;
+
+  if (equalityFn != null ? !equalityFn(value, current) : value !== current) {
+    ref.current = {
+      value,
+      prev: current,
+    };
+  }
+
+  return ref.current?.prev;
 }

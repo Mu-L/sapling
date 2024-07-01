@@ -6,6 +6,8 @@
  */
 
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -88,7 +90,7 @@ impl TestDag {
             iter.try_collect::<Vec<_>>().await.unwrap()
         };
         let heads =
-            VertexListWithOptions::from(non_master_heads).with_highest_group(Group::NON_MASTER);
+            VertexListWithOptions::from(non_master_heads).with_desired_group(Group::NON_MASTER);
         client
             .dag
             .add_heads_and_flush(&server.dag.dag_snapshot().unwrap(), &heads)
@@ -178,7 +180,7 @@ impl TestDag {
             .collect::<Vec<_>>();
         let need_flush = !master_heads.is_empty();
         if need_flush {
-            let heads = VertexListWithOptions::from(master_heads).with_highest_group(Group::MASTER);
+            let heads = VertexListWithOptions::from(master_heads).with_desired_group(Group::MASTER);
             self.dag.flush(&heads).await.unwrap();
         }
         if validate {
@@ -195,7 +197,7 @@ impl TestDag {
             .map(|s| Vertex::copy_from(s.as_bytes()))
             .collect();
         let heads =
-            VertexListWithOptions::from(&[name.clone()][..]).with_highest_group(Group::NON_MASTER);
+            VertexListWithOptions::from(&[name.clone()][..]).with_desired_group(Group::NON_MASTER);
         self.dag
             .add_heads(
                 &std::iter::once((name, parents)).collect::<HashMap<Vertex, Vec<Vertex>>>(),
@@ -211,7 +213,7 @@ impl TestDag {
             .split_whitespace()
             .map(|v| Vertex::copy_from(v.as_bytes()))
             .collect();
-        let heads = VertexListWithOptions::from(heads).with_highest_group(Group::MASTER);
+        let heads = VertexListWithOptions::from(heads).with_desired_group(Group::MASTER);
         self.dag.flush(&heads).await.unwrap();
     }
 
@@ -455,6 +457,20 @@ impl TestDag {
     }
 }
 
+impl Deref for TestDag {
+    type Target = NameDag;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dag
+    }
+}
+
+impl DerefMut for TestDag {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.dag
+    }
+}
+
 pub(crate) struct ProtocolMonitor {
     pub(crate) inner: Box<dyn RemoteIdConvertProtocol>,
     pub(crate) output: Arc<Mutex<Vec<String>>>,
@@ -508,5 +524,5 @@ impl From<Set> for VertexListWithOptions {
 fn to_head_opts(set: Set) -> VertexListWithOptions {
     use crate::nameset::SyncNameSetQuery;
     let heads_vec = set.iter().unwrap().collect::<Result<Vec<_>>>().unwrap();
-    VertexListWithOptions::from(heads_vec).with_highest_group(Group::MASTER)
+    VertexListWithOptions::from(heads_vec).with_desired_group(Group::MASTER)
 }

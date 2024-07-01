@@ -24,6 +24,7 @@ use crate::fetch_logger::FetchLogger;
 use crate::indexedlogauxstore::AuxStore;
 use crate::indexedlogdatastore::IndexedLogHgIdDataStore;
 use crate::indexedlogdatastore::IndexedLogHgIdDataStoreConfig;
+use crate::indexedlogtreeauxstore::TreeAuxStore;
 use crate::indexedlogutil::StoreType;
 use crate::lfs::LfsRemote;
 use crate::lfs::LfsStore;
@@ -35,10 +36,11 @@ use crate::scmstore::TreeStore;
 use crate::util::get_indexedlogdatastore_aux_path;
 use crate::util::get_indexedlogdatastore_path;
 use crate::util::get_local_path;
+use crate::util::get_tree_aux_store_path;
 use crate::ContentStore;
-use crate::EdenApiFileStore;
-use crate::EdenApiTreeStore;
 use crate::ExtStoredPolicy;
+use crate::SaplingRemoteApiFileStore;
+use crate::SaplingRemoteApiTreeStore;
 
 pub struct FileStoreBuilder<'a> {
     config: &'a dyn Config,
@@ -51,7 +53,7 @@ pub struct FileStoreBuilder<'a> {
     lfs_local: Option<Arc<LfsStore>>,
     lfs_cache: Option<Arc<LfsStore>>,
 
-    edenapi: Option<Arc<EdenApiFileStore>>,
+    edenapi: Option<Arc<SaplingRemoteApiFileStore>>,
     contentstore: Option<Arc<ContentStore>>,
 }
 
@@ -86,7 +88,7 @@ impl<'a> FileStoreBuilder<'a> {
         self
     }
 
-    pub fn edenapi(mut self, edenapi: Arc<EdenApiFileStore>) -> Self {
+    pub fn edenapi(mut self, edenapi: Arc<SaplingRemoteApiFileStore>) -> Self {
         self.edenapi = Some(edenapi);
         self
     }
@@ -159,10 +161,10 @@ impl<'a> FileStoreBuilder<'a> {
     }
 
     #[context("unable to build edenapi")]
-    fn build_edenapi(&self) -> Result<Arc<EdenApiFileStore>> {
+    fn build_edenapi(&self) -> Result<Arc<SaplingRemoteApiFileStore>> {
         let client = Builder::from_config(self.config)?.build()?;
 
-        Ok(EdenApiFileStore::new(client))
+        Ok(SaplingRemoteApiFileStore::new(client))
     }
 
     #[context("failed to build local indexedlog")]
@@ -179,7 +181,7 @@ impl<'a> FileStoreBuilder<'a> {
                 get_indexedlogdatastore_path(local_path)?,
                 self.get_extstored_policy()?,
                 &config,
-                StoreType::Local,
+                StoreType::Permanent,
             )?))
         } else {
             None
@@ -212,23 +214,8 @@ impl<'a> FileStoreBuilder<'a> {
             get_indexedlogdatastore_path(cache_path)?,
             self.get_extstored_policy()?,
             &config,
-            StoreType::Shared,
+            StoreType::Rotated,
         )?)))
-    }
-
-    #[context("failed to build aux local")]
-    pub fn build_aux_local(&self) -> Result<Option<Arc<AuxStore>>> {
-        Ok(if let Some(local_path) = self.local_path.clone() {
-            let local_path = get_local_path(local_path, &self.suffix)?;
-            let local_path = get_indexedlogdatastore_aux_path(local_path)?;
-            Some(Arc::new(AuxStore::new(
-                local_path,
-                self.config,
-                StoreType::Local,
-            )?))
-        } else {
-            None
-        })
     }
 
     #[context("failed to build aux cache")]
@@ -242,7 +229,7 @@ impl<'a> FileStoreBuilder<'a> {
         Ok(Some(Arc::new(AuxStore::new(
             cache_path,
             self.config,
-            StoreType::Shared,
+            StoreType::Rotated,
         )?)))
     }
 
@@ -254,7 +241,7 @@ impl<'a> FileStoreBuilder<'a> {
 
         Ok(if let Some(local_path) = self.local_path.clone() {
             let local_path = get_local_path(local_path, &self.suffix)?;
-            Some(Arc::new(LfsStore::local(local_path, self.config)?))
+            Some(Arc::new(LfsStore::permanent(local_path, self.config)?))
         } else {
             None
         })
@@ -271,7 +258,7 @@ impl<'a> FileStoreBuilder<'a> {
             None => return Ok(None),
         };
 
-        Ok(Some(Arc::new(LfsStore::shared(cache_path, self.config)?)))
+        Ok(Some(Arc::new(LfsStore::rotated(cache_path, self.config)?)))
     }
 
     #[context("failed to build config revisionstore")]
@@ -320,7 +307,6 @@ impl<'a> FileStoreBuilder<'a> {
         };
 
         tracing::trace!(target: "revisionstore::filestore", "processing aux data");
-        let aux_local = self.build_aux_local()?;
         let aux_cache = self.build_aux_cache()?;
 
         tracing::trace!(target: "revisionstore::filestore", "processing lfs remote");
@@ -394,6 +380,13 @@ impl<'a> FileStoreBuilder<'a> {
                 None
             };
 
+        // We want to prefetch lots of files, but prefetching millions of files causes us
+        // to tie up memory for longer and make larger allocations. Let's limit fetch size
+        // to try to cut down on memory usage.
+        let max_prefetch_size = self
+            .config
+            .get_or("scmstore", "max-prefetch-size", || 100_000)?;
+
         tracing::trace!(target: "revisionstore::filestore", "constructing FileStore");
         Ok(FileStore {
             extstored_policy,
@@ -403,6 +396,7 @@ impl<'a> FileStoreBuilder<'a> {
 
             prefetch_aux_data,
             compute_aux_data,
+            max_prefetch_size,
 
             indexedlog_local,
             lfs_local,
@@ -418,7 +412,6 @@ impl<'a> FileStoreBuilder<'a> {
             fetch_logger,
             metrics: FileStoreMetrics::new(),
 
-            aux_local,
             aux_cache,
 
             lfs_progress: AggregatingProgressBar::new("fetching", "LFS"),
@@ -453,8 +446,9 @@ pub struct TreeStoreBuilder<'a> {
 
     indexedlog_local: Option<Arc<IndexedLogHgIdDataStore>>,
     indexedlog_cache: Option<Arc<IndexedLogHgIdDataStore>>,
-    edenapi: Option<Arc<EdenApiTreeStore>>,
+    edenapi: Option<Arc<SaplingRemoteApiTreeStore>>,
     contentstore: Option<Arc<ContentStore>>,
+    tree_aux_store: Option<Arc<TreeAuxStore>>,
     filestore: Option<Arc<FileStore>>,
 }
 
@@ -469,6 +463,7 @@ impl<'a> TreeStoreBuilder<'a> {
             indexedlog_cache: None,
             edenapi: None,
             contentstore: None,
+            tree_aux_store: None,
             filestore: None,
         }
     }
@@ -488,7 +483,7 @@ impl<'a> TreeStoreBuilder<'a> {
         self
     }
 
-    pub fn edenapi(mut self, edenapi: Arc<EdenApiTreeStore>) -> Self {
+    pub fn edenapi(mut self, edenapi: Arc<SaplingRemoteApiTreeStore>) -> Self {
         self.edenapi = Some(edenapi);
         self
     }
@@ -518,6 +513,11 @@ impl<'a> TreeStoreBuilder<'a> {
         self
     }
 
+    pub fn tree_aux_store(mut self, tree_aux_store: Arc<TreeAuxStore>) -> Self {
+        self.tree_aux_store = Some(tree_aux_store);
+        self
+    }
+
     #[context("failed to determine whether to use edenapi")]
     fn use_edenapi(&self) -> Result<bool> {
         Ok(if let Some(use_edenapi) = self.override_edenapi {
@@ -527,11 +527,11 @@ impl<'a> TreeStoreBuilder<'a> {
         })
     }
 
-    #[context("failed to build EdenAPI from config")]
-    fn build_edenapi(&self) -> Result<Arc<EdenApiTreeStore>> {
+    #[context("failed to build SaplingRemoteAPI from config")]
+    fn build_edenapi(&self) -> Result<Arc<SaplingRemoteApiTreeStore>> {
         let client = Builder::from_config(self.config)?.build()?;
 
-        Ok(EdenApiTreeStore::new(client))
+        Ok(SaplingRemoteApiTreeStore::new(client))
     }
 
     #[context("failed to build local indexedlog")]
@@ -548,7 +548,7 @@ impl<'a> TreeStoreBuilder<'a> {
                 get_indexedlogdatastore_path(local_path)?,
                 ExtStoredPolicy::Use,
                 &config,
-                StoreType::Local,
+                StoreType::Permanent,
             )?))
         } else {
             None
@@ -582,14 +582,37 @@ impl<'a> TreeStoreBuilder<'a> {
             get_indexedlogdatastore_path(cache_path)?,
             ExtStoredPolicy::Use,
             &config,
-            StoreType::Shared,
+            StoreType::Rotated,
         )?)))
+    }
+
+    #[context("failed to build tree aux store")]
+    pub fn build_tree_aux_store(&self) -> Result<Option<Arc<TreeAuxStore>>> {
+        if let Some(local_path) = self.local_path.clone() {
+            let local_path = get_local_path(local_path, &self.suffix)?;
+
+            // The TreeAuxStore is a mapping from HgId to augmented
+            // manifest digest, and is used to convert from Hg tree
+            // ids in order to make augmented manifest lookups.
+            //
+            // It is technically a cache, however we do not want to put
+            // it in the shared cache directory to avoid the risk of
+            // poisoning by other shared cache users.  As such, we
+            // create it as a rotated log, but in the local store.
+            Ok(Some(Arc::new(TreeAuxStore::new(
+                self.config,
+                get_tree_aux_store_path(local_path)?,
+                StoreType::Rotated,
+            )?)))
+        } else {
+            Ok(None)
+        }
     }
 
     #[context("failed to build revision store")]
     pub fn build(mut self) -> Result<TreeStore> {
         // TODO(meyer): Clean this up, just copied and pasted from the other version & did some ugly hacks to get this
-        // (the EdenApiAdapter stuff needs to be fixed in particular)
+        // (the SaplingRemoteApiAdapter stuff needs to be fixed in particular)
         tracing::trace!(target: "revisionstore::treestore", "checking cache");
         if self.contentstore.is_none() {
             if let Some(cache_path) = cache_path(self.config, &self.suffix)? {
@@ -609,6 +632,20 @@ impl<'a> TreeStoreBuilder<'a> {
             Some(indexedlog_cache)
         } else {
             self.build_indexedlog_cache()?
+        };
+
+        tracing::trace!(target: "revisionstore::treestore", "processing tree_aux_store");
+        let tree_aux_store = if self
+            .config
+            .get_or("scmstore", "store-tree-aux-data", || true)?
+        {
+            if let Some(tree_aux_store) = self.tree_aux_store.take() {
+                Some(tree_aux_store)
+            } else {
+                self.build_tree_aux_store()?
+            }
+        } else {
+            None
         };
 
         tracing::trace!(target: "revisionstore::treestore", "processing edenapi");
@@ -639,6 +676,16 @@ impl<'a> TreeStoreBuilder<'a> {
             _ => TreeMetadataMode::Never,
         };
 
+        let fetch_tree_aux_data = self
+            .config
+            .get_or_default::<bool>("scmstore", "fetch-tree-aux-data")?;
+
+        if fetch_tree_aux_data && tree_aux_store.is_none() {
+            tracing::warn!(
+                "fetch-tree-aux-data is set, but store-tree-aux-data is not set resulting in no tree aux data locally cached"
+            );
+        }
+
         tracing::trace!(target: "revisionstore::treestore", "constructing TreeStore");
         Ok(TreeStore {
             indexedlog_local,
@@ -646,8 +693,10 @@ impl<'a> TreeStoreBuilder<'a> {
             cache_to_local_cache: true,
             edenapi,
             contentstore,
+            tree_aux_store,
             filestore: self.filestore,
             tree_metadata_mode,
+            fetch_tree_aux_data,
             flush_on_drop: true,
             metrics: Default::default(),
         })

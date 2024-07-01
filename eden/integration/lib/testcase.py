@@ -8,12 +8,11 @@
 
 import configparser
 import errno
-import hashlib
 import inspect
+import json
 import logging
 import os
 import pathlib
-import stat
 import sys
 import time
 import typing
@@ -41,7 +40,12 @@ from eden.fs.cli import util
 from eden.test_support.testcase import EdenTestCaseBase
 from eden.thrift import legacy
 
-from facebook.eden.ttypes import FaultDefinition, RemoveFaultArg, UnblockFaultArg
+from facebook.eden.ttypes import (
+    FaultDefinition,
+    GetBlockedFaultsRequest,
+    RemoveFaultArg,
+    UnblockFaultArg,
+)
 
 from . import edenclient, gitrepo, hgrepo, repobase, skip
 from .find_executables import FindExe
@@ -149,8 +153,7 @@ class EdenTestCase(EdenTestCaseBase):
         # Default to using the Rust version of commands when running
         # integration tests. An empty edenfsctl_rollout file means that all
         # subcommands should use the Rust implementation if available.
-        with open(self.eden.system_rollout_path, "w") as edenfsctl_rollout:
-            edenfsctl_rollout.write("{}")
+        self.set_rust_rollout_config({})
 
         self.eden.start()
         # Store a lambda in case self.eden is replaced during the test.
@@ -383,6 +386,11 @@ class EdenTestCase(EdenTestCaseBase):
         """
         return "memory"
 
+    def set_rust_rollout_config(self, config: Dict[str, bool]) -> None:
+        """Set the Rust rollout config for this test."""
+        with open(self.eden.system_rollout_path, "w") as edenfsctl_rollout:
+            edenfsctl_rollout.write(json.dumps(config))
+
     @staticmethod
     def unix_only(fn):
         """
@@ -451,6 +459,26 @@ class EdenTestCase(EdenTestCaseBase):
 
         for _ in range(numToUnblock):
             util.poll_until(unblock, timeout=30)
+
+    def wait_on_fault_hit(self, key_class: str, num_to_hit=1) -> None:
+        """
+        This waits until we have 'num_to_hit' faults currently blocking.
+        """
+
+        def faults_hit() -> Optional[bool]:
+            with self.eden.get_thrift_client_legacy() as client:
+                blocked_faults = client.getBlockedFaults(
+                    GetBlockedFaultsRequest(keyclass=key_class)
+                ).keyValues
+            return True if len(blocked_faults) == num_to_hit else None
+
+        try:
+            util.poll_until(faults_hit, timeout=30)
+        except TimeoutError as e:
+            with self.eden.get_thrift_client_legacy() as client:
+                # this unblock all faults to avoid tests hang
+                client.unblockFault(UnblockFaultArg())
+            raise e
 
     @contextmanager
     def run_with_blocking_fault(

@@ -26,7 +26,7 @@ use dag::Set;
 use dag::Vertex;
 use dag::VertexListWithOptions;
 use edenapi::types::CommitLocationToHashRequest;
-use edenapi::EdenApi;
+use edenapi::SaplingRemoteApi;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
@@ -59,7 +59,7 @@ use crate::StripCommits;
 pub struct HybridCommits {
     revlog: Option<RevlogCommits>,
     commits: HgCommits,
-    client: Arc<dyn EdenApi>,
+    client: Arc<dyn SaplingRemoteApi>,
     lazy_hash_desc: String,
 }
 
@@ -67,8 +67,8 @@ const EDENSCM_DISABLE_REMOTE_RESOLVE: &str = "EDENSCM_DISABLE_REMOTE_RESOLVE";
 const EDENSCM_REMOTE_ID_THRESHOLD: &str = "EDENSCM_REMOTE_ID_THRESHOLD";
 const EDENSCM_REMOTE_NAME_THRESHOLD: &str = "EDENSCM_REMOTE_NAME_THRESHOLD";
 
-struct EdenApiProtocol {
-    client: Arc<dyn EdenApi>,
+struct SaplingRemoteApiProtocol {
+    client: Arc<dyn SaplingRemoteApi>,
 
     /// Manually disabled names defined by `EDENSCM_DISABLE_REMOTE_RESOLVE`
     /// in the form `hex1,hex2,...`.
@@ -90,7 +90,7 @@ fn to_dag_error<E: Into<anyhow::Error>>(e: E) -> dag::Error {
 }
 
 #[async_trait]
-impl RemoteIdConvertProtocol for EdenApiProtocol {
+impl RemoteIdConvertProtocol for SaplingRemoteApiProtocol {
     async fn resolve_names_to_relative_paths(
         &self,
         heads: Vec<Vertex>,
@@ -200,7 +200,7 @@ impl HybridCommits {
         revlog_dir: Option<&Path>,
         dag_path: &Path,
         commits_path: &Path,
-        client: Arc<dyn EdenApi>,
+        client: Arc<dyn SaplingRemoteApi>,
     ) -> Result<Self> {
         let commits = HgCommits::new(dag_path, commits_path)?;
         let revlog = match revlog_dir {
@@ -215,7 +215,7 @@ impl HybridCommits {
         })
     }
 
-    /// Enable fetching commit hashes lazily via EdenAPI.
+    /// Enable fetching commit hashes lazily via SaplingRemoteAPI.
     pub fn enable_lazy_commit_hashes(&mut self) {
         let mut disabled_names: HashSet<Vertex> = Default::default();
         if let Ok(env) = std::env::var(EDENSCM_DISABLE_REMOTE_RESOLVE) {
@@ -235,7 +235,7 @@ impl HybridCommits {
         } else {
             None
         };
-        let protocol = EdenApiProtocol {
+        let protocol = SaplingRemoteApiProtocol {
             client: self.client.clone(),
             disabled_names,
             remote_id_threshold,
@@ -244,7 +244,7 @@ impl HybridCommits {
             remote_name_current: Default::default(),
         };
         self.commits.dag.set_remote_protocol(Arc::new(protocol));
-        self.lazy_hash_desc = "lazy, using EdenAPI".to_string();
+        self.lazy_hash_desc = "lazy, using SaplingRemoteAPI".to_string();
     }
 
     /// Enable fetching commit hashes lazily via another "segments".
@@ -357,7 +357,7 @@ impl AppendCommits for HybridCommits {
 #[derive(Clone)]
 struct HybridCommitTextReader {
     zstore: Arc<RwLock<Zstore>>,
-    client: Arc<dyn EdenApi>,
+    client: Arc<dyn SaplingRemoteApi>,
 }
 
 #[async_trait::async_trait]
@@ -425,7 +425,7 @@ impl StripCommits for HybridCommits {
 }
 
 struct Resolver {
-    client: Arc<dyn EdenApi>,
+    client: Arc<dyn SaplingRemoteApi>,
     zstore: Arc<RwLock<Zstore>>,
 }
 
@@ -516,7 +516,7 @@ Feature Providers:
     IdMap
   Commit Data (user, message):
     Zstore (incomplete, draft)
-    EdenAPI (remaining, public)
+    SaplingRemoteAPI (remaining, public)
     Revlog {}
 Commit Hashes: {}
 "#,

@@ -1,5 +1,6 @@
 #chg-compatible
 #require no-fsmonitor no-eden
+#debugruntest-incompatible
 
 Setup. SCM_SAMPLING_FILEPATH needs to be cleared as some environments may
 have it set.
@@ -252,6 +253,11 @@ Both Rust and Python use canonical "update" name:
   $ SL_LOG=command_info=debug hg go --config checkout.use-rust=false . 2>&1 | grep command=
   DEBUG command_info: command="update"
   DEBUG command_info: command="update"
+
+  $ SL_IDENTITY=sl SL_LOG=command_info=debug hg go --config checkout.use-rust=false . 2>&1 | grep command=
+  DEBUG command_info: command="update"
+  DEBUG command_info: command="update"
+
 Sub commands work:
   $ SL_LOG=command_info=debug hg sparse 2>&1 | grep command=
   DEBUG command_info: command="sparse"

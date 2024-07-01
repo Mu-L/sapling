@@ -28,12 +28,15 @@ export interface Platform {
   platformName: PlatformName;
   confirm(message: string, details?: string): Promise<boolean>;
   openFile(path: RepoRelativePath, options?: {line?: OneIndexedLineNumber}): void;
+  openFiles(paths: Array<RepoRelativePath>, options?: {line?: OneIndexedLineNumber}): void;
   canCustomizeFileOpener: boolean;
   openContainingFolder?(path: RepoRelativePath): void;
   openDiff?(path: RepoRelativePath, comparison: Comparison): void;
   openExternalLink(url: string): void;
   clipboardCopy(text: string, html?: string): void;
   chooseFile?(title: string, multi: boolean): Promise<Array<File>>;
+  /** Whether to ask to configure an external merge tool. Useful for standalone platforms, but not embedded ones like vscode. */
+  upsellExternalMergeTool: boolean;
   /**
    * Get stored data from local persistant cache (usually browser local storage).
    * Note: Some platforms may not support this (e.g. browser with localStorage disabled),
@@ -68,6 +71,7 @@ export interface Platform {
 
   theme?: {
     getTheme(): ThemeColor;
+    getThemeName?(): string | undefined;
     onDidChangeTheme(callback: (theme: ThemeColor) => unknown): Disposable;
     resetCSS?: string;
   };

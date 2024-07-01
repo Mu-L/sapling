@@ -20,7 +20,11 @@ export const browserPlatformImpl = {
   openFile: (path: RepoRelativePath, options?: {line?: OneIndexedLineNumber}) => {
     window.clientToServerAPI?.postMessage({type: 'platform/openFile', path, options});
   },
+  openFiles: (paths: Array<RepoRelativePath>, options?: {line?: OneIndexedLineNumber}) => {
+    window.clientToServerAPI?.postMessage({type: 'platform/openFiles', paths, options});
+  },
   canCustomizeFileOpener: true,
+  upsellExternalMergeTool: true,
 
   openContainingFolder: (path: RepoRelativePath) => {
     window.clientToServerAPI?.postMessage({type: 'platform/openContainingFolder', path});

@@ -129,21 +129,32 @@ fn looks_like_ascii_identifier(bytes: &[u8]) -> bool {
 pub struct Group(pub usize);
 
 impl Group {
-    /// The "master" group. `ancestors(master)`.
+    /// The "master" group. usually `ancestors(master)`.
     /// - Expected to have most of the commits in a repo.
-    /// - Expected to be free from fragmentation. In other words,
+    /// - Ideally free from fragmentation. In other words,
     ///   `ancestors(master)` can be represented in a single Span.
+    /// - Ideally has limited heads. Does not scale with too many heads.
+    /// - VertexNames (commit hashes) might be lazy.
     pub const MASTER: Self = Self(0);
 
     /// The "non-master" group.
-    /// - Anything not in `ancestors(master)`. For example, public release
-    ///   branches, local feature branches.
+    /// - Concrete vertexes not in the "master" group. For example, public
+    ///   release branches, local feature branches.
     /// - Expected to have multiple heads. In other words, is fragmented.
     /// - Expected to be sparse referred. For example, the "visible heads"
     ///   will refer to a bounded subset in this group.
+    /// - Expected to be non-lazy. Code paths assume VertexNames
+    ///   (commit hashes) are known in this group.
     pub const NON_MASTER: Self = Self(1);
 
-    pub const ALL: [Self; 2] = [Self::MASTER, Self::NON_MASTER];
+    /// The "virtual" group.
+    /// - Typically, "null" and "wdir()".
+    /// - Should not be written to disk.
+    /// - Not lazy.
+    pub const VIRTUAL: Self = Self(2);
+
+    pub const ALL: [Self; 3] = [Self::MASTER, Self::NON_MASTER, Self::VIRTUAL];
+    pub const MAX: Self = Self::ALL[Self::COUNT - 1];
 
     pub const COUNT: usize = Self::ALL.len();
 
@@ -174,14 +185,23 @@ impl Group {
             unreachable!()
         }
     }
+
+    /// Test if the `Group` is valid.
+    pub fn is_valid(self) -> bool {
+        self.0 <= Self::MAX.0
+    }
 }
 
 impl Id {
     /// The [`Group`] of an Id.
     pub fn group(self) -> Group {
         let group = (self.0 >> (64 - Group::BITS)) as usize;
-        debug_assert!(group < Group::COUNT);
         Group(group)
+    }
+
+    /// Test if the `Id` is valid.
+    pub fn is_valid(self) -> bool {
+        self.group().is_valid()
     }
 
     /// Similar to `self..=other`.
@@ -205,6 +225,11 @@ impl Id {
         [prefix, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]
     }
 
+    /// Test if this `Id` is in the VIRTUAL group.
+    pub fn is_virtual(self) -> bool {
+        self.group() == Group::VIRTUAL
+    }
+
     pub const MAX: Self = Group::ALL[Group::COUNT - 1].max_id();
     pub const MIN: Self = Group::ALL[0].min_id();
 }
@@ -212,8 +237,10 @@ impl Id {
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let group = self.group();
-        if group == Group::NON_MASTER {
-            write!(f, "N")?;
+        match group {
+            Group::NON_MASTER => write!(f, "N")?,
+            Group::VIRTUAL => write!(f, "V")?,
+            _ => {}
         }
         write!(f, "{}", self.0 - group.min_id().0)
     }
@@ -230,6 +257,7 @@ impl fmt::Display for Group {
         match *self {
             Group::MASTER => write!(f, "Group Master"),
             Group::NON_MASTER => write!(f, "Group Non-Master"),
+            Group::VIRTUAL => write!(f, "Group Virtual"),
             _ => write!(f, "Group {}", self.0),
         }
     }
@@ -248,6 +276,22 @@ impl ops::Sub<u64> for Id {
 
     fn sub(self, other: u64) -> Self {
         Self(self.0 - other)
+    }
+}
+
+impl ops::Add<u8> for Group {
+    type Output = Group;
+
+    fn add(self, other: u8) -> Self {
+        Self(self.0 + other as usize)
+    }
+}
+
+impl ops::Sub<u8> for Group {
+    type Output = Group;
+
+    fn sub(self, other: u8) -> Self {
+        Self(self.0 - other as usize)
     }
 }
 

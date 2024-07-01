@@ -71,7 +71,7 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
     if let Some(arg1) = args.get(1).map(|s| s.as_ref()) {
         match arg1 {
             "start-pfc-server" => {
-                let config: Arc<dyn Config> = Arc::new(ConfigSet::new());
+                let config: Arc<dyn Config> = Arc::new(ConfigSet::new().named("pfc-server"));
                 return HgPython::new(&args).run_hg(args, io, &config, false);
             }
             "start-commandserver" => {
@@ -276,7 +276,10 @@ fn dispatch_command(
                     }
                 }
 
-                let mut interp = HgPython::new(dispatcher.args());
+                // Init interpreter with unmodifed args. This is so `sys.argv` in Python
+                // reflects what the user actually typed (we muck with the args in Rust
+                // dispatch).
+                let mut interp = HgPython::new(dispatcher.orig_args());
                 if dispatcher.global_opts().trace {
                     // Error is not fatal.
                     let _ = interp.setup_tracing("*".into());
@@ -488,7 +491,7 @@ fn spawn_progress_thread(
         disable_rendering = true;
     }
 
-    if global_opts.quiet || global_opts.debug || hgplain::is_plain(Some("progress")) {
+    if global_opts.quiet || hgplain::is_plain(Some("progress")) {
         disable_rendering = true;
     }
 
@@ -752,7 +755,7 @@ fn log_end(
         target: "command_info",
         exit_code=exit_code,
         max_rss=max_rss,
-        total_blocked_ms=util::math::truncate_int(total_blocked_ms, 3),
+        total_blocked_ms=total_blocked_ms,
         is_plain=hgplain::is_plain(None),
     );
 
@@ -919,13 +922,13 @@ fn setup_atexit(start_time: StartTime) {
     atexit::AtExit::new(Box::new(move || {
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
-        // Truncate duration to top three significant decimal digits of
-        // precision to reduce cardinality for logging storage.
-        tracing::debug!(target: "measuredtimes", command_duration=util::math::truncate_int(duration_ms, 3));
+        tracing::debug!(target: "measuredtimes", command_duration=duration_ms);
 
         // Make extra sure our metrics are written out.
         sampling::flush();
-    })).named("flush sampling".into()).queued();
+    }))
+    .named("flush sampling".into())
+    .queued();
 }
 
 fn setup_ctrlc() {
@@ -949,6 +952,11 @@ fn setup_ctrlc() {
         // Exit pager to restore terminal states (ex. quit raw mode)
         if let Ok(io) = clidispatch::io::IO::main() {
             let _ = io.quit_pager();
+
+            // Attempt to reset terminal back to a good state. In particular, this fixes
+            // the terminal if a Python `input()` call (with readline) is interrupted by
+            // ctrl-c.
+            let _ = io.reset_term();
         }
 
         // Run atexit handlers.

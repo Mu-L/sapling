@@ -20,9 +20,8 @@ import {
   simulateMessageFromServer,
   simulateUncommittedChangedFiles,
 } from '../testUtils';
-import {fireEvent, render, waitFor, screen} from '@testing-library/react';
+import {fireEvent, render, waitFor, screen, act} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import {act} from 'react-dom/test-utils';
 import {nextTick} from 'shared/testUtils';
 import * as utils from 'shared/utils';
 
@@ -380,6 +379,10 @@ describe('Image upload inside TextArea ', () => {
             },
           });
         });
+        // Get around internally-disabled button
+        fireEvent.click(screen.getByTestId('settings-gear-button'));
+        const enableSubmit = screen.queryByTestId('force-enable-github-submit');
+        enableSubmit && fireEvent.click(enableSubmit);
         CommitInfoTestUtils.clickCommitMode();
         expect(
           CommitInfoTestUtils.withinCommitActionBar().getByText('Commit and Submit'),
@@ -417,7 +420,7 @@ describe('Image upload inside TextArea ', () => {
           operation: expect.objectContaining({
             args: expect.arrayContaining([
               'commit',
-              expect.stringMatching('hi\n+(Summary: )?hey\nhttps://image.example.com/1111'),
+              expect.stringMatching('hi\n+(Summary:\n)?hey\nhttps://image.example.com/1111'),
             ]),
           }),
         }),

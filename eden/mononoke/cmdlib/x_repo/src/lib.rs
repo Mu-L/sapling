@@ -185,7 +185,7 @@ async fn create_commit_syncer_from_matches_impl<R: Repo>(
     reverse: bool,
     repo_pair: Option<(RepositoryId, RepositoryId)>,
 ) -> Result<CommitSyncer<SqlSyncedCommitMapping, R>, Error> {
-    let (source_repo, target_repo, mapping, live_commit_sync_config) =
+    let (source_repo, target_repo, mapping, live_commit_sync_config): (Source<R>, Target<R>, _, _) =
         get_things_from_matches(ctx, matches, repo_pair).await?;
 
     let (source_repo, target_repo) = if reverse {
@@ -196,11 +196,28 @@ async fn create_commit_syncer_from_matches_impl<R: Repo>(
 
     let caching = matches.caching();
     let x_repo_syncer_lease = create_commit_syncer_lease(ctx.fb, caching)?;
+    let common_config =
+        live_commit_sync_config.get_common_config(source_repo.0.repo_identity().id())?;
 
+    let large_repo_id = common_config.large_repo_id;
+    let source_repo_id = source_repo.0.repo_identity().id();
+    let target_repo_id = target_repo.0.repo_identity().id();
+    let small_repo = if large_repo_id == source_repo_id {
+        target_repo.0.clone()
+    } else if large_repo_id == target_repo_id {
+        source_repo.0.clone()
+    } else {
+        bail!(
+            "Unexpectedly CommitSyncConfig {:?} has neither of {}, {} as a large repo",
+            common_config,
+            source_repo_id,
+            target_repo_id
+        );
+    };
     let submodule_deps = get_all_possible_small_repo_submodule_deps_from_matches(
         ctx,
         matches,
-        &source_repo.0,
+        &small_repo,
         live_commit_sync_config.clone(),
     )
     .await?;
@@ -270,14 +287,20 @@ pub async fn get_all_possible_small_repo_submodule_deps_from_matches<R: Repo>(
         .flatten()
         .collect::<HashSet<_>>();
 
-    let submodule_deps_map: HashMap<NonRootMPath, R> = stream::iter(small_repo_deps_ids)
+    let submodule_deps_to_load = small_repo_deps_ids.len();
+
+    let submodule_deps_map: HashMap<NonRootMPath, Arc<R>> = stream::iter(small_repo_deps_ids)
         .then(|(submodule_path, repo_id)| async move {
             let repo =
                 args::open_repo_by_id_unredacted(ctx.fb, ctx.logger(), matches, repo_id).await?;
-            anyhow::Ok((submodule_path, repo))
+            anyhow::Ok((submodule_path, Arc::new(repo)))
         })
         .try_collect()
         .await?;
+
+    if submodule_deps_map.len() < submodule_deps_to_load {
+        return Ok(SubmoduleDeps::NotAvailable);
+    }
 
     Ok(SubmoduleDeps::ForSync(submodule_deps_map))
 }

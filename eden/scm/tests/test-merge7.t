@@ -1,8 +1,6 @@
-#debugruntest-compatible
 
 #require no-eden
 
-  $ configure modernclient
 
 initial
   $ newclientrepo test-a

@@ -20,11 +20,9 @@ use types::key::Key;
 use types::parents::Parents;
 
 use crate::Blake3;
-use crate::ContentId;
 use crate::InvalidHgId;
 use crate::ServerError;
 use crate::Sha1;
-use crate::Sha256;
 use crate::UploadToken;
 
 /// Tombstone string that replaces the content of redacted files.
@@ -65,19 +63,20 @@ impl FileError {
 
 /// File "aux data", requires an additional mononoke blobstore lookup. See mononoke_types::ContentMetadataV2.
 #[auto_wire]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-#[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct FileAuxData {
     #[id(0)]
     pub total_size: u64,
-    #[id(1)]
-    pub content_id: ContentId,
+    // #[id(1)] # deprecated
     #[id(2)]
     pub sha1: Sha1,
-    #[id(3)]
-    pub sha256: Sha256,
+    // #[id(3)] # deprecated
     #[id(4)]
-    pub seeded_blake3: Option<Blake3>,
+    pub blake3: Blake3,
+    // None 'file_header_metadata' would mean file_header_metadata is not fetched/not known if it is present
+    // Empty metadata would be translated into empty blob
+    #[id(5)]
+    pub file_header_metadata: Option<Bytes>,
 }
 
 /// File content
@@ -170,23 +169,6 @@ pub struct FileEntry {
 impl FileAuxData {
     /// Calculate `FileAuxData` from file content.
     pub fn from_content(data: &[u8]) -> Self {
-        let sha256 = {
-            use sha2::Digest;
-            let mut hash = sha2::Sha256::new();
-            hash.update(data);
-            let bytes: [u8; Sha256::len()] = hash.finalize().into();
-            Sha256::from(bytes)
-        };
-        let content_id = {
-            use blake2::digest::FixedOutput;
-            use blake2::digest::Mac;
-            use blake2::Blake2bMac;
-            let mut hash = Blake2bMac::new_from_slice(b"content").expect("key < 32 bytes");
-            hash.update(data);
-            let mut ret = [0; ContentId::len()];
-            hash.finalize_into((&mut ret).into());
-            ContentId::from_byte_array(ret)
-        };
         let sha1 = {
             use sha1::Digest;
             let mut hash = sha1::Sha1::new();
@@ -194,15 +176,13 @@ impl FileAuxData {
             let bytes: [u8; Sha1::len()] = hash.finalize().into();
             Sha1::from(bytes)
         };
-        let seeded_blake3 = {
+        let blake3 = {
             use blake3::Hasher;
-            #[cfg(not(fbcode_build))]
-            let key = "20220728-2357111317192329313741#".as_bytes();
             #[cfg(fbcode_build)]
-            let key = blake3_constant::BLAKE3_HASH_KEY.as_bytes();
-            let mut ret = [0; Blake3::len()];
-            ret.copy_from_slice(key);
-            let mut hasher = Hasher::new_keyed(&ret);
+            let key = blake3_constants::BLAKE3_HASH_KEY;
+            #[cfg(not(fbcode_build))]
+            let key = b"20220728-2357111317192329313741#";
+            let mut hasher = Hasher::new_keyed(key);
             hasher.update(data.as_ref());
             let hashed_bytes: [u8; Blake3::len()] = hasher.finalize().into();
             Blake3::from(hashed_bytes)
@@ -210,10 +190,9 @@ impl FileAuxData {
         let total_size = data.len() as _;
         Self {
             total_size,
-            content_id,
             sha1,
-            sha256,
-            seeded_blake3: Some(seeded_blake3),
+            blake3,
+            file_header_metadata: None, // can't be calculated
         }
     }
 }
@@ -293,9 +272,7 @@ pub struct FileSpec {
 #[derive(Clone, Default, Debug, Eq, PartialEq, Serialize)]
 #[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
 pub struct FileRequest {
-    // Deprecated!!!
-    #[id(0)]
-    pub keys: Vec<Key>,
+    // #[id(0)] # deprecated
     #[id(1)]
     pub reqs: Vec<FileSpec>,
 }
@@ -307,6 +284,19 @@ impl Arbitrary for FileContent {
         Self {
             hg_file_blob: Bytes::from(bytes),
             metadata: Arbitrary::arbitrary(g),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "for-tests"))]
+impl Arbitrary for FileAuxData {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        let bytes: Vec<u8> = Arbitrary::arbitrary(g);
+        Self {
+            total_size: Arbitrary::arbitrary(g),
+            sha1: Arbitrary::arbitrary(g),
+            blake3: Arbitrary::arbitrary(g),
+            file_header_metadata: Some(Bytes::from(bytes)),
         }
     }
 }
@@ -339,24 +329,4 @@ pub struct UploadHgFilenodeRequest {
 pub struct UploadTokensResponse {
     #[id(2)]
     pub token: UploadToken,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_blake2() {
-        let aux = FileAuxData::from_content(b"abc");
-        #[rustfmt::skip]
-        assert_eq!(
-            aux.content_id.as_ref(),
-            &[
-                0x22, 0x8d, 0x7e, 0xfd, 0x5e, 0x3c, 0x1a, 0xcd,
-                0xf4, 0x0e, 0x52, 0x43, 0x3f, 0x72, 0x8f, 0x53,
-                0x78, 0x90, 0x0e, 0x41, 0xd4, 0xea, 0xe7, 0x14,
-                0x64, 0x1f, 0x6f, 0x04, 0x0d, 0xee, 0x69, 0x3e,
-            ]
-        );
-    }
 }

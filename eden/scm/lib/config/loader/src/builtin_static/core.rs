@@ -44,16 +44,22 @@ status.modified=blue bold
 status.removed=red bold
 status.unknown=magenta bold underline
 
+[git]
+filter=blob:none
+
 [unsafe]
 filtersuspectsymlink=true
 
 [experimental]
+bisect2=true
 exportstack-max-bytes=1M
 
 log-implicit-follow-threshold=10000
 
 titles-namespace=true
 local-committemplate=true
+
+evalframe-passthrough=true
 
 [zsh]
 completion-age=7

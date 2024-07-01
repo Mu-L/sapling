@@ -85,6 +85,7 @@ configitem("pullcreatemarkers", "check-local-versions", default=False)
 configitem("phrevset", "autopull", default=True)
 configitem("phrevset", "callsign", default=None)
 configitem("phrevset", "graphqlonly", default=True)
+configitem("phrevset", "abort-if-git-diff-unavailable", default=True)
 
 configitem("fbcodereview", "hide-landed-commits", default=True)
 
@@ -205,8 +206,8 @@ def memoize(f):
     [4, 5, 6]
 
     As expected, we have 4 entries in the cache for a call like f(a, b, c, d)
-    >>> pp(three._phabstatuscache)
-    {(3, 1): [4], (3, 1, 2, 3): [4, 5, 6], (3, 2): [5], (3, 3): [6]}
+    >>> print(three._phabstatuscache)
+    {(3, 1, 2, 3): [4, 5, 6], (3, 1): [4], (3, 2): [5], (3, 3): [6]}
     """
 
     def helper(*args):
@@ -673,7 +674,7 @@ def debugmarklanded(ui, repo, **opts):
     + cmdutil.walkopts,
 )
 def url(ui, repo, *pats, **opts):
-    """show url for the given files"""
+    """show url for the given files, or the current directory if no files are provided"""
     from urllib.parse import quote
 
     url_reponame = ui.config("fbscmquery", "reponame")
@@ -686,6 +687,10 @@ def url(ui, repo, *pats, **opts):
         paths = m.files()
     else:
         paths = ctx.walk(m)
+
+    if not paths:
+        paths = [repo.getcwd()]
+
     for path in paths:
         url = url_template % {
             "repo_name": url_reponame,
@@ -1071,7 +1076,7 @@ def parsedesc(repo, resp, ignoreparsefailure):
 
 
 @util.lrucachefunc
-def diffidtonode(repo, diffid):
+def diffidtonode(repo, diffid, localreponame=None):
     """Return node that matches a given Differential ID or None.
 
     The node might exist or not exist in the repo.
@@ -1100,7 +1105,10 @@ def diffidtonode(repo, diffid):
         return None
 
     vcs = resp.get("source_control_system")
-    localreponame = repo.ui.config("remotefilelog", "reponame")
+
+    if localreponame is None:
+        localreponame = repo.ui.config("remotefilelog", "reponame")
+
     diffreponame = None
 
     # If already committed, prefer the commit that went to our local
@@ -1116,19 +1124,15 @@ def diffidtonode(repo, diffid):
         if diffreponame in repo.ui.configlist("phrevset", "aliases"):
             diffreponame = localreponame
 
-    if not util.istest() and (
-        _normalize_slash(diffreponame) != _normalize_slash(localreponame)
-    ):
+    if not util.istest() and not _matchreponames(diffreponame, localreponame):
         megarepo_can_handle = extensions.isenabled(
             repo.ui, "megarepo"
-        ) and _normalize_slash(diffreponame) in repo.ui.configlist(
-            "megarepo", "transparent-lookup"
-        )
+        ) and diffreponame in repo.ui.configlist("megarepo", "transparent-lookup")
 
         if megarepo_can_handle:
             # megarepo extension might be able to translate diff/commit to
             # local repo - don't abort the entire command.
-            pass
+            return None
         else:
             raise error.Abort(
                 "D%s is for repo '%s', not this repo ('%s')"
@@ -1137,28 +1141,7 @@ def diffidtonode(repo, diffid):
 
     repo.ui.debug("[diffrev] VCS is %s\n" % vcs)
 
-    if vcs == "git":
-        if not rev:
-            rev = parsedesc(repo, resp, ignoreparsefailure=False)
-
-        repo.ui.debug("[diffrev] GIT rev is %s\n" % rev)
-
-        peerpath = repo.ui.expandpath("default")
-        remoterepo = hg.peer(repo, {}, peerpath)
-        remoterev = remoterepo.lookup("_gitlookup_git_%s" % rev)
-
-        repo.ui.debug("[diffrev] HG rev is %s\n" % hex(remoterev))
-        if not remoterev:
-            repo.ui.debug("[diffrev] Falling back to linear search\n")
-            node = localgetdiff(repo, diffid)
-            if node is None:
-                repo.ui.warn(_("Could not find diff D%s in changelog\n") % diffid)
-
-            return node
-
-        return remoterev
-
-    elif vcs == "hg":
+    if vcs == "git" or vcs == "hg":
         if not rev:
             rev = parsedesc(repo, resp, ignoreparsefailure=True)
 
@@ -1208,6 +1191,17 @@ def diffidtonode(repo, diffid):
                 )
                 if successors:
                     return successors[0]
+            if (
+                vcs == "git"
+                and repo.ui.configbool("phrevset", "abort-if-git-diff-unavailable")
+                and node not in repo
+            ):
+                raise error.Abort(
+                    _(
+                        "A more recent version (%s) of D%s was found in Phabricator, you might want to run `jf get D%s`"
+                    )
+                    % (hex(node)[:8], diffid, diffid)
+                )
             return node
 
         # local:commits is empty
@@ -1285,5 +1279,29 @@ def _get_callsigns(repo) -> List[str]:
     return callsigns
 
 
-def _normalize_slash(name):
-    return (name or "").rsplit("/", 1)[-1]
+def _matchreponames(diffreponame: Optional[str], localreponame: Optional[str]) -> bool:
+    """Makes sure two different repo names look mostly the same, ignoring `.git`
+    suffixes and checking that suffixes considering repos names separated by
+    slashes look the same. It's assumed that `localreponame` should be a longer
+    version of `diffreponame`.
+
+    >>> _matchreponames("bar.git", "foo/bar")
+    True
+    >>> _matchreponames("bar", "foo/bar.git")
+    True
+    >>> _matchreponames("afoo/bar", "foo/bar")
+    False
+    >>> _matchreponames("foo/bar", "bar")
+    False
+    >>> _matchreponames("w/x/y", "z/x/y")
+    False
+    """
+
+    def _processreponame(reponame: str) -> List[str]:
+        return (reponame or "").removesuffix(".git").split("/")
+
+    diffreponame = _processreponame(diffreponame)
+    localreponame = _processreponame(localreponame)
+    dilen = len(diffreponame)
+    lolen = len(localreponame)
+    return dilen <= lolen and diffreponame[-dilen:] == localreponame[-dilen:]

@@ -1,7 +1,7 @@
 #chg-compatible
+#debugruntest-incompatible
   $ setconfig format.use-segmented-changelog=true
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.copytrace=on
   $ configure modernclient
 
   $ add()

@@ -22,9 +22,9 @@ use cpython_ext::PyPathBuf;
 use cpython_ext::ResultPyErrExt;
 use dag_types::Location;
 use dag_types::VertexName;
-use edenapi::EdenApi;
-use edenapi::EdenApiError;
 use edenapi::Response;
+use edenapi::SaplingRemoteApi;
+use edenapi::SaplingRemoteApiError;
 use edenapi::Stats;
 use edenapi_ext::calc_contentid;
 use edenapi_types::AlterSnapshotRequest;
@@ -39,10 +39,10 @@ use edenapi_types::CommitKnownResponse;
 use edenapi_types::CommitLocationToHashRequest;
 use edenapi_types::CommitLocationToHashResponse;
 use edenapi_types::CommitRevlogData;
-use edenapi_types::EdenApiServerError;
 use edenapi_types::FetchSnapshotRequest;
 use edenapi_types::FetchSnapshotResponse;
 use edenapi_types::FileResponse;
+use edenapi_types::GetReferencesParams;
 use edenapi_types::HgChangesetContent;
 use edenapi_types::HgFilenodeData;
 use edenapi_types::HgMutationEntryContent;
@@ -50,11 +50,15 @@ use edenapi_types::HistoryEntry;
 use edenapi_types::IndexableId;
 use edenapi_types::LandStackResponse;
 use edenapi_types::LookupResult;
+use edenapi_types::ReferencesDataResponse;
+use edenapi_types::SaplingRemoteApiServerError;
 use edenapi_types::SetBookmarkResponse;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
+use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadHgChangeset;
 use edenapi_types::UploadToken;
+use edenapi_types::WorkspaceDataResponse;
 use futures::prelude::*;
 use hgstore::split_hg_file_metadata;
 use progress_model::ProgressBar;
@@ -74,12 +78,12 @@ use crate::util::to_keys;
 use crate::util::to_keys_with_parents;
 use crate::util::to_trees_upload_items;
 
-/// Extension trait allowing EdenAPI methods to be called from Python code.
+/// Extension trait allowing SaplingRemoteAPI methods to be called from Python code.
 ///
 /// One nice benefit of making this a trait instead of directly implementing
 /// the methods inside a `py_class!` macro invocation is that tools like
 /// `rustfmt` can still parse the code.
-pub trait EdenApiPyExt: EdenApi {
+pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     fn health_py(&self, py: Python) -> PyResult<PyDict> {
         let meta = block_unless_interrupted(self.health())
             .map_pyerr(py)?
@@ -154,7 +158,7 @@ pub trait EdenApiPyExt: EdenApi {
             .allow_threads(|| {
                 block_unless_interrupted(async move {
                     let response = self.trees(keys, attributes).await?;
-                    Ok::<_, EdenApiError>((response.entries, response.stats))
+                    Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
             .map_pyerr(py)?
@@ -180,7 +184,7 @@ pub trait EdenApiPyExt: EdenApi {
                     let response = self.commit_revlog_data(nodes).await?;
                     let commits = response.entries;
                     let stats = response.stats;
-                    Ok::<_, EdenApiError>((commits, stats))
+                    Ok::<_, SaplingRemoteApiError>((commits, stats))
                 })
             })
             .map_pyerr(py)?
@@ -216,7 +220,7 @@ pub trait EdenApiPyExt: EdenApi {
             .allow_threads(|| {
                 block_unless_interrupted(async move {
                     let response = self.set_bookmark(bookmark, to, from, pushvars).await?;
-                    Ok::<_, EdenApiError>(response)
+                    Ok::<_, SaplingRemoteApiError>(response)
                 })
             })
             .map_pyerr(py)?
@@ -237,7 +241,7 @@ pub trait EdenApiPyExt: EdenApi {
             .allow_threads(|| {
                 block_unless_interrupted(async move {
                     let response = self.land_stack(bookmark, head, base, pushvars).await?;
-                    Ok::<_, EdenApiError>(response)
+                    Ok::<_, SaplingRemoteApiError>(response)
                 })
             })
             .map_pyerr(py)?
@@ -542,7 +546,7 @@ pub trait EdenApiPyExt: EdenApi {
                             (key.hgid, content_id, parents, copy_from),
                         ))
                     }
-                    _ => Err(EdenApiError::Other(format_err!(
+                    _ => Err(SaplingRemoteApiError::Other(format_err!(
                         "failed to fetch file content for the key '{}'",
                         key
                     )))
@@ -573,7 +577,7 @@ pub trait EdenApiPyExt: EdenApi {
                         .map(|token| {
                             let content_id = match token.data.id {
                                 AnyId::AnyFileContentId(id) => id,
-                                _ => bail!(EdenApiError::Other(format_err!(downcast_error))),
+                                _ => bail!(SaplingRemoteApiError::Other(format_err!(downcast_error))),
                             };
                             Ok((content_id, token))
                         })
@@ -581,21 +585,21 @@ pub trait EdenApiPyExt: EdenApi {
 
                     // build the list of HgFilenodeData for upload
                     let filenodes_data = filenodes_data.into_iter().map(|(node_id, content_id, parents, copy_from)| {
-                        let file_content_upload_token = file_content_tokens.get(&content_id).ok_or_else(|| EdenApiError::Other(format_err!("unexpected error: upload token is missing for ContentId({})", content_id)))?.clone();
+                        let file_content_upload_token = file_content_tokens.get(&content_id).ok_or_else(|| SaplingRemoteApiError::Other(format_err!("unexpected error: upload token is missing for ContentId({})", content_id)))?.clone();
                         Ok(HgFilenodeData {
                             node_id,
                             parents,
                             file_content_upload_token,
                             metadata: copy_from.to_vec(),
                         })
-                    }).collect::<Result<Vec<_>, EdenApiError>>()?;
+                    }).collect::<Result<Vec<_>, SaplingRemoteApiError>>()?;
 
                     // upload hg filenodes
                     let response = self
                         .upload_filenodes_batch(filenodes_data)
                         .await?;
 
-                    Ok::<_, EdenApiError>((response.entries, response.stats))
+                    Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
             .map_pyerr(py)?
@@ -622,7 +626,7 @@ pub trait EdenApiPyExt: EdenApi {
             .allow_threads(|| {
                 block_unless_interrupted(async move {
                     let response = self.upload_trees_batch(items).await?;
-                    Ok::<_, EdenApiError>((response.entries, response.stats))
+                    Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
             .map_pyerr(py)?
@@ -656,7 +660,7 @@ pub trait EdenApiPyExt: EdenApi {
             .allow_threads(|| {
                 block_unless_interrupted(async move {
                     let response = self.upload_changesets(changesets, mutations).await?;
-                    Ok::<_, EdenApiError>((response.entries, response.stats))
+                    Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
             .map_pyerr(py)?
@@ -709,15 +713,51 @@ pub trait EdenApiPyExt: EdenApi {
             .map_pyerr(py)
             .map(|data| PyBytes::new(py, &data))
     }
+
+    fn cloud_workspace_py(
+        &self,
+        workspace: String,
+        reponame: String,
+        py: Python,
+    ) -> PyResult<Serde<WorkspaceDataResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_workspace(workspace, reponame)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_references_py(
+        &self,
+        data: Serde<GetReferencesParams>,
+        py: Python,
+    ) -> PyResult<Serde<ReferencesDataResponse>> {
+        py.allow_threads(|| block_unless_interrupted(self.cloud_references(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)
+            .map(Serde)
+    }
+
+    fn cloud_update_references_py(
+        &self,
+        data: Serde<UpdateReferencesParams>,
+        py: Python,
+    ) -> PyResult<Serde<ReferencesDataResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_update_references(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
 }
 
-impl<T: EdenApi + ?Sized> EdenApiPyExt for T {}
+impl<T: SaplingRemoteApi + ?Sized> SaplingRemoteApiPyExt for T {}
 
 async fn write_trees(
-    mut response: Response<Result<TreeEntry, EdenApiServerError>>,
+    mut response: Response<Result<TreeEntry, SaplingRemoteApiServerError>>,
     store: Arc<dyn HgIdMutableDeltaStore>,
     prog: Arc<ProgressBar>,
-) -> Result<Stats, EdenApiError> {
+) -> Result<Stats, SaplingRemoteApiError> {
     while let Some(Ok(entry)) = response.entries.try_next().await? {
         store.add_tree(&entry)?;
         prog.increase_position(1);

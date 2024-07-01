@@ -5,69 +5,219 @@
  * GNU General Public License version 2.
  */
 
-use async_trait::async_trait;
-use sql_ext::SqlConnections;
+#![feature(trait_alias)]
+pub mod references;
+pub mod sql;
+pub mod workspace;
+use std::sync::Arc;
 
-use crate::heads::WorkspaceHead;
-use crate::history::WorkspaceHistory;
-use crate::local_bookmarks::WorkspaceLocalBookmark;
-use crate::remote_bookmarks::WorkspaceRemoteBookmark;
-pub mod builder;
-pub mod checkout_locations;
-pub mod heads;
-pub(crate) mod history;
-pub mod local_bookmarks;
-pub mod remote_bookmarks;
-pub mod snapshots;
-pub mod versions;
-pub(crate) mod workspace;
+use bonsai_hg_mapping::BonsaiHgMapping;
+#[cfg(fbcode_build)]
+use commit_cloud_intern_utils::notification::NotificationData;
+use context::CoreContext;
+use edenapi_types::GetReferencesParams;
+use edenapi_types::ReferencesData;
+use edenapi_types::UpdateReferencesParams;
+use edenapi_types::WorkspaceData;
+use facet::facet;
+use mononoke_types::Timestamp;
+use references::update_references_data;
+use repo_derived_data::ArcRepoDerivedData;
+use workspace::sanity_check_workspace_name;
 
-#[allow(unused)]
-pub(crate) struct WorkspaceContents {
-    heads: Vec<WorkspaceHead>,
-    local_bookmarks: Vec<WorkspaceLocalBookmark>,
-    remote_bookmarks: Vec<WorkspaceRemoteBookmark>,
-    history: WorkspaceHistory,
+use crate::references::cast_references_data;
+use crate::references::fetch_references;
+use crate::references::versions::WorkspaceVersion;
+use crate::sql::ops::Get;
+use crate::sql::ops::Insert;
+use crate::sql::ops::SqlCommitCloud;
+
+#[facet]
+pub struct CommitCloud {
+    pub storage: SqlCommitCloud,
+    pub bonsai_hg_mapping: Arc<dyn BonsaiHgMapping>,
+    pub repo_derived_data: ArcRepoDerivedData,
+    pub core_ctx: CoreContext,
 }
 
-pub struct SqlCommitCloud {
-    #[allow(unused)]
-    pub(crate) connections: SqlConnections,
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub hostname: String,
+    pub reporoot: String,
+    pub version: u64,
 }
 
-impl SqlCommitCloud {
-    pub fn new(connections: SqlConnections) -> Self {
-        Self { connections }
+#[derive(Debug, Clone)]
+pub struct CommitCloudContext {
+    pub reponame: String,
+    pub workspace: String,
+}
+
+impl CommitCloud {
+    pub async fn get_workspace(
+        &self,
+        workspace: &str,
+        reponame: &str,
+    ) -> anyhow::Result<WorkspaceData> {
+        if workspace.is_empty() || reponame.is_empty() {
+            return Err(anyhow::anyhow!(
+                "'get_workspace' failed: empty repo_name or workspace"
+            ));
+        }
+
+        let maybeworkspace =
+            WorkspaceVersion::fetch_from_db(&self.storage, workspace, reponame).await?;
+        if let Some(res) = maybeworkspace {
+            return Ok(res.into_workspace_data(reponame));
+        }
+        Err(anyhow::anyhow!("Workspace {} does not exist", workspace))
     }
-}
 
-#[async_trait]
-pub trait BasicOps<T = Self> {
-    type ExtraArgs;
+    pub async fn get_references(
+        &self,
+        params: GetReferencesParams,
+    ) -> anyhow::Result<ReferencesData> {
+        let ctx = CommitCloudContext {
+            workspace: params.workspace.clone(),
+            reponame: params.reponame.clone(),
+        };
 
-    async fn get(
+        let base_version = params.version;
+
+        let mut latest_version: u64 = 0;
+        let mut version_timestamp: i64 = 0;
+        let maybeworkspace =
+            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+        if let Some(workspace_version) = maybeworkspace {
+            latest_version = workspace_version.version;
+            version_timestamp = workspace_version.timestamp.timestamp_nanos();
+        }
+        if base_version > latest_version && latest_version == 0 {
+            return Err(anyhow::anyhow!(
+                "Workspace {} has been removed or renamed",
+                ctx.workspace.clone()
+            ));
+        }
+
+        if base_version > latest_version {
+            return Err(anyhow::anyhow!(
+                "Base version {} is greater than latest version {}",
+                base_version,
+                latest_version
+            ));
+        }
+
+        if base_version == latest_version {
+            return Ok(ReferencesData {
+                version: latest_version,
+                heads: None,
+                bookmarks: None,
+                heads_dates: None,
+                remote_bookmarks: None,
+                snapshots: None,
+                timestamp: Some(version_timestamp),
+            });
+        }
+
+        let raw_references_data = fetch_references(ctx.clone(), &self.storage).await?;
+
+        let references_data = cast_references_data(
+            raw_references_data,
+            latest_version,
+            version_timestamp,
+            self.bonsai_hg_mapping.clone(),
+            self.repo_derived_data.clone(),
+            &self.core_ctx,
+        )
+        .await?;
+
+        Ok(references_data)
+    }
+
+    pub async fn update_references(
         &self,
-        reponame: String,
-        workspace: String,
-        extra_args: Self::ExtraArgs,
-    ) -> anyhow::Result<Vec<T>>;
-    async fn insert(
-        &self,
-        reponame: String,
-        workspace: String,
-        data: T,
-        extra_args: Self::ExtraArgs,
-    ) -> anyhow::Result<bool>;
-    async fn delete(
-        &self,
-        reponame: String,
-        workspace: String,
-        extra_args: Self::ExtraArgs,
-    ) -> anyhow::Result<bool>;
-    async fn update(
-        &self,
-        reponame: String,
-        workspace: String,
-        extra_args: Self::ExtraArgs,
-    ) -> anyhow::Result<bool>;
+        params: UpdateReferencesParams,
+    ) -> anyhow::Result<ReferencesData> {
+        if params.workspace.is_empty() || params.reponame.is_empty() {
+            return Err(anyhow::anyhow!(
+                "'update_references' failed: empty repo_name or workspace"
+            ));
+        }
+
+        if params.version == 0 && !sanity_check_workspace_name(&params.workspace) {
+            return Err(anyhow::anyhow!(
+                "'update_references' failed: creating a new workspace with name '{}' is not allowed",
+                params.workspace
+            ));
+        }
+
+        let ctx = CommitCloudContext {
+            workspace: params.workspace.clone(),
+            reponame: params.reponame.clone(),
+        };
+        let mut latest_version: u64 = 0;
+        let mut version_timestamp: i64 = 0;
+
+        let maybeworkspace =
+            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+
+        if let Some(workspace_version) = maybeworkspace {
+            latest_version = workspace_version.version;
+            version_timestamp = workspace_version.timestamp.timestamp_nanos();
+        }
+        let new_version = latest_version + 1;
+        #[cfg(fbcode_build)]
+        let _notification =
+            NotificationData::from_update_references_params(params.clone(), new_version);
+        if params.version < latest_version {
+            let raw_references_data = fetch_references(ctx.clone(), &self.storage).await?;
+            return cast_references_data(
+                raw_references_data,
+                latest_version,
+                version_timestamp,
+                self.bonsai_hg_mapping.clone(),
+                self.repo_derived_data.clone(),
+                &self.core_ctx,
+            )
+            .await;
+        }
+        let mut txn = self
+            .storage
+            .connections
+            .write_connection
+            .start_transaction()
+            .await?;
+        let cri = self.core_ctx.client_request_info();
+
+        txn = update_references_data(&self.storage, txn, cri, params.clone(), &ctx).await?;
+        let new_version_timestamp = Timestamp::now();
+
+        let args = WorkspaceVersion {
+            workspace: ctx.workspace.clone(),
+            version: new_version,
+            timestamp: new_version_timestamp,
+            archived: false,
+        };
+
+        txn = self
+            .storage
+            .insert(
+                txn,
+                cri,
+                ctx.reponame.clone(),
+                ctx.workspace.clone(),
+                args.clone(),
+            )
+            .await?;
+        txn.commit().await?;
+        Ok(ReferencesData {
+            version: new_version,
+            heads: None,
+            bookmarks: None,
+            heads_dates: None,
+            remote_bookmarks: None,
+            snapshots: None,
+            timestamp: Some(new_version_timestamp.timestamp_nanos()),
+        })
+    }
 }

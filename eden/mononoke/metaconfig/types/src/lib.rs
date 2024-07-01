@@ -29,6 +29,7 @@ use ascii::AsciiString;
 use bookmarks_types::BookmarkKey;
 use derive_more::From;
 use derive_more::Into;
+use mononoke_types::hash::GitSha1;
 use mononoke_types::path::MPath;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
@@ -131,6 +132,11 @@ pub struct CommonConfig {
     pub redaction_config: RedactionConfig,
     /// Service identity for interal Mononoke services.
     pub internal_identity: Identity,
+    /// Upper bound in bytes for the RSS memory that can be utilized by Mononoke GRit
+    /// server for serving packfile stream
+    pub git_memory_upper_bound: Option<u64>,
+    /// Scuba table to dump edenapi requests to (for replay).
+    pub edenapi_dumper_scuba_table: Option<String>,
 }
 
 /// Configuration for logging of censored blobstore accesses
@@ -236,6 +242,12 @@ pub struct RepoConfig {
     pub git_concurrency: Option<GitConcurrencyParams>,
     /// Configuration for the repo metadata logger
     pub metadata_logger_config: MetadataLoggerConfig,
+    /// Configuration for connecting to Zelos
+    pub zelos_config: Option<ZelosConfig>,
+    /// The name of the bookmark used to compute repo size
+    pub bookmark_name_for_objects_count: Option<String>,
+    /// Default value for the objects count metric if it cannot be determined via TreeInfo.
+    pub default_objects_count: Option<i64>,
 }
 
 /// Config determining if the repo is deep sharded in the context of a service.
@@ -249,7 +261,7 @@ pub struct ShardingModeConfig {
 #[derive(Eq, Clone, Debug, PartialEq, Hash)]
 pub enum ShardedService {
     /// Eden / Mononoke Service
-    EdenApi,
+    SaplingRemoteApi,
     /// Source Control Service
     SourceControlService,
     /// Derived Data Service
@@ -278,6 +290,8 @@ pub enum ShardedService {
     DraftCommitDeletion,
     /// Mononoke Git Server
     MononokeGitServer,
+    /// Repo Metadata Logger,
+    RepoMetadataLogger,
 }
 
 /// Indicates types of commit hashes used in a repo context.
@@ -315,7 +329,7 @@ pub struct DerivedDataConfig {
     /// Name of scuba table where all derivation will be logged to
     pub scuba_table: Option<String>,
 
-    /// Name of of configuration for enabled derived data types.
+    /// Name of configuration for enabled derived data types.
     pub enabled_config_name: String,
 
     /// All available configs for derived data types
@@ -345,8 +359,13 @@ impl DerivedDataConfig {
         }
     }
 
+    /// Returns active DerivedDataTypesConfig
+    pub fn get_active_config(&self) -> Option<&DerivedDataTypesConfig> {
+        self.available_configs.get(&self.enabled_config_name)
+    }
+
     /// Returns mutable ref to active DerivedDataTypesConfig
-    pub fn get_active_config(&mut self) -> Option<&mut DerivedDataTypesConfig> {
+    pub fn get_active_config_mut(&mut self) -> Option<&mut DerivedDataTypesConfig> {
         self.available_configs.get_mut(&self.enabled_config_name)
     }
 
@@ -385,6 +404,12 @@ pub struct DerivedDataTypesConfig {
 
     /// What blame version should be used.
     pub blame_version: BlameVersion,
+
+    /// What `GitDeltaManifest` version should be used.
+    pub git_delta_manifest_version: GitDeltaManifestVersion,
+
+    /// Config for git delta manifest v2
+    pub git_delta_manifest_v2_config: Option<GitDeltaManifestV2Config>,
 }
 
 /// What type of unode derived data to generate
@@ -401,6 +426,27 @@ pub enum BlameVersion {
     /// Blame v2
     #[default]
     V2,
+}
+
+/// What `GitDeltaManifest` version should be used.
+#[derive(Eq, Clone, Copy, Debug, Default, PartialEq)]
+pub enum GitDeltaManifestVersion {
+    /// GitDeltaManifest v1
+    #[default]
+    V1,
+    /// GitDeltaManifest v2
+    V2,
+}
+
+/// Config for git delta manifest v2
+#[derive(Eq, Clone, Copy, Debug, Default, PartialEq)]
+pub struct GitDeltaManifestV2Config {
+    /// Maximum size allowed for an inlined full object.
+    pub max_inlined_object_size: usize,
+    /// Maximum size allowed for an inlined delta.
+    pub max_inlined_delta_size: u64,
+    /// Chunk size for delta instructions.
+    pub delta_chunk_size: u64,
 }
 
 impl RepoConfig {
@@ -594,6 +640,8 @@ pub struct HookConfig {
     pub bypass: Option<HookBypass>,
     /// Configuration options (in JSON format)
     pub options: Option<String>,
+    /// Whether this hook is log-only
+    pub log_only: bool,
 
     // Deprecated config options
     /// Map of config to it's value. Values here are strings
@@ -944,10 +992,6 @@ pub enum BlobConfig {
     },
     /// Store in an AWS S3 bucket
     AwsS3 {
-        /// AWS Account ID
-        aws_account_id: String,
-        /// AWS Role
-        aws_role: String,
         /// Bucket to connect to
         bucket: String,
         /// AWS Region
@@ -1020,8 +1064,6 @@ pub struct OssRemoteDatabaseConfig {
     pub port: i16,
     /// Name of the database
     pub database: String,
-    /// Keychain group where user and password are stored
-    pub secret_group: String,
     /// Name of the user secret
     pub user_secret: String,
     /// Name of the password secret
@@ -1091,6 +1133,8 @@ pub struct RemoteMetadataDatabaseConfig {
     pub bonsai_blob_mapping: Option<ShardableRemoteDatabaseConfig>,
     /// Database for deletion log
     pub deletion_log: Option<RemoteDatabaseConfig>,
+    /// Database for commit cloud info
+    pub commit_cloud: Option<RemoteDatabaseConfig>,
 }
 
 /// Configuration for the Metadata database when it is remote.
@@ -1247,7 +1291,7 @@ pub enum DefaultSmallToLargeCommitSyncPathAction {
 /// the changesets before being synced.
 /// Since this is used in the small repo config, defininig a struct to set the
 /// default to true, to avoid accidentally syncing git submodules to large repos.
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum GitSubmodulesChangesAction {
     /// Sync all changes made to git submodules without alterations.
     Keep,
@@ -1282,6 +1326,16 @@ pub struct SmallRepoGitSubmoduleConfig {
     /// named "<PREFIX><SUBMODULE_PATH>", e.g. ".x-repo-submodule-voip".
     /// This file will store the git commit that the expansion corresponds to.
     pub submodule_metadata_file_prefix: String,
+
+    /// List git commit hashes that are known dangling submodule pointers in the
+    /// repo's history, i.e. don't actually exist in the submodule repo it's
+    /// supposed to point to.
+    /// This can happen after non-fast-forward pushes or accidentally pushing
+    /// commits with local submodule pointers.
+    ///
+    /// The expansion of these commits will contain a single text file informing
+    /// that the expansion belongs to a dangling submodule pointer.
+    pub dangling_submodule_pointers: Vec<GitSha1>,
 }
 
 impl Default for SmallRepoGitSubmoduleConfig {
@@ -1290,6 +1344,7 @@ impl Default for SmallRepoGitSubmoduleConfig {
             git_submodules_action: GitSubmodulesChangesAction::default(),
             submodule_dependencies: HashMap::new(),
             submodule_metadata_file_prefix: DEFAULT_GIT_SUBMODULE_METADATA_FILE_PREFIX.to_string(),
+            dangling_submodule_pointers: Vec::new(),
         }
     }
 }
@@ -1864,6 +1919,8 @@ pub struct CommitGraphConfig {
     pub scuba_table: Option<String>,
     /// Blobstore key for a preloaded commit graph
     pub preloaded_commit_graph_blobstore_key: Option<String>,
+    /// Whether to disable commit_graph_v2 queries that specify an empty common set for this repo.
+    pub disable_commit_graph_v2_with_empty_common: bool,
 }
 
 /// Configuration for the repo metadata logger
@@ -1871,6 +1928,24 @@ pub struct CommitGraphConfig {
 pub struct MetadataLoggerConfig {
     /// Bookmarks to log repo metadata for
     pub bookmarks: Vec<BookmarkKey>,
+    /// The interval time in secs for which the repo metadata logger sleeps between
+    /// successive iterations of its incremental mode execution
+    pub sleep_interval_secs: u64,
+}
+
+/// Configuration for connecting to Zelos
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ZelosConfig {
+    /// Connect to a local Zelos server
+    Local {
+        /// Local Zelos server port
+        port: u16,
+    },
+    /// Connect to a remote Zelos server
+    Remote {
+        /// Remote Zelos server tier name
+        tier: String,
+    },
 }
 
 /// Information on a loaded config

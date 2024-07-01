@@ -17,12 +17,15 @@ import type {UICodeReviewProvider} from '../UICodeReviewProvider';
 import type {SyncStatus} from '../syncStatus';
 import type {ReactNode} from 'react';
 
+import {OSSCommitMessageFieldSchema} from '../../CommitInfoView/OSSCommitMessageFieldsSchema';
+import {Internal} from '../../Internal';
 import {Tooltip} from '../../Tooltip';
 import {t, T} from '../../i18n';
 import {GhStackSubmitOperation} from '../../operations/GhStackSubmitOperation';
 import {PrSubmitOperation} from '../../operations/PrSubmitOperation';
 import {PullRequestReviewDecision, PullRequestState} from 'isl-server/src/github/generated/graphql';
 import {Icon} from 'shared/Icon';
+import {MS_PER_DAY} from 'shared/constants';
 
 import './GitHubPRBadge.css';
 
@@ -83,7 +86,9 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
       </span>
     );
   };
-
+  isSplitSuggestionSupported(): boolean {
+    return false;
+  }
   submitOperation(_commits: [], options: {draft?: boolean; updateMessage?: string}): Operation {
     if (this.preferredSubmitCommand === 'ghstack') {
       return new GhStackSubmitOperation(options);
@@ -111,8 +116,13 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
     return diff.state === PullRequestState.Closed;
   }
 
+  commitMessageFieldsSchema =
+    Internal.CommitMessageFieldSchemaForGitHub ?? OSSCommitMessageFieldSchema;
+
   supportSubmittingAsDraft = 'newDiffsOnly' as const;
   supportsUpdateMessage = false;
+  submitDisabledReason = () =>
+    Internal.submitForGitHubDisabledReason?.(this.preferredSubmitCommand);
 
   enableMessageSyncing = false;
 
@@ -121,6 +131,8 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
   supportsComparingSinceLastSubmit = false;
 
   supportsRenderingMarkup = false;
+
+  gotoDistanceWarningAgeCutoff = 30 * MS_PER_DAY;
 }
 
 type BadgeState = PullRequestState | 'ERROR' | 'DRAFT' | 'MERGE_QUEUED';

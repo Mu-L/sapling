@@ -43,9 +43,9 @@ def execute_cmd(arg_list: List[Union[pathlib.Path, str]]) -> int:
         )
 
 
-@trace_cmd("hg", "Trace hg object fetches")
-class TraceHgCommand(Subcmd):
-    DESCRIPTION = """Trace EdenFS object fetches from Mercurial.
+@trace_cmd("sl", "Trace sapling object fetches", aliases=["hg"])
+class TraceSlCommand(Subcmd):
+    DESCRIPTION = """Trace EdenFS object fetches from Sapling.
 
 With the --retroactive flag, this will print a list of the past N object fetches.
 By default, it will print up to N=100 events, but this can be configured with the
@@ -56,24 +56,32 @@ activitybuffer-max-events = 100
 Events are encoded using the following emojis:
 
 Event Type:
-\u21E3 START
-\u2193 FINISH
+\u2193 START
+\u2714 FINISH
+\u26A0 FAILURE
 
 Resource Type:
-\U0001F954 Blob (file content)
+\U0001F4C4 Blob (file content)
 \U0001F332 Tree (directory content)
-\U0001F4DB Blob Metadata (sha1, size, blake3)
+\U0001F5C2\U00000020 Blob Metadata (sha1, size, blake3)
 
 Import Priority (--verbose):
-\U0001F7E5 LOW
-\U0001F536 NORMAL
-\U0001F7E2 HIGH
+\U0001F535 LOW
+\U0001F7E1 NORMAL
+\U0001F534 HIGH
 
 Import Cause (--verbose):
 \u2753 UNKNOWN
 \U0001F4C1 FS
 \U0001F4E0 THRIFT
 \U0001F4C5 PREFETCH
+
+Fetched Source in Sapling (--verbose):
+\U0001F4BB LOCAL
+\U0001F310 REMOTE
+\U0001F937 UNKNOWN
+\U00000020\U00000020 not available yet
+
 """
     # pyre-fixme[15]: Type typing.Type[argparse.RawDescriptionHelpFormatter] is not a
     # subtype of the overridden attribute typing.Optional[argparse.HelpFormatter]
@@ -87,13 +95,13 @@ Import Cause (--verbose):
             "--verbose",
             action="store_true",
             default=False,
-            help="Show import priority and cause",
+            help="Show import priority, cause, and fetched source",
         )
         parser.add_argument(
             "--retroactive",
             action="store_true",
             default=False,
-            help="Provide stored hg events (from a buffer) across past changes",
+            help="Provide stored sapling events (from a buffer) across past changes",
         )
 
     async def run(self, args: argparse.Namespace) -> int:
@@ -158,7 +166,7 @@ activitybuffer-max-events = 100
 Loading an inode refers to fetching state for the inode to store into memory.
 While loading can some times cause fetching data contents for an inode, this is
 not always the case, and fetching can sometimes happen in other cases. Content
-data fetches from hg servers can be traced with the eden trace hg command. Note:
+data fetches from sapling servers can be traced with the eden trace sl command. Note:
 loading an inode will cause its parent inode to be loaded if it isn't already.
 
 Materializing an inode refers to modifying the inode's data such that no source
@@ -174,12 +182,12 @@ https://github.com/facebookexperimental/eden/blob/main/eden/fs/docs/Glossary.md
 Events for this command are encoded using the following emojis/letters:
 
 Event Progress:
-\u21E3 START
-\u2193 FINISH
+\u2193 START
+\u2714 FINISH
 \u26A0 FAILURE
 
 Resource Type:
-\U0001F954 BLOB/FILE
+\U0001F4C4 BLOB/FILE
 \U0001F332 TREE/DIRECTORY
 
 Event Type

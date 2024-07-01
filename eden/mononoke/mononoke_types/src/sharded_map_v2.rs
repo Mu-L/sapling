@@ -45,6 +45,11 @@ pub trait ShardedMapV2Value: ThriftConvert + Debug + Hash + Clone + Send + Sync 
     type Context: IdContext<Id = Self::NodeId>;
     type RollupData: Rollup<Self>;
 
+    // The maximum allowed weight for a sharded map node. The weight of a node is defined as
+    // the sum of weights of all its inlined children, plus the count of its non-inlined children,
+    // plus the weight of its value if it contains one itself.
+    const WEIGHT_LIMIT: usize;
+
     /// The weight of a ShardedMapV2 value. In most cases this should always 1 so this is
     /// the default implementation. Only cases that have high variance between the sizes
     /// of values should override this.
@@ -57,6 +62,10 @@ pub trait Rollup<Value: ShardedMapV2Value>:
     ThriftConvert + Debug + Hash + Clone + PartialEq + Eq + Send + Sync + 'static
 {
     fn rollup(value: Option<&Value>, child_rollup_data: Vec<Self>) -> Self;
+}
+
+impl<Value: ShardedMapV2Value> Rollup<Value> for () {
+    fn rollup(_value: Option<&Value>, _child_rollup_data: Vec<Self>) -> Self {}
 }
 
 type SmallBinary = SmallVec<[u8; 24]>;
@@ -195,7 +204,7 @@ impl<Value: ShardedMapV2Value> LoadableShardedMapV2Node<Value> {
         }
     }
 
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         match self {
             LoadableShardedMapV2Node::Inlined(inlined) => inlined.size(),
             LoadableShardedMapV2Node::Stored(stored) => stored.size,
@@ -236,16 +245,6 @@ impl<Value: ShardedMapV2Value> LoadableShardedMapV2Node<Value> {
 }
 
 impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
-    fn weight_limit() -> Result<usize> {
-        if cfg!(test) {
-            Ok(5)
-        } else {
-            thrift::sharded_map::SHARDED_MAP_V2_WEIGHT_LIMIT
-                .try_into()
-                .context("Failed to parse weight limit")
-        }
-    }
-
     pub fn weight(&self) -> usize {
         *self.weight.get_or_init(|| {
             self.value.as_ref().map_or(0, |v| v.weight())
@@ -344,11 +343,6 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
             None => None,
         };
 
-        // The weight of a node is defined as the sum of weights of all its inlined children,
-        // plus the count of its non-inlined children, plus one if it contains a value itself.
-
-        let weight_limit = Self::weight_limit()?;
-
         // Assume that all children are not going to be inlined, then the weight of the
         // node will be the number of children plus one if the current node has a value.
         let weight = &mut (current_value.as_ref().map_or(0, |v| v.weight()) + children.len());
@@ -370,7 +364,7 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         let children_futures = children_pre_inlining
             .into_iter()
             .map(|(next_byte, child)| {
-                if *weight + child.weight() - 1 <= weight_limit {
+                if *weight + child.weight() - 1 <= Value::WEIGHT_LIMIT {
                     // Below limit: inline it.
                     *weight += child.weight() - 1;
                     Either::Left(async move {
@@ -446,13 +440,72 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         }
     }
 
+    /// Returns the value corresponding to the given key, or None if there's no value
+    /// corresponding to it.
+    #[async_recursion]
+    pub async fn get_partial_map(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &impl Blobstore,
+        key: &[u8],
+    ) -> Result<Option<LoadableShardedMapV2Node<Value>>> {
+        if let Some(remaining_prefix) = self.prefix.strip_prefix(key) {
+            // If the key is a prefix of this node, then the partial map corresponding
+            // to the key is this node itself (possibly with the prefix adjusted).
+            let mut node = self.clone();
+            node.prefix = remaining_prefix.into();
+            return Ok(Some(LoadableShardedMapV2Node::Inlined(node)));
+        }
+
+        // If the key starts with the prefix of this node then strip it, otherwise
+        // there's no value corresponding to this key.
+        let key = match key.strip_prefix(self.prefix.as_ref()) {
+            None => {
+                return Ok(None);
+            }
+            Some(key) => key,
+        };
+
+        // The key should not be empty, as we would have returned an exact match above.
+        debug_assert!(!key.is_empty());
+        let (first, rest) = key.split_first().expect("No exact match possible");
+
+        let child = match self.children.get(first) {
+            None => {
+                return Ok(None);
+            }
+            Some(child) => child,
+        };
+
+        match child {
+            LoadableShardedMapV2Node::Inlined(inlined) => {
+                inlined.get_partial_map(ctx, blobstore, rest).await
+            }
+            LoadableShardedMapV2Node::Stored(ShardedMapV2StoredNode { id, .. }) => {
+                id.load(ctx, blobstore)
+                    .await?
+                    .get_partial_map(ctx, blobstore, rest)
+                    .await
+            }
+        }
+    }
+
     /// Returns an ordered stream over all key-value pairs in the map.
     pub fn into_entries<'a>(
         self,
         ctx: &'a CoreContext,
         blobstore: &'a impl Blobstore,
     ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
-        self.into_prefix_entries_impl(ctx, blobstore, &[], None)
+        self.into_prefix_entries_impl(ctx, blobstore, &[], None, 0)
+    }
+
+    pub fn into_entries_skip<'a>(
+        self,
+        ctx: &'a CoreContext,
+        blobstore: &'a impl Blobstore,
+        skip: usize,
+    ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
+        self.into_prefix_entries_impl(ctx, blobstore, &[], None, skip)
     }
 
     /// Returns an ordered stream over all key-value pairs in the map for which
@@ -463,7 +516,7 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         blobstore: &'a impl Blobstore,
         prefix: &'a [u8],
     ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
-        self.into_prefix_entries_impl(ctx, blobstore, prefix, None)
+        self.into_prefix_entries_impl(ctx, blobstore, prefix, None, 0)
     }
 
     /// Returns an ordered stream over all key-value pairs in the map for which
@@ -475,20 +528,32 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         prefix: &'a [u8],
         after: &'a [u8],
     ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
-        self.into_prefix_entries_impl(ctx, blobstore, prefix, Some(after))
+        self.into_prefix_entries_impl(ctx, blobstore, prefix, Some(after), 0)
     }
 
+    /// Internal implementation of all `into_*_entries_*` methods.
+    ///
     /// Returns an ordered stream over all key-value pairs in the map for which
-    /// the key starts with the given prefix.
+    /// the key starts with the given prefix, and is either after the given resume
+    /// point, or after skipping a number of entries.
+    ///
+    /// Note that resume points and skipping are incompatible, as it's impossible
+    /// to know when recursing how many of a child's entries will end up being
+    /// skipped.
     fn into_prefix_entries_impl<'a>(
         self,
         ctx: &'a CoreContext,
         blobstore: &'a impl Blobstore,
         prefix: &'a [u8],
         after: Option<&'a [u8]>,
+        skip: usize,
     ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
         const BOUNDED_TRAVERSAL_SCHEDULED_MAX: NonZeroUsize = nonzero!(256usize);
         const BOUNDED_TRAVERSAL_QUEUED_MAX: NonZeroUsize = nonzero!(256usize);
+        debug_assert!(
+            after.is_none() || skip == 0,
+            "programming error: only one of after or skip should be set"
+        );
 
         bounded_traversal::bounded_traversal_ordered_stream(
             BOUNDED_TRAVERSAL_SCHEDULED_MAX,
@@ -499,13 +564,21 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
                     SmallBinary::new(),
                     prefix,
                     after,
+                    skip,
                     LoadableShardedMapV2Node::Inlined(self),
                 ),
             )],
-            move |(mut accumulated_prefix, target_prefix, target_after, current_node): (
+            move |(
+                mut accumulated_prefix,
+                target_prefix,
+                target_after,
+                mut target_skip,
+                current_node,
+            ): (
                 SmallBinary,
                 &[u8],
                 Option<&[u8]>,
+                usize,
                 LoadableShardedMapV2Node<Value>,
             )| {
                 async move {
@@ -533,6 +606,11 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
                             // not be output.
                             value = None;
                         }
+                        if target_skip > 0 && value.is_some() {
+                            target_skip -= 1;
+                            value = None;
+                        }
+
                         let (byte_after, child_after) = match target_after
                             .and_then(|after| after.strip_prefix(current_prefix.as_slice()))
                             .and_then(|after| after.split_first())
@@ -568,10 +646,22 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
                                     } else {
                                         None
                                     };
-                                    Some(OrderedTraversal::Recurse(
-                                        child.size(),
-                                        (accumulated_prefix, b"".as_slice(), child_after, child),
-                                    ))
+                                    let child_skip = target_skip.min(child.size());
+                                    target_skip = target_skip.saturating_sub(child_skip);
+                                    if child_skip == child.size() {
+                                        None
+                                    } else {
+                                        Some(OrderedTraversal::Recurse(
+                                            child.size(),
+                                            (
+                                                accumulated_prefix,
+                                                b"".as_slice(),
+                                                child_after,
+                                                child_skip,
+                                                child,
+                                            ),
+                                        ))
+                                    }
                                 }
                             }))
                             .collect::<Vec<_>>())
@@ -619,13 +709,52 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
 
                         Ok(vec![OrderedTraversal::Recurse(
                             child.size(),
-                            (accumulated_prefix, rest, child_after, child),
+                            (accumulated_prefix, rest, child_after, target_skip, child),
                         )])
                     }
                 }
                 .boxed()
             },
         )
+    }
+
+    /// Returns an unordered stream over all key-value pairs in the map.
+    pub fn into_entries_unordered<'a>(
+        self,
+        ctx: &'a CoreContext,
+        blobstore: &'a impl Blobstore,
+        concurrency: usize,
+    ) -> impl Stream<Item = Result<(SmallBinary, Value)>> + 'a {
+        bounded_traversal::bounded_traversal_stream(
+            concurrency,
+            vec![(SmallBinary::new(), LoadableShardedMapV2Node::Inlined(self))],
+            move |(mut accumulated_prefix, current_node): (
+                SmallBinary,
+                LoadableShardedMapV2Node<Value>,
+            )| {
+                async move {
+                    let Self {
+                        prefix,
+                        value,
+                        children,
+                        ..
+                    } = current_node.load(ctx, blobstore).await?;
+
+                    accumulated_prefix.extend(prefix);
+
+                    Ok((
+                        value.map(|value| (accumulated_prefix.clone(), *value)),
+                        children.into_iter().map(move |(byte, child)| {
+                            let mut accumulated_prefix = accumulated_prefix.clone();
+                            accumulated_prefix.push(byte);
+                            (accumulated_prefix, child)
+                        }),
+                    ))
+                }
+                .boxed()
+            },
+        )
+        .try_filter_map(futures::future::ok)
     }
 }
 
@@ -733,6 +862,8 @@ mod test {
         type NodeId = ShardedMapV2NodeTestId;
         type Context = ShardedMapV2NodeTestContext;
         type RollupData = MaxTestValue;
+
+        const WEIGHT_LIMIT: usize = 5;
     }
 
     impl Rollup<TestValue> for MaxTestValue {
@@ -880,6 +1011,31 @@ mod test {
                 .await
         }
 
+        async fn into_entries_unordered(
+            &self,
+            map: ShardedMapV2Node<TestValue>,
+        ) -> Result<Vec<(String, u32)>> {
+            map.into_entries_unordered(&self.0, &self.1, 100)
+                .and_then(
+                    |(key, value)| async move { Ok((String::from_utf8(key.to_vec())?, value.0)) },
+                )
+                .try_collect::<Vec<_>>()
+                .await
+        }
+
+        async fn into_entries_skip(
+            &self,
+            map: ShardedMapV2Node<TestValue>,
+            skip: usize,
+        ) -> Result<Vec<(String, u32)>> {
+            map.into_entries_skip(&self.0, &self.1, skip)
+                .and_then(
+                    |(key, value)| async move { Ok((String::from_utf8(key.to_vec())?, value.0)) },
+                )
+                .try_collect::<Vec<_>>()
+                .await
+        }
+
         async fn into_prefix_entries(
             &self,
             map: ShardedMapV2Node<TestValue>,
@@ -979,6 +1135,15 @@ mod test {
                 to_test_vec(&EXAMPLE_ENTRIES[7..12])
             );
 
+            for skip in 0..12 {
+                assert_eq!(
+                    self.into_entries_skip(map.clone(), skip).await?,
+                    to_test_vec(&EXAMPLE_ENTRIES[skip..12]),
+                    "skip value {} failed",
+                    skip,
+                );
+            }
+
             assert_eq!(map.rollup_data(), MaxTestValue(12),);
 
             Ok(())
@@ -996,12 +1161,10 @@ mod test {
             let min_possible_weight =
                 map.value.as_ref().map_or(0, |v| v.weight()) + map.children.len();
 
-            let weight_limit = ShardedMapV2Node::<TestValue>::weight_limit()?;
-
             // Bypass the weight limit check if map's weight is the minimum possible (i.e. all children are stored),
             // this is to avoid failing in quickcheck tests in which sometimes a node will have more than weight
             // limit number of children.
-            if map.weight() > weight_limit && map.weight() != min_possible_weight {
+            if map.weight() > TestValue::WEIGHT_LIMIT && map.weight() != min_possible_weight {
                 bail!("weight of sharded map node exceeds the limit");
             }
 
@@ -1446,7 +1609,18 @@ mod test {
                         .collect::<BTreeMap<_, _>>();
                     if roundtrip_map != values {
                         return Err(anyhow!(
-                            "sharded map entries do not round trip back to original values"
+                            "sharded map entries do not round trip back to original values (using into_entries)"
+                        ));
+                    }
+
+                    let rountrip_unordered_map = helper
+                        .into_entries_unordered(map.clone())
+                        .await?
+                        .into_iter()
+                        .collect::<BTreeMap<_, _>>();
+                    if rountrip_unordered_map != values {
+                        return Err(anyhow!(
+                            "sharded map entries do not round trip back to original values (using into_entries_unordered)"
                         ));
                     }
 

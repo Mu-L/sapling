@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -11,7 +10,6 @@
 # GNU General Public License version 2 or any later version.
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.copytrace=on
   $ eagerepo
 
 # Prepare test functions

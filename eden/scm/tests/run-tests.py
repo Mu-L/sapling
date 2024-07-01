@@ -376,7 +376,11 @@ def compatiblewithdebugruntest(path):
     """check whether a .t test is compatible with debugruntest"""
     try:
         with open(path, "r", encoding="utf8") as f:
-            return "#debugruntest-compatible" in f.read(1024)
+            contents = f.read(1024)
+            return "#debugruntest-compatible" in contents or (
+                os.environ.get("DEBUGRUNTEST_DEFAULT_DISABLED") != "1"
+                and "#debugruntest-incompatible" not in contents
+            )
     except IOError as ex:
         if ex.errno != errno.ENOENT:
             raise
@@ -1201,7 +1205,7 @@ class Test(unittest.TestCase):
             shortname = hashlib.sha1(_bytespath("%s" % name)).hexdigest()[:6]
             self._watchmandir = os.path.join(self._threadtmp, "%s.watchman" % shortname)
             os.mkdir(self._watchmandir)
-            self._watchmanproc = Watchman(self._watchman, self._watchmandir)
+            self._watchmanproc = Watchman(self._watchman, Path(self._watchmandir))
             try:
                 self._watchmanproc.start()
             except WatchmanTimeout:
@@ -1444,6 +1448,11 @@ class Test(unittest.TestCase):
             ),
             # [ipv4]
             (rb"([^0-9])%s" % re.escape(_bytespath(self._localip())), rb"\1$LOCALIP"),
+            # localhost:port
+            (
+                rb"([^0-9])localhost:[0-9]+",
+                rb"\1localhost:$LOCAL_PORT",
+            ),
             (rb"\bHG_TXNID=TXN:[a-f0-9]{40}\b", rb"HG_TXNID=TXN:$ID$"),
         ]
         r.append((_bytespath(self._escapepath(self._testtmp)), b"$TESTTMP"))

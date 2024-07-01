@@ -6,7 +6,7 @@
  */
 
 import App from '../App';
-import {Internal} from '../Internal';
+import foundPlatform from '../platform';
 import {CommitInfoTestUtils} from '../testQueries';
 import {
   expectMessageSentToServer,
@@ -15,10 +15,8 @@ import {
   openCommitInfoSidebar,
   simulateMessageFromServer,
 } from '../testUtils';
-import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
+import {fireEvent, render, screen, waitFor, within, act} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import {act} from 'react-dom/test-utils';
-import {nullthrows} from 'shared/utils';
 
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
@@ -29,7 +27,6 @@ const {
   clickToSelectCommit,
   getTitleEditor,
   getDescriptionEditor,
-  getFieldEditor,
 } = CommitInfoTestUtils;
 
 describe('FillCommitMessage', () => {
@@ -82,35 +79,6 @@ describe('FillCommitMessage', () => {
       expect(getTitleEditor().value).toMatch('Head Commit');
       expect(getDescriptionEditor().value).toMatch(/This is my commit message/);
     });
-  });
-
-  it('skips filling diff numbers', async () => {
-    if (Internal.diffFieldTag == null) {
-      // skip this test in OSS where differential revision is not a tag
-      return;
-    }
-    act(() => {
-      simulateCommits({
-        value: [
-          COMMIT('1', 'some public base', '0', {phase: 'public'}),
-          COMMIT('a', 'My Commit', '1'),
-          COMMIT('b', 'Head Commit', 'a', {
-            isDot: true,
-            description: 'Summary: This is my commit message\nDifferential Revision: D12345',
-          }),
-        ],
-      });
-    });
-    clickCommitMode();
-
-    const editor = getFieldEditor(Internal.diffFieldTag);
-    expect(editor).toHaveValue('');
-
-    const loadFromLastCommit = withinCommitInfo().getByText('last commit');
-    expect(loadFromLastCommit).toBeInTheDocument();
-    fireEvent.click(loadFromLastCommit);
-    await waitFor(() => expect(getTitleEditor().value).toMatch('Head Commit'));
-    expect(getFieldEditor(nullthrows(Internal.diffFieldTag))).toHaveValue('');
   });
 
   it('Load from commit template', async () => {
@@ -190,6 +158,19 @@ describe('FillCommitMessage', () => {
       });
     });
 
+    it('allows merging non-empty', async () => {
+      await triggerConflict();
+      const mergeButton = screen.getByText('Only Fill Empty');
+      expect(mergeButton).toBeInTheDocument();
+      fireEvent.click(mergeButton);
+
+      await waitFor(() => {
+        expect(getTitleEditor().value).toMatch('existing title');
+        expect(getDescriptionEditor().value).toMatch(/existing description/);
+        expect(getDescriptionEditor().value).not.toMatch(/This is my commit message/);
+      });
+    });
+
     it('allows cancelling', async () => {
       await triggerConflict();
       const cancelButton = screen.getByText('Cancel');
@@ -214,5 +195,21 @@ describe('FillCommitMessage', () => {
         expect(getDescriptionEditor().value).toMatch(/This is my commit message/);
       });
     });
+  });
+
+  it('Clears commit message', async () => {
+    clickCommitMode();
+
+    expect(getTitleEditor()).toHaveValue('');
+    expect(getDescriptionEditor()).toHaveValue('');
+
+    const confirmSpy = jest
+      .spyOn(foundPlatform, 'confirm')
+      .mockImplementation(() => Promise.resolve(true));
+
+    fireEvent.click(screen.getByTestId('fill-commit-message-more-options'));
+    fireEvent.click(screen.getByText('Clear commit message'));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
   });
 });

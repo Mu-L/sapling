@@ -18,12 +18,13 @@ import type {
 } from 'shared/types/stack';
 
 import {
+  commitMessageFieldsSchema,
   commitMessageFieldsToString,
-  getDefaultCommitMessageSchema,
   mergeCommitMessageFields,
   parseCommitMessageFields,
 } from '../CommitInfoView/CommitMessageFields';
 import {t} from '../i18n';
+import {readAtom} from '../jotaiUtils';
 import {assert} from '../utils';
 import {FileStackState} from './fileStackState';
 import deepEqual from 'fast-deep-equal';
@@ -438,11 +439,20 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
           return [path, newFile];
         }),
       );
+      // Ensure the text is not empty with a filler title.
+      const text =
+        commit.text.trim().length === 0 ||
+        // if a commit template is used, but the title is not given, then we may have non-title text.
+        // sl would trim the leading whitespace, which can end up using the commit template as the commit title.
+        // Instead, use the same filler title.
+        commit.text[0] === '\n'
+          ? t('(no title provided)') + commit.text
+          : commit.text;
       const importCommit: ImportCommit = {
         mark: revToMark(commit.rev),
         author: commit.author,
         date: [opts?.rewriteDate ?? commit.date.unix, commit.date.tz],
-        text: commit.text,
+        text,
         parents: commit.parents.toArray().map(revToMarkOrHash),
         predecessors: commit.originalNodes.toArray(),
         files: newFiles,
@@ -981,7 +991,7 @@ export class CommitStackState extends SelfUpdate<CommitStackRecord> {
     // Fold other properties to parent.
     let newParentText = parent.text;
     if (isMeaningfulText(commit.text)) {
-      const schema = getDefaultCommitMessageSchema();
+      const schema = readAtom(commitMessageFieldsSchema);
       const parentTitle = firstLine(parent.text);
       const parentFields = parseCommitMessageFields(
         schema,

@@ -1,7 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
+  $ enable rebase amend
 
   $ newrepo
   $ drawdag << 'EOS'
@@ -55,3 +55,45 @@ Check result:
   $ hg status --change . -AC C
   A C
     A
+
+Test behavior in middle of stack:
+  $ newrepo
+  $ drawdag <<EOS
+  > C  # C/bar = bar
+  > |
+  > |
+  > B  # B/bar = foo
+  > |  # B/foo = (removed)
+  > |
+  > A  # A/foo = foo
+  >    # drawdag.defaultfiles=false
+  > EOS
+
+  $ hg go -q $B
+  $ tglog
+  o  0dfdb4eecd4e 'C'
+  │
+  @  f9f49b656be4 'B'
+  │
+  o  84d740d4dbe5 'A'
+
+Old B not obsoleted:
+  $ hg mv --mark --amend foo bar
+  $ tglog
+  @  3354b93fbdbf 'B'
+  │
+  │ o  0dfdb4eecd4e 'C'
+  │ │
+  │ x  f9f49b656be4 'B'
+  ├─╯
+  o  84d740d4dbe5 'A'
+
+Can restack:
+  $ hg rebase -q --restack
+
+  $ tglog
+  o  1a2db52f05ac 'C'
+  │
+  @  3354b93fbdbf 'B'
+  │
+  o  84d740d4dbe5 'A'

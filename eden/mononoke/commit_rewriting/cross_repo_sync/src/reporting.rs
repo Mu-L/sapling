@@ -10,8 +10,18 @@ use std::time::Duration;
 
 use anyhow::Error;
 use context::CoreContext;
+use futures::Future;
+use futures_stats::TimedFutureExt;
 use mononoke_types::ChangesetId;
 use scuba_ext::MononokeScubaSampleBuilder;
+use scuba_ext::ScubaValue;
+use slog::crit;
+use slog::debug;
+use slog::error;
+use slog::info;
+use slog::trace;
+use slog::warn;
+use slog::Drain;
 
 const SCUBA_TABLE: &str = "mononoke_x_repo_mapping";
 
@@ -109,4 +119,95 @@ pub fn get_scuba_sample(
         .add(TARGET_REPO, target_repo.as_ref().to_string());
 
     scuba_sample
+}
+
+pub async fn run_and_log_stats_to_scuba<R, S>(
+    ctx: &CoreContext,
+    log_tag: &str,
+    msg: S,
+    fut: impl Future<Output = R>,
+) -> R
+where
+    S: Into<Option<String>>,
+{
+    let (stats, result) = fut.timed().await;
+    let mut scuba = ctx.scuba().clone();
+    scuba.add_future_stats(&stats);
+    scuba.log_with_msg(log_tag, msg);
+    result
+}
+
+// Helpers to log both to terminal and to scuba
+
+pub fn _log_critical<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Critical, msg);
+}
+pub fn _log_error<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Error, msg);
+}
+
+pub fn log_warning<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Warning, msg);
+}
+
+pub fn log_info<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Info, msg);
+}
+
+pub fn log_debug<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Debug, msg);
+}
+
+pub fn log_trace<S: Into<String>>(ctx: &CoreContext, msg: S) {
+    log_with_level(ctx, slog::Level::Trace, msg);
+}
+
+fn log_with_level<S: Into<String>>(ctx: &CoreContext, level: slog::Level, msg: S) {
+    let msg: String = msg.into();
+
+    let level_tag = match level {
+        slog::Level::Critical => {
+            crit!(ctx.logger(), "{}", msg);
+            "CRITICAL"
+        }
+        slog::Level::Error => {
+            error!(ctx.logger(), "{}", msg);
+            "ERROR"
+        }
+        slog::Level::Warning => {
+            warn!(ctx.logger(), "{}", msg);
+            "WARNING"
+        }
+        slog::Level::Info => {
+            info!(ctx.logger(), "{}", msg);
+            "INFO"
+        }
+        slog::Level::Debug => {
+            debug!(ctx.logger(), "{}", msg);
+            "DEBUG"
+        }
+        slog::Level::Trace => {
+            trace!(ctx.logger(), "{}", msg);
+            "TRACE"
+        }
+    };
+
+    if ctx.logger().is_enabled(level) {
+        let mut scuba = ctx.scuba().clone();
+        scuba.log_with_msg(level_tag, msg);
+    }
+}
+
+pub(crate) fn set_scuba_logger_fields<K, V, L>(ctx: &CoreContext, data: L) -> CoreContext
+where
+    K: Into<String>,
+    V: Into<ScubaValue>,
+    L: IntoIterator<Item = (K, V)>,
+{
+    ctx.with_mutated_scuba(|mut scuba| {
+        data.into_iter().for_each(|(key, value)| {
+            scuba.add(key, value);
+        });
+        scuba
+    })
 }

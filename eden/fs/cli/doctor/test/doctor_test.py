@@ -324,7 +324,7 @@ Collect an 'eden rage' and ask in the EdenFS (Windows |macOS )?Users group if yo
             out.getvalue(),
             r"""<yellow>- Found problem:<reset>
 EdenFS is currently still starting\.
-Please wait for edenfs to finish starting\. You can watch it's progress with
+Please wait for edenfs to finish starting\. You can watch its progress with
 `eden status --wait`\.
 
 If EdenFS seems to be taking too long to start you can try restarting it
@@ -1568,7 +1568,7 @@ Starting background invalidation of not recently used files and directories in {
         instance = FakeEdenInstance(tmp_dir)
 
         instance.get_thrift_client_legacy().set_counter_value(
-            "store.hg.live_import.max_duration_us", 15 * 60 * 1_000_000
+            "store.sapling.live_import.max_duration_us", 15 * 60 * 1_000_000
         )
 
         out = TestOutput()
@@ -1670,7 +1670,7 @@ Collect an 'eden rage' and ask in the EdenFS (Windows |macOS )?Users group if yo
         )
 
         instance.get_thrift_client_legacy().set_counter_value(
-            "store.hg.live_import.max_duration_us", 15 * 60 * 1_000_000
+            "store.sapling.live_import.max_duration_us", 15 * 60 * 1_000_000
         )
 
         out = TestOutput()

@@ -8,9 +8,9 @@
 import type {CommitMessageFields} from './CommitInfoView/types';
 import type {UseUncommittedSelection} from './partialSelection';
 import type {ChangedFile, ChangedFileType, MergeConflicts, RepoRelativePath} from './types';
-import type {MutableRefObject} from 'react';
 import type {Comparison} from 'shared/Comparison';
 
+import {Avatar} from './Avatar';
 import {Banner, BannerKind} from './Banner';
 import {File} from './ChangedFile';
 import {
@@ -19,6 +19,7 @@ import {
   changedFilesDisplayType,
 } from './ChangedFileDisplayTypePicker';
 import {Collapsable} from './Collapsable';
+import {Commit} from './Commit';
 import {
   commitMessageTemplate,
   commitMode,
@@ -29,18 +30,31 @@ import {
   commitMessageFieldsSchema,
   commitMessageFieldsToString,
 } from './CommitInfoView/CommitMessageFields';
+import {PendingDiffStats} from './CommitInfoView/DiffStats';
 import {temporaryCommitTitle} from './CommitTitle';
 import {OpenComparisonViewButton} from './ComparisonView/OpenComparisonViewButton';
+import {Row} from './ComponentUtils';
 import {ErrorNotice} from './ErrorNotice';
 import {FileTree, FileTreeFolderHeader} from './FileTree';
 import {useGeneratedFileStatuses} from './GeneratedFile';
 import {Internal} from './Internal';
 import {DOCUMENTATION_DELAY, Tooltip} from './Tooltip';
+import {UnsavedFilesCount, confirmUnsavedFiles} from './UnsavedFiles';
+import {tracker} from './analytics';
 import {latestCommitMessageFields} from './codeReview/CodeReviewInfo';
 import {Badge} from './components/Badge';
+import {Button} from './components/Button';
+import GatedComponent from './components/GatedComponent';
+import {TextField} from './components/TextField';
 import {islDrawerState} from './drawerState';
+import {externalMergeToolAtom} from './externalMergeTool';
 import {T, t} from './i18n';
-import {localStorageBackedAtom, readAtom, writeAtom} from './jotaiUtils';
+import {DownwardArrow} from './icons/DownwardIcon';
+import {localStorageBackedAtom, readAtom, useAtomGet, writeAtom} from './jotaiUtils';
+import {
+  AutoResolveSettingCheckbox,
+  shouldAutoResolveAllBeforeContinue,
+} from './mergeConflicts/state';
 import {AbortMergeOperation} from './operations/AbortMergeOperation';
 import {AddRemoveOperation} from './operations/AddRemoveOperation';
 import {getAmendOperation} from './operations/AmendOperation';
@@ -48,12 +62,16 @@ import {getCommitOperation} from './operations/CommitOperation';
 import {ContinueOperation} from './operations/ContinueMergeOperation';
 import {DiscardOperation, PartialDiscardOperation} from './operations/DiscardOperation';
 import {PurgeOperation} from './operations/PurgeOperation';
+import {ResolveInExternalMergeToolOperation} from './operations/ResolveInExternalMergeToolOperation';
 import {RevertOperation} from './operations/RevertOperation';
+import {RunMergeDriversOperation} from './operations/RunMergeDriversOperation';
 import {getShelveOperation} from './operations/ShelveOperation';
 import {operationList, useRunOperation} from './operationsState';
 import {useUncommittedSelection} from './partialSelection';
 import platform from './platform';
 import {
+  CommitPreview,
+  dagWithPreviews,
   optimisticMergeConflicts,
   uncommittedChangesWithPreviews,
   useIsOperationRunningOrQueued,
@@ -61,7 +79,7 @@ import {
 import {selectedCommits} from './selection';
 import {latestHeadCommit, uncommittedChangesFetchError} from './serverAPIState';
 import {GeneratedStatus} from './types';
-import {VSCodeButton, VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
+import * as stylex from '@stylexjs/stylex';
 import {useAtom, useAtomValue} from 'jotai';
 import React, {useCallback, useMemo, useEffect, useRef, useState} from 'react';
 import {ComparisonType} from 'shared/Comparison';
@@ -161,9 +179,25 @@ function SectionedFileList({filesByPrefix, ...rest}: SectionProps) {
     <div className="file-tree">
       {Array.from(filesByPrefix.entries(), ([prefix, files]) => {
         const isCollapsed = collapsedSections.has(prefix);
+        const isEverythingSelected = files.every(file =>
+          rest.selection?.isFullySelected(file.path),
+        );
+        const isPartiallySelected = files.some(file =>
+          rest.selection?.isFullyOrPartiallySelected(file.path),
+        );
         return (
           <div className="file-tree-section" key={prefix}>
             <FileTreeFolderHeader
+              checkedState={
+                isEverythingSelected ? true : isPartiallySelected ? 'indeterminate' : false
+              }
+              toggleChecked={checked => {
+                if (checked) {
+                  rest.selection?.select(...files.map(file => file.path));
+                } else {
+                  rest.selection?.deselect(...files.map(file => file.path));
+                }
+              }}
               isCollapsed={isCollapsed}
               toggleCollapsed={() =>
                 setCollapsedSections(previous =>
@@ -174,7 +208,11 @@ function SectionedFileList({filesByPrefix, ...rest}: SectionProps) {
               }
               folder={prefix}
             />
-            {!isCollapsed ? <LinearFileList {...rest} files={files} /> : null}
+            {!isCollapsed ? (
+              <div className="file-tree-level">
+                <LinearFileList {...rest} files={files} />
+              </div>
+            ) : null}
           </div>
         );
       })}
@@ -278,26 +316,26 @@ export function ChangedFiles(props: {
             hasAdditionalPages ? (
               <div className="changed-files-pages-buttons">
                 <Tooltip title={t('See previous page of files')}>
-                  <VSCodeButton
+                  <Button
                     data-testid="changed-files-previous-page"
-                    appearance="icon"
+                    icon
                     disabled={pageNum === 0}
                     onClick={() => {
                       setPageNum(old => old - 1);
                     }}>
                     <Icon icon="arrow-left" />
-                  </VSCodeButton>
+                  </Button>
                 </Tooltip>
                 <Tooltip title={t('See next page of files')}>
-                  <VSCodeButton
+                  <Button
                     data-testid="changed-files-next-page"
-                    appearance="icon"
+                    icon
                     disabled={isLastPage}
                     onClick={() => {
                       setPageNum(old => old + 1);
                     }}>
                     <Icon icon="arrow-right" />
-                  </VSCodeButton>
+                  </Button>
                 </Tooltip>
               </div>
             ) : null
@@ -420,7 +458,7 @@ export function UncommittedChanges({place}: {place: Place}) {
   const conflicts = useAtomValue(optimisticMergeConflicts);
 
   const selection = useUncommittedSelection();
-  const commitTitleRef = useRef<HTMLTextAreaElement | undefined>(null);
+  const commitTitleRef = useRef<HTMLInputElement>(null);
 
   const runOperation = useRunOperation();
 
@@ -459,8 +497,13 @@ export function UncommittedChanges({place}: {place: Place}) {
     [headCommit],
   );
 
-  const onConfirmQuickCommit = () => {
-    const titleEl = commitTitleRef.current as HTMLInputElement | null;
+  const onConfirmQuickCommit = async () => {
+    const shouldContinue = await confirmUnsavedFiles();
+    if (!shouldContinue) {
+      return;
+    }
+
+    const titleEl = commitTitleRef.current;
     const title = titleEl?.value || template?.Title || temporaryCommitTitle();
     // use the template, unless a specific quick title is given
     const fields: CommitMessageFields = {...template, Title: title};
@@ -497,8 +540,8 @@ export function UncommittedChanges({place}: {place: Place}) {
     <Tooltip
       delayMs={DOCUMENTATION_DELAY}
       title={t('Add all untracked files and remove all missing files.')}>
-      <VSCodeButton
-        appearance="icon"
+      <Button
+        icon
         key="addremove"
         data-testid="addremove-button"
         onClick={() => {
@@ -513,12 +556,12 @@ export function UncommittedChanges({place}: {place: Place}) {
         }}>
         <Icon slot="start" icon="expand-all" />
         <T>Add/Remove</T>
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   ) : null;
 
   const onShelve = () => {
-    const title = (commitTitleRef.current as HTMLInputElement | null)?.value || undefined;
+    const title = commitTitleRef.current?.value || undefined;
     const allFiles = uncommittedChanges.map(file => file.path);
     const operation = getShelveOperation(title, selection.selection, allFiles);
     runOperation(operation);
@@ -561,8 +604,8 @@ export function UncommittedChanges({place}: {place: Place}) {
                     : ComparisonType.UncommittedChanges,
               }}
             />
-            <VSCodeButton
-              appearance="icon"
+            <Button
+              icon
               key="select-all"
               disabled={allFilesSelected}
               onClick={() => {
@@ -570,9 +613,9 @@ export function UncommittedChanges({place}: {place: Place}) {
               }}>
               <Icon slot="start" icon="check-all" />
               <T>Select All</T>
-            </VSCodeButton>
-            <VSCodeButton
-              appearance="icon"
+            </Button>
+            <Button
+              icon
               key="deselect-all"
               data-testid="deselect-all-button"
               disabled={noFilesSelected}
@@ -581,15 +624,15 @@ export function UncommittedChanges({place}: {place: Place}) {
               }}>
               <Icon slot="start" icon="close-all" />
               <T>Deselect All</T>
-            </VSCodeButton>
+            </Button>
             {addremoveButton}
             <Tooltip
               delayMs={DOCUMENTATION_DELAY}
               title={t(
                 'Discard selected uncommitted changes, including untracked files.\n\nNote: Changes will be irreversibly lost.',
               )}>
-              <VSCodeButton
-                appearance="icon"
+              <Button
+                icon
                 disabled={noFilesSelected}
                 data-testid={'discard-all-selected-button'}
                 onClick={() => {
@@ -619,20 +662,29 @@ export function UncommittedChanges({place}: {place: Place}) {
                         selectedFiles,
                         file => file.status !== '?', // only untracked, not missing
                       );
+                      // Added files should be first reverted, then purged, so they are not tracked and also deleted.
+                      // This way, the partial selection discard matches the non-partial discard.
+                      const addedFilesToAlsoPurge = selectedFiles.filter(
+                        file => file.status === 'A',
+                      );
                       if (selectedTrackedFiles.length > 0) {
                         // only a subset of files selected -> we need to revert selected tracked files individually
                         runOperation(new RevertOperation(selectedTrackedFiles.map(f => f.path)));
                       }
-                      if (selectedUntrackedFiles.length > 0) {
-                        // untracked files must be purged separately to delete from disk
-                        runOperation(new PurgeOperation(selectedUntrackedFiles.map(f => f.path)));
+                      if (selectedUntrackedFiles.length > 0 || addedFilesToAlsoPurge.length > 0) {
+                        // untracked files must be purged separately to delete from disk.
+                        runOperation(
+                          new PurgeOperation(
+                            [...selectedUntrackedFiles, ...addedFilesToAlsoPurge].map(f => f.path),
+                          ),
+                        );
                       }
                     }
                   });
                 }}>
                 <Icon slot="start" icon="trashcan" />
                 <T>Discard</T>
-              </VSCodeButton>
+              </Button>
             </Tooltip>
           </>
         )}
@@ -657,22 +709,28 @@ export function UncommittedChanges({place}: {place: Place}) {
           }}
         />
       )}
+      <UnsavedFilesCount />
       {conflicts != null || place !== 'main' ? null : (
         <div className="button-rows">
+          <GatedComponent featureFlag={Internal.featureFlags?.ShowSplitSuggestion}>
+            <div className="button-row">
+              <PendingDiffStats showWarning={true} />
+            </div>
+          </GatedComponent>
           <div className="button-row">
             <span className="quick-commit-inputs">
-              <VSCodeButton
-                appearance="icon"
+              <Button
+                icon
                 disabled={noFilesSelected}
                 data-testid="quick-commit-button"
                 onClick={onConfirmQuickCommit}>
                 <Icon slot="start" icon="plus" />
                 <T>Commit</T>
-              </VSCodeButton>
-              <VSCodeTextField
+              </Button>
+              <TextField
                 data-testid="quick-commit-title"
                 placeholder="Title"
-                ref={commitTitleRef as MutableRefObject<null>}
+                ref={commitTitleRef}
                 onKeyPress={e => {
                   if (e.key === 'Enter' && !(e.ctrlKey || e.metaKey || e.altKey || e.shiftKey)) {
                     onConfirmQuickCommit();
@@ -680,36 +738,41 @@ export function UncommittedChanges({place}: {place: Place}) {
                 }}
               />
             </span>
-            <VSCodeButton
-              appearance="icon"
+            <Button
+              icon
               className="show-on-hover"
               onClick={() => {
                 openCommitForm('commit');
               }}>
               <Icon slot="start" icon="edit" />
               <T>Commit as...</T>
-            </VSCodeButton>
+            </Button>
             <Tooltip
               title={t(
                 'Save selected uncommitted changes for later unshelving. Removes these changes from the working copy.',
               )}>
-              <VSCodeButton
+              <Button
                 disabled={noFilesSelected || hasChunkSelection}
-                appearance="icon"
+                icon
                 className="show-on-hover"
                 onClick={onShelve}>
                 <Icon slot="start" icon="archive" />
                 <T>Shelve</T>
-              </VSCodeButton>
+              </Button>
             </Tooltip>
           </div>
           {canAmend && (
             <div className="button-row">
-              <VSCodeButton
-                appearance="icon"
+              <Button
+                icon
                 disabled={noFilesSelected || !headCommit}
                 data-testid="uncommitted-changes-quick-amend-button"
-                onClick={() => {
+                onClick={async () => {
+                  const shouldContinue = await confirmUnsavedFiles();
+                  if (!shouldContinue) {
+                    return;
+                  }
+
                   const hash = headCommit?.hash ?? '.';
                   const allFiles = uncommittedChanges.map(file => file.path);
                   const operation = getAmendOperation(
@@ -723,21 +786,58 @@ export function UncommittedChanges({place}: {place: Place}) {
                 }}>
                 <Icon slot="start" icon="debug-step-into" />
                 <T>Amend</T>
-              </VSCodeButton>
-              <VSCodeButton
-                appearance="icon"
+              </Button>
+              <Button
+                icon
                 className="show-on-hover"
                 onClick={() => {
                   openCommitForm('amend');
                 }}>
                 <Icon slot="start" icon="edit" />
                 <T>Amend as...</T>
-              </VSCodeButton>
+              </Button>
             </div>
           )}
         </div>
       )}
+      {place === 'main' && <ConflictingIncomingCommit />}
     </div>
+  );
+}
+
+const styles = stylex.create({
+  conflictingIncomingContainer: {
+    gap: 'var(--halfpad)',
+    position: 'relative',
+    paddingLeft: '20px',
+    paddingTop: '5px',
+    marginBottom: '-5px',
+    color: 'var(--scm-added-foreground)',
+  },
+  downwardArrow: {
+    position: 'absolute',
+    top: '20px',
+    left: '5px',
+  },
+});
+
+function ConflictingIncomingCommit() {
+  const conflicts = useAtomValue(optimisticMergeConflicts);
+  // "other" is the incoming / source / your commit
+  const commit = useAtomGet(dagWithPreviews, conflicts?.hashes?.other);
+  if (commit == null) {
+    return null;
+  }
+  return (
+    <Row xstyle={styles.conflictingIncomingContainer}>
+      <DownwardArrow {...stylex.props(styles.downwardArrow)} />
+      <Avatar username={commit.author} />
+      <Commit
+        commit={commit}
+        hasChildren={false}
+        previewType={CommitPreview.NON_ACTIONABLE_COMMIT}
+      />
+    </Row>
   );
 }
 
@@ -762,24 +862,35 @@ function MergeConflictButtons({
     lastRunOperation?.operation instanceof AbortMergeOperation && lastRunOperation.exitCode === 0;
   const isRunningContinue = !!useIsOperationRunningOrQueued(ContinueOperation);
   const isRunningAbort = !!useIsOperationRunningOrQueued(AbortMergeOperation);
+  const isRunningResolveExternal = !!useIsOperationRunningOrQueued(
+    ResolveInExternalMergeToolOperation,
+  );
   const shouldDisableButtons =
-    isRunningContinue || isRunningAbort || justFinishedContinue || justFinishedAbort;
+    isRunningContinue ||
+    isRunningAbort ||
+    isRunningResolveExternal ||
+    justFinishedContinue ||
+    justFinishedAbort;
+
+  const externalMergeTool = useAtomValue(externalMergeToolAtom);
 
   return (
-    <>
-      <VSCodeButton
-        appearance={allConflictsResolved ? 'primary' : 'icon'}
+    <Row style={{flexWrap: 'wrap', marginBottom: 'var(--pad)'}}>
+      <Button
+        primary
         key="continue"
         disabled={!allConflictsResolved || shouldDisableButtons}
         data-testid="conflict-continue-button"
         onClick={() => {
+          if (readAtom(shouldAutoResolveAllBeforeContinue)) {
+            runOperation(new RunMergeDriversOperation());
+          }
           runOperation(new ContinueOperation());
         }}>
         <Icon slot="start" icon={isRunningContinue ? 'loading' : 'debug-continue'} />
         <T>Continue</T>
-      </VSCodeButton>
-      <VSCodeButton
-        appearance="icon"
+      </Button>
+      <Button
         key="abort"
         disabled={shouldDisableButtons}
         onClick={() => {
@@ -787,7 +898,71 @@ function MergeConflictButtons({
         }}>
         <Icon slot="start" icon={isRunningAbort ? 'loading' : 'circle-slash'} />
         <T>Abort</T>
-      </VSCodeButton>
-    </>
+      </Button>
+      {externalMergeTool == null ? (
+        platform.upsellExternalMergeTool ? (
+          <Tooltip
+            title={
+              <div>
+                <T replace={{$tool: <code>{externalMergeTool}</code>, $br: <br />}}>
+                  You can configure an external merge tool to use for resolving conflicts.$br
+                </T>
+              </div>
+            }>
+            <Button
+              icon
+              disabled={allConflictsResolved || shouldDisableButtons}
+              onClick={() => {
+                tracker.track('ClickedConfigureExternalMergeTool');
+                const link = Internal.externalMergeToolDocsLink;
+                if (link) {
+                  platform.openExternalLink(link);
+                  return;
+                }
+                platform.confirm(
+                  t('Configuring External Merge Tools'),
+                  t(
+                    'You can configure ISL to use an external merge tool for resovling conflicts.\n' +
+                      'Set both `ui.merge = mymergetool` and `merge-tool.mymergetool`.\n' +
+                      'See `sl help config.merge-tools` for more information about setting up merge tools.\n',
+                  ),
+                );
+              }}>
+              <Icon icon="gear" />
+              <T>Configure External Merge Tool</T>
+            </Button>
+          </Tooltip>
+        ) : null
+      ) : (
+        <Tooltip
+          title={
+            <div>
+              <T replace={{$tool: <code>{externalMergeTool}</code>, $br: <br />}}>
+                Open your configured external merge tool $tool to resolve all the conflicts.$br
+                Waits for the merge tool to exit before continuing.
+              </T>
+              {allConflictsResolved ? (
+                <>
+                  <br />
+                  <T>Disabled since all conflicts have been resolved.</T>
+                </>
+              ) : null}
+            </div>
+          }>
+          <Button
+            icon
+            disabled={allConflictsResolved || shouldDisableButtons}
+            onClick={() => {
+              runOperation(new ResolveInExternalMergeToolOperation(externalMergeTool));
+            }}>
+            <Icon icon="link-external" />
+            <T>Open External Merge Tool</T>
+          </Button>
+        </Tooltip>
+      )}
+      {Internal.showInlineAutoRunMergeDriversOption === true && (
+        <AutoResolveSettingCheckbox subtle />
+      )}
+    </Row>
   );
 }

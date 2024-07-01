@@ -1294,10 +1294,13 @@ def updateone(repo, fctxfunc, wctx, f, flags, backup=False, backgroundclose=Fals
         # They are handled separately.
         return 0
     wctx[f].clearunknown()
-    data = fctx.data()
-    wctx[f].write(data, flags, backgroundclose=backgroundclose)
+    wctx[f].write(fctx, flags, backgroundclose=backgroundclose)
 
-    return len(data)
+    if fctx.flags() == "m":
+        # size() doesn't seem to work for submodules
+        return len(fctx.data())
+    else:
+        return fctx.size()
 
 
 def batchget(repo, mctx, wctx, actions):
@@ -1467,7 +1470,7 @@ def applyupdates(repo, actions, wctx, mctx, overwrite, labels=None, ancestors=No
             if wctx[f0].lexists():
                 repo.ui.note(_("moving %s to %s\n") % (f0, f))
                 wctx[f].audit()
-                wctx[f].write(wctx.filectx(f0).data(), wctx.filectx(f0).flags())
+                wctx[f].write(wctx.filectx(f0), wctx.filectx(f0).flags())
                 wctx[f0].remove()
             z += 1
             prog.value = (z, f)
@@ -1544,7 +1547,7 @@ def applyupdates(repo, actions, wctx, mctx, overwrite, labels=None, ancestors=No
             f0, flags = args
             repo.ui.note(_("moving %s to %s\n") % (f0, f))
             wctx[f].audit()
-            wctx[f].write(wctx.filectx(f0).data(), flags)
+            wctx[f].write(wctx.filectx(f0), flags)
             wctx[f0].remove()
             updated += 1
 
@@ -1555,7 +1558,7 @@ def applyupdates(repo, actions, wctx, mctx, overwrite, labels=None, ancestors=No
             prog.value = (z, f)
             f0, flags = args
             repo.ui.note(_("getting %s to %s\n") % (f0, f))
-            wctx[f].write(mctx.filectx(f0).data(), flags)
+            wctx[f].write(mctx.filectx(f0), flags)
             updated += 1
 
         # exec
@@ -1860,23 +1863,6 @@ def _logupdatedistance(ui, repo, node):
         pass
 
 
-def querywatchmanrecrawls(repo):
-    try:
-        path = repo.root
-        x, x, x, p = util.popen4("watchman debug-status")
-        stdout, stderr = p.communicate()
-        data = json.loads(stdout)
-        for root in data["roots"]:
-            if root["path"] == path:
-                count = root["recrawl_info"]["count"]
-                if root["recrawl_info"]["should-recrawl"] is True:
-                    count += 1
-                return count
-        return 0
-    except Exception:
-        return 0
-
-
 def _prefetchlazychildren(repo, node):
     """Prefetch children for ``node`` for lazy changelog.
 
@@ -1995,7 +1981,6 @@ def goto(
                     p2,
                     force,
                     wc,
-                    querywatchmanrecrawls(repo),
                 )
                 if git.isgitformat(repo):
                     git.submodulecheckout(p2, force=force)
@@ -2103,8 +2088,6 @@ def _update(
         repo.ui.debug("falling back to non-eden update code path: merge\n")
 
     with repo.wlock():
-        prerecrawls = querywatchmanrecrawls(repo)
-
         if wc is None:
             wc = repo[None]
         pl = wc.parents()
@@ -2306,8 +2289,6 @@ def _update(
 
     # Log the number of files updated.
     repo.ui.log("update_size", update_filecount=sum(stats))
-    postrecrawls = querywatchmanrecrawls(repo)
-    repo.ui.log("watchman-recrawls", watchman_recrawls=postrecrawls - prerecrawls)
 
     return stats
 
@@ -2366,7 +2347,7 @@ def makenativecheckoutplan(repo, p1, p2, updateprogresspath=None):
 
 
 @util.timefunction("donativecheckout", 0, "ui")
-def donativecheckout(repo, p1, p2, force, wc, prerecrawls):
+def donativecheckout(repo, p1, p2, force, wc):
     repo.ui.debug("Using native checkout\n")
     repo.ui.log(
         "nativecheckout",
@@ -2462,8 +2443,6 @@ def donativecheckout(repo, p1, p2, force, wc, prerecrawls):
                 repo._persistprofileconfigs()
 
     repo.hook("update", parent1=xp1, parent2=xp2, error=stats[3])
-    postrecrawls = querywatchmanrecrawls(repo)
-    repo.ui.log("watchman-recrawls", watchman_recrawls=postrecrawls - prerecrawls)
     return stats
 
 

@@ -6,11 +6,13 @@
  */
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fmt;
 
 use futures::StreamExt;
 
 use super::hints::Flags;
+use super::id_static::IdStaticSet;
 use super::AsyncNameSetQuery;
 use super::BoxVertexStream;
 use super::Hints;
@@ -91,12 +93,29 @@ impl AsyncNameSetQuery for DifferenceSet {
         Ok(result)
     }
 
+    async fn size_hint(&self) -> (u64, Option<u64>) {
+        let (lhs_min, lhs_max) = self.lhs.size_hint().await;
+        let (_rhs_min, rhs_max) = self.rhs.size_hint().await;
+        let min = match rhs_max {
+            None => 0,
+            Some(rhs_max) => lhs_min.saturating_sub(rhs_max),
+        };
+        (min, lhs_max)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn hints(&self) -> &Hints {
         &self.hints
+    }
+
+    fn specialized_flatten_id(&self) -> Option<Cow<IdStaticSet>> {
+        let lhs = self.lhs.specialized_flatten_id()?;
+        let rhs = self.rhs.specialized_flatten_id()?;
+        let result = IdStaticSet::from_edit_spans(&lhs, &rhs, |a, b| a.difference(b))?;
+        Some(Cow::Owned(result))
     }
 }
 
@@ -152,7 +171,7 @@ mod tests {
         assert_eq!(shorten_iter(ni(set.iter())), ["11", "55", "22"]);
         assert_eq!(shorten_iter(ni(set.iter_rev())), ["22", "55", "11"]);
         assert!(!nb(set.is_empty())??);
-        assert_eq!(nb(set.count())??, 3);
+        assert_eq!(nb(set.count_slow())??, 3);
         assert_eq!(shorten_name(nb(set.first())??.unwrap()), "11");
         assert_eq!(shorten_name(nb(set.last())??.unwrap()), "22");
         for &b in b"\x11\x22\x55".iter() {
@@ -164,12 +183,17 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_size_hint_sets() {
+        check_size_hint_sets(|a, b| DifferenceSet::new(a, b));
+    }
+
     quickcheck::quickcheck! {
         fn test_difference_quickcheck(a: Vec<u8>, b: Vec<u8>) -> bool {
             let set = difference(&a, &b);
             check_invariants(&set).unwrap();
 
-            let count = nb(set.count()).unwrap().unwrap();
+            let count = nb(set.count_slow()).unwrap().unwrap() as usize;
             assert!(count <= a.len());
 
             assert!(b.iter().all(|&b| nb(set.contains(&to_name(b))).unwrap().ok() == Some(false)));

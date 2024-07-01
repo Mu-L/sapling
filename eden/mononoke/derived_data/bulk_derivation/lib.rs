@@ -25,8 +25,10 @@ use futures::stream;
 use futures::stream::StreamExt;
 use git_types::MappedGitCommitId;
 use git_types::RootGitDeltaManifestId;
+use git_types::RootGitDeltaManifestV2Id;
 use git_types::TreeHandle;
 use mercurial_derivation::MappedHgChangesetId;
+use mercurial_derivation::RootHgAugmentedManifestId;
 use mononoke_types::ChangesetId;
 use skeleton_manifest::RootSkeletonManifestId;
 use test_manifest::RootTestManifestDirectory;
@@ -41,6 +43,13 @@ pub trait BulkDerivation {
         rederivation: Option<Arc<dyn Rederivation>>,
         derived_data_types: &[DerivableType],
     ) -> impl std::future::Future<Output = Result<Duration, DerivationError>> + Send;
+    fn is_derived(
+        &self,
+        ctx: &CoreContext,
+        csid: ChangesetId,
+        rederivation: Option<Arc<dyn Rederivation>>,
+        derived_data_type: DerivableType,
+    ) -> impl std::future::Future<Output = Result<bool, DerivationError>> + Send;
 }
 
 impl BulkDerivation for DerivedDataManager {
@@ -100,6 +109,14 @@ impl BulkDerivation for DerivedDataManager {
                             )
                             .await
                         }
+                        DerivableType::HgAugmentedManifests => {
+                            self.derive_exactly_batch::<RootHgAugmentedManifestId>(
+                                ctx,
+                                csids,
+                                rederivation,
+                            )
+                            .await
+                        }
                         DerivableType::Fsnodes => {
                             self.derive_exactly_batch::<RootFsnodeId>(ctx, csids, rederivation)
                                 .await
@@ -144,6 +161,14 @@ impl BulkDerivation for DerivedDataManager {
                             )
                             .await
                         }
+                        DerivableType::GitDeltaManifestsV2 => {
+                            self.derive_exactly_batch::<RootGitDeltaManifestV2Id>(
+                                ctx,
+                                csids,
+                                rederivation,
+                            )
+                            .await
+                        }
                         DerivableType::BssmV3 => {
                             self.derive_exactly_batch::<RootBssmV3DirectoryId>(
                                 ctx,
@@ -177,5 +202,83 @@ impl BulkDerivation for DerivedDataManager {
                     (Err(e), _) | (_, Err(e)) => Err(e),
                 }
             })
+    }
+    async fn is_derived(
+        &self,
+        ctx: &CoreContext,
+        csid: ChangesetId,
+        rederivation: Option<Arc<dyn Rederivation>>,
+        derived_data_type: DerivableType,
+    ) -> Result<bool, DerivationError> {
+        Ok(match derived_data_type {
+            DerivableType::Unodes => self
+                .fetch_derived::<RootUnodeManifestId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::BlameV2 => self
+                .fetch_derived::<RootBlameV2>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::FileNodes => self
+                .fetch_derived::<FilenodesOnlyPublic>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::HgChangesets => self
+                .fetch_derived::<MappedHgChangesetId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::HgAugmentedManifests => self
+                .fetch_derived::<RootHgAugmentedManifestId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::Fsnodes => self
+                .fetch_derived::<RootFsnodeId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::Fastlog => self
+                .fetch_derived::<RootFastlog>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::DeletedManifests => self
+                .fetch_derived::<RootDeletedManifestV2Id>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::SkeletonManifests => self
+                .fetch_derived::<RootSkeletonManifestId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::ChangesetInfo => self
+                .fetch_derived::<ChangesetInfo>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::GitTrees => self
+                .fetch_derived::<TreeHandle>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::GitCommits => self
+                .fetch_derived::<MappedGitCommitId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::GitDeltaManifests => self
+                .fetch_derived::<RootGitDeltaManifestId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::GitDeltaManifestsV2 => self
+                .fetch_derived::<RootGitDeltaManifestV2Id>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::BssmV3 => self
+                .fetch_derived::<RootBssmV3DirectoryId>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::TestManifests => self
+                .fetch_derived::<RootTestManifestDirectory>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+            DerivableType::TestShardedManifests => self
+                .fetch_derived::<RootTestShardedManifestDirectory>(ctx, csid, rederivation)
+                .await?
+                .is_some(),
+        })
     }
 }

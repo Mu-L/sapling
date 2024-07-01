@@ -1,8 +1,6 @@
-#debugruntest-compatible
 
 #require no-eden
 
-  $ configure modernclient
 
   $ setconfig format.allowbundle1=true format.usegeneraldelta=yes
 

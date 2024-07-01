@@ -463,10 +463,10 @@ def popen3(cmd, env=None, newlines=False):
     return stdin, stdout, stderr
 
 
-def popen4(cmd, env=None, newlines=False, bufsize=-1):
+def popen4(cmd, env=None, newlines=False, bufsize=-1, shell=True):
     p = subprocess.Popen(
         cmd,
-        shell=True,
+        shell=shell,
         bufsize=bufsize,
         close_fds=closefds,
         stdin=subprocess.PIPE,
@@ -1049,15 +1049,18 @@ def lrucachefunc(func):
 
     else:
 
-        def f(*args):
-            if args not in cache:
+        def f(*args, **kwargs):
+            cachekey = args
+            if kwargs:
+                cachekey = (args, tuple(sorted(kwargs.items())))
+            if cachekey not in cache:
                 if len(cache) > 20:
                     del cache[order.popleft()]
-                cache[args] = func(*args)
+                cache[cachekey] = func(*args, **kwargs)
             else:
-                order.remove(args)
-            order.append(args)
-            return cache[args]
+                order.remove(cachekey)
+            order.append(cachekey)
+            return cache[cachekey]
 
     return f
 
@@ -4957,3 +4960,31 @@ def import_curses():
         curses = False
 
     return curses
+
+
+def no_recursion(func):
+    """Funtion decorator to avoid recursion of a free function.
+    If recursion happens, return None.
+
+    >>> @no_recursion
+    ... def f(x):
+    ...     return x if x < 1 else f(x - 1)
+    >>> f(0)
+    0
+    >>> f(1) is None
+    True
+    """
+    depth = 0
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        nonlocal depth
+        if depth > 0:
+            return None
+        try:
+            depth += 1
+            return func(*args, **kwargs)
+        finally:
+            depth -= 1
+
+    return wrapper

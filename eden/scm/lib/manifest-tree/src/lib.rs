@@ -9,7 +9,6 @@ mod diff;
 mod factory_impls;
 mod iter;
 mod link;
-mod matcher;
 mod namecmp;
 mod store;
 #[cfg(any(test, feature = "for-tests"))]
@@ -58,7 +57,6 @@ use crate::link::Durable;
 use crate::link::DurableEntry;
 use crate::link::Ephemeral;
 use crate::link::Leaf;
-pub use crate::matcher::ManifestMatcher;
 use crate::store::InnerStore;
 
 /// The Tree implementation of a Manifest dedicates an inner node for each directory in the
@@ -817,6 +815,16 @@ mod tests {
                 "file path is already a directory",
             ],
         );
+    }
+
+    #[test]
+    fn test_contains_file() {
+        let mut tree = TreeManifest::ephemeral(Arc::new(TestStore::new()));
+        tree.insert(repo_path_buf("foo/bar"), make_meta("10"))
+            .unwrap();
+        assert!(tree.contains_file(repo_path("foo/bar")).unwrap());
+        assert!(!tree.contains_file(repo_path("foo")).unwrap());
+        assert!(!tree.contains_file(repo_path("baz")).unwrap());
     }
 
     #[test]

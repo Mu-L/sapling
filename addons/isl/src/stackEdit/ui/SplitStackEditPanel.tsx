@@ -26,12 +26,14 @@ import {useGeneratedFileStatuses} from '../../GeneratedFile';
 import {Subtle} from '../../Subtle';
 import {Tooltip} from '../../Tooltip';
 import {tracker} from '../../analytics';
+import {Button} from '../../components/Button';
+import {TextField} from '../../components/TextField';
 import {t, T} from '../../i18n';
 import {GeneratedStatus} from '../../types';
 import {isAbsent} from '../commitStackState';
 import {computeLinesForFileStackEditor} from './FileStackEditorLines';
 import {bumpStackEditMetric, SplitRangeRecord, useStackEditState} from './stackEditState';
-import {VSCodeButton, VSCodeTextField} from '@vscode/webview-ui-toolkit/react';
+import * as stylex from '@stylexjs/stylex';
 import {Set as ImSet, Range} from 'immutable';
 import {useAtomValue} from 'jotai';
 import {useRef, useState, useEffect, useMemo} from 'react';
@@ -42,6 +44,12 @@ import {useThrottledEffect} from 'shared/hooks';
 import {firstLine, nullthrows} from 'shared/utils';
 
 import './SplitStackEditPanel.css';
+
+const styles = stylex.create({
+  full: {
+    width: '100%',
+  },
+});
 
 export function SplitStackEditPanel() {
   const stackEdit = useStackEditState();
@@ -278,9 +286,9 @@ function SplitColumn(props: SplitColumnProps) {
             commitKey={commit?.key}
             readOnly={editors.isEmpty()}
           />
-          <VSCodeButton appearance="icon" onClick={e => showExtraCommitActionsContextMenu(e)}>
+          <Button icon onClick={e => showExtraCommitActionsContextMenu(e)}>
             <Icon icon="ellipsis" />
-          </VSCodeButton>
+          </Button>
         </div>
         {body}
       </div>
@@ -402,13 +410,13 @@ function SplitEditorWithTitle(props: SplitEditorWithTitleProps) {
         fileActions={
           <div className="split-commit-file-arrows">
             {canMoveLeft ? (
-              <VSCodeButton appearance="icon" onClick={() => moveEntireFile('left')}>
+              <Button icon onClick={() => moveEntireFile('left')}>
                 ⬅
-              </VSCodeButton>
+              </Button>
             ) : null}
-            <VSCodeButton appearance="icon" onClick={() => moveEntireFile('right')}>
+            <Button icon onClick={() => moveEntireFile('right')}>
               ⮕
-            </VSCodeButton>
+            </Button>
           </div>
         }
       />
@@ -489,9 +497,9 @@ function Generated({onShowAnyway}: {onShowAnyway: (show: boolean) => void}) {
     <div className="split-header-hint">
       <Column>
         <T>This file is generated</T>
-        <VSCodeButton appearance="icon" onClick={() => onShowAnyway(true)}>
+        <Button icon onClick={() => onShowAnyway(true)}>
           <T>Show anyway</T>
-        </VSCodeButton>
+        </Button>
       </Column>
     </div>
   );
@@ -514,10 +522,10 @@ function StackRangeSelectorButton() {
   return (
     <div className="split-range-selector-button">
       <Tooltip trigger="click" component={() => <StackRangeSelector />}>
-        <VSCodeButton appearance="secondary">
+        <Button>
           <Icon icon="layers" slot="start" />
           <T>Change split range</T>
-        </VSCodeButton>
+        </Button>
       </Tooltip>
       {label}
     </div>
@@ -673,12 +681,13 @@ function EditableCommitTitle(props: MaybeEditableCommitTitleProps) {
     }
   };
   return (
-    <VSCodeTextField
+    <TextField
+      containerXstyle={styles.full}
       readOnly={props.readOnly}
       value={existingTitle}
       title={t('Edit commit title')}
       style={{width: 'calc(100% - var(--pad))'}}
-      onInput={e => handleEdit((e.target as unknown as {value: string})?.value)}
+      onInput={e => handleEdit(e.currentTarget?.value)}
     />
   );
 }
@@ -781,8 +790,10 @@ export function SplitFile(props: SplitFileProps) {
       const divs = mainContentRef.current.querySelectorAll<HTMLDivElement>('div[data-sel-id]');
       const selIds: Array<string> = [];
       for (const div of divs) {
-        const child = div.lastChild;
-        if (child && selection.containsNode(child, true)) {
+        if (
+          (div.lastChild && selection.containsNode(div.lastChild, true)) ||
+          (div.firstChild && selection.containsNode(div.firstChild, true))
+        ) {
           selIds.push(nullthrows(div.dataset.selId));
         }
       }

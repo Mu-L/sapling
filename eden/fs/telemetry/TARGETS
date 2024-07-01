@@ -11,6 +11,7 @@ cpp_library(
         "EdenStats.h",
     ],
     exported_deps = [
+        "//eden/common/telemetry:structured_logger_factory",
         "//eden/common/telemetry:telemetry",
         "//eden/common/utils:ref_ptr",
         "//eden/fs:config",
@@ -91,24 +92,6 @@ cpp_library(
 )
 
 cpp_library(
-    name = "structured_logger_factory",
-    srcs = [
-        "StructuredLoggerFactory.cpp",
-    ],
-    deps = [
-        ":stats",
-        "//eden/common/telemetry:scribe_logger",
-        "//eden/common/telemetry:structured_logger",
-        "//eden/fs/config:config",
-        "//fb303:service_data",
-        "//folly/logging:logging",
-    ],
-    exported_deps = [
-        "//eden/common/utils:ref_ptr",
-    ],
-)
-
-cpp_library(
     name = "activity_buffer",
     headers = [
         "ActivityBuffer.h",
@@ -116,5 +99,20 @@ cpp_library(
     exported_deps = [
         "//eden/fs/utils:ring_buffer",
         "//folly:synchronized",
+    ],
+)
+
+cpp_library(
+    name = "structured_logger",
+    srcs = [
+        "EdenStructuredLogger.cpp",
+    ],
+    headers = [
+        "EdenStructuredLogger.h",
+    ],
+    exported_deps = [
+        "//eden/common/telemetry:log_info",
+        "//eden/common/telemetry:scribe_logger",
+        "//eden/common/telemetry:structured_logger",
     ],
 )

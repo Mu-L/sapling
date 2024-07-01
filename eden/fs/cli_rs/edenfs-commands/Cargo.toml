@@ -25,11 +25,11 @@ once_cell = "1.12"
 serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_json = { version = "1.0.100", features = ["float_roundtrip", "unbounded_depth"] }
 subprocess = "0.2.7"
-sysinfo = "0.26.8"
+sysinfo = "0.30.11"
 tabular = "0.2.0"
 termwiz = { version = "0.22", features = ["widgets"] }
 thrift-types = { version = "0.1.0", path = "../../../scm/lib/thrift-types" }
-tokio = { version = "1.36.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }
 toml = "0.8.4"
 tracing = { version = "0.1.40", features = ["attributes"] }
 

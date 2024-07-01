@@ -1,9 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
 
-  $ configure modernclient
 
 File to dir:
 

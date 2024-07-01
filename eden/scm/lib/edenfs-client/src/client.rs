@@ -10,6 +10,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -21,6 +22,7 @@ use thrift_types::edenfs;
 use thrift_types::edenfs_clients::EdenService;
 use thrift_types::fbthrift::binary_protocol::BinaryProtocol;
 use tokio_uds_compat::UnixStream;
+use tracing::error;
 use types::HgId;
 use types::RepoPathBuf;
 
@@ -92,6 +94,7 @@ impl EdenFsClient {
     }
 
     /// Get file status. Normalized to non-Thrift types.
+    #[tracing::instrument(skip(self))]
     pub fn get_status(
         &self,
         commit: HgId,
@@ -99,6 +102,9 @@ impl EdenFsClient {
     ) -> anyhow::Result<BTreeMap<RepoPathBuf, FileStatus>> {
         let thrift_client = block_on(self.get_thrift_client())?;
         let filter_id = self.get_active_filter_id(commit.clone())?;
+
+        let start_time = Instant::now();
+
         let thrift_result = extract_error(block_on(thrift_client.getScmStatusV2(
             &edenfs::GetScmStatusParams {
                 mountPoint: self.root_vec(),
@@ -112,6 +118,9 @@ impl EdenFsClient {
                 ..Default::default()
             },
         )))?;
+
+        tracing::debug!(target: "measuredtimes", edenclientstatus_time=start_time.elapsed().as_millis() as u64);
+
         let mut result = BTreeMap::new();
         for (path_bytes, status) in thrift_result.status.entries {
             let path = match RepoPathBuf::from_utf8(path_bytes) {
@@ -128,6 +137,7 @@ impl EdenFsClient {
     }
 
     /// Get the raw journal position. Useful to check whether there are file changes.
+    #[tracing::instrument(skip(self))]
     pub fn get_journal_position(&self) -> anyhow::Result<(i64, i64)> {
         let thrift_client = block_on(self.get_thrift_client())?;
         let position = extract_error(block_on(
@@ -139,6 +149,7 @@ impl EdenFsClient {
     }
 
     /// Set the working copy (dirstate) parents.
+    #[tracing::instrument(skip(self))]
     pub fn set_parents(&self, p1: HgId, p2: Option<HgId>, p1_tree: HgId) -> anyhow::Result<()> {
         let thrift_client = block_on(self.get_thrift_client())?;
         let parents = edenfs::WorkingDirectoryParents {
@@ -167,6 +178,7 @@ impl EdenFsClient {
     /// The client might want to write pending draft changes to disk
     /// so edenfs can find the new files during checkout.
     /// Normalize to non-Thrift types.
+    #[tracing::instrument(skip(self))]
     pub fn checkout(
         &self,
         node: HgId,
@@ -188,12 +200,18 @@ impl EdenFsClient {
         let root_vec = self.root_vec();
         let node_vec = node.into_byte_array().into();
         let thrift_mode = edenfs::CheckoutMode::local_from(mode);
+
+        let start_time = Instant::now();
+
         let thrift_result = extract_error(block_on(thrift_client.checkOutRevision(
             &root_vec,
             &node_vec,
             &thrift_mode,
             &params,
         )))?;
+
+        tracing::debug!(target: "measuredtimes", edenclientcheckout_time=start_time.elapsed().as_millis() as u64);
+
         let result = thrift_result
             .into_iter()
             .filter_map(|c| CheckoutConflict::local_try_from(c).ok())
@@ -222,7 +240,9 @@ pub(crate) fn extract_error<V, E: std::error::Error + Send + Sync + 'static>(
 
 async fn get_socket_transport(sock_path: &Path) -> Result<SocketTransport<UnixStream>> {
     let sock = UnixStream::connect(&sock_path).await?;
-    Ok(SocketTransport::new(sock))
+    Ok(SocketTransport::new_with_error_handler(sock, |error| {
+        error!(?error, "thrift transport error")
+    }))
 }
 
 #[derive(Deserialize)]

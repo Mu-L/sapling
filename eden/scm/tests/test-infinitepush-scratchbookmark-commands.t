@@ -1,4 +1,5 @@
-#debugruntest-compatible
+#modern-config-incompatible
+#modern-config-incompatible
 
 #require no-eden
 

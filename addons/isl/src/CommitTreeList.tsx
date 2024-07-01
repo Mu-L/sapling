@@ -18,9 +18,10 @@ import {isHighlightedCommit} from './HighlightedCommits';
 import {RegularGlyph, RenderDag, YouAreHereGlyph} from './RenderDag';
 import {StackActions} from './StackActions';
 import {Tooltip, DOCUMENTATION_DELAY} from './Tooltip';
+import {Button} from './components/Button';
 import {YOU_ARE_HERE_VIRTUAL_COMMIT} from './dag/virtualCommit';
 import {T, t} from './i18n';
-import {atomFamilyWeak} from './jotaiUtils';
+import {atomFamilyWeak, localStorageBackedAtom} from './jotaiUtils';
 import {CreateEmptyInitialCommitOperation} from './operations/CreateEmptyInitialCommitOperation';
 import {inlineProgressByHash, useRunOperation} from './operationsState';
 import {dagWithPreviews, treeWithPreviews, useMarkOperationsCompleted} from './previews';
@@ -38,7 +39,6 @@ import {
   latestUncommittedChangesData,
 } from './serverAPIState';
 import {MaybeEditStackModal} from './stackEdit/ui/EditStackModal';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {ErrorShortMessages} from 'isl-server/src/constants';
 import {atom, useAtomValue} from 'jotai';
 import {Icon} from 'shared/Icon';
@@ -59,9 +59,15 @@ const dagWithYouAreHere = atom(get => {
   return dag;
 });
 
+export const condenseObsoleteStacks = localStorageBackedAtom<boolean | null>(
+  'isl.condense-obsolete-stacks',
+  true,
+);
+
 const renderSubsetUnionSelection = atom(get => {
   const dag = get(dagWithYouAreHere);
-  const subset = dag.subsetForRendering();
+  const condense = get(condenseObsoleteStacks);
+  const subset = dag.subsetForRendering(undefined, /* condenseObsoleteStacks */ condense !== false);
   // If selectedCommits includes commits unknown to dag (ex. in tests), ignore them to avoid errors.
   const selection = dag.present(get(selectedCommits));
   return subset.union(selection);
@@ -224,13 +230,12 @@ function CommitFetchError({error}: {error: Error}) {
         description={t('If this is a new repository, try adding an initial commit first.')}
         error={error}
         buttons={[
-          <VSCodeButton
-            appearance="secondary"
+          <Button
             onClick={() => {
               runOperation(new CreateEmptyInitialCommitOperation());
             }}>
             <T>Create empty initial commit</T>
-          </VSCodeButton>,
+          </Button>,
         ]}
       />
     );
@@ -263,16 +268,16 @@ function FetchingAdditionalCommitsButton() {
   });
   return (
     <Tooltip placement="top" delayMs={DOCUMENTATION_DELAY} title={commitsShownMessage}>
-      <VSCodeButton
+      <Button
         disabled={isFetching}
         onClick={() => {
           serverAPI.postMessage({
             type: 'loadMoreCommits',
           });
         }}
-        appearance="icon">
+        icon>
         <T>Load more commits</T>
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }

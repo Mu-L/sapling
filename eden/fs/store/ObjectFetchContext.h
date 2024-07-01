@@ -14,6 +14,7 @@
 #include "eden/common/os/ProcessId.h"
 #include "eden/common/utils/RefPtr.h"
 #include "eden/fs/store/ImportPriority.h"
+#include "eden/fs/telemetry/EdenStats.h"
 
 namespace facebook::eden {
 
@@ -38,7 +39,25 @@ class ObjectFetchContext : public RefCounted {
     Blob,
     BlobMetadata,
     Tree,
+    RootTree,
+    ManifestForRoot,
+    PrefetchBlob,
     kObjectTypeEnumMax,
+  };
+
+  /**
+   * The source of the data that was fetched
+   */
+  enum class FetchedSource : uint8_t {
+    /** The data was fetched from a local source */
+    Local,
+    /** The data was fetched from a remote source */
+    Remote,
+    /**
+     * The data will be fetched from local or remote source.
+     * We don't know the source yet.
+     */
+    Unknown,
   };
 
   /**
@@ -94,6 +113,22 @@ class ObjectFetchContext : public RefCounted {
     return kDefaultImportPriority;
   }
 
+  void setFetchedSource(
+      FetchedSource fetchedSource,
+      ObjectType type,
+      EdenStatsPtr stats) {
+    // There is no stat increment for FetchedSource::Unknown
+    if (saplingStatsMap_.find({fetchedSource, type}) !=
+        saplingStatsMap_.end()) {
+      stats->increment(saplingStatsMap_[{fetchedSource, type}]);
+    }
+    fetchedSource_ = fetchedSource;
+  }
+
+  FetchedSource getFetchedSource() const {
+    return fetchedSource_;
+  }
+
   // RequestInfo keys used by ReCasBackingStore
   inline static const std::string kSessionIdField = "session-id";
   inline static const std::string kCacheSessionIdField = "cache-session-id";
@@ -136,6 +171,38 @@ class ObjectFetchContext : public RefCounted {
  private:
   ObjectFetchContext(const ObjectFetchContext&) = delete;
   ObjectFetchContext& operator=(const ObjectFetchContext&) = delete;
+
+  FetchedSource fetchedSource_{FetchedSource::Unknown};
+
+  std::unordered_map<
+      std::tuple<FetchedSource, ObjectType>,
+      StatsGroupBase::Counter SaplingBackingStoreStats::*>
+      saplingStatsMap_ = {
+          {{FetchedSource::Local, ObjectType::Tree},
+           &SaplingBackingStoreStats::fetchTreeLocal},
+          {{FetchedSource::Remote, ObjectType::Tree},
+           &SaplingBackingStoreStats::fetchTreeRemote},
+          {{FetchedSource::Local, ObjectType::RootTree},
+           &SaplingBackingStoreStats::getRootTreeLocal},
+          {{FetchedSource::Remote, ObjectType::RootTree},
+           &SaplingBackingStoreStats::getRootTreeRemote},
+          {{FetchedSource::Local, ObjectType::ManifestForRoot},
+           &SaplingBackingStoreStats::importManifestForRootLocal},
+          {{FetchedSource::Remote, ObjectType::ManifestForRoot},
+           &SaplingBackingStoreStats::importManifestForRootRemote},
+          {{FetchedSource::Local, ObjectType::Blob},
+           &SaplingBackingStoreStats::fetchBlobLocal},
+          {{FetchedSource::Remote, ObjectType::Blob},
+           &SaplingBackingStoreStats::fetchBlobRemote},
+          {{FetchedSource::Local, ObjectType::BlobMetadata},
+           &SaplingBackingStoreStats::fetchBlobMetadataLocal},
+          {{FetchedSource::Remote, ObjectType::BlobMetadata},
+           &SaplingBackingStoreStats::fetchBlobMetadataRemote},
+          {{FetchedSource::Local, ObjectType::PrefetchBlob},
+           &SaplingBackingStoreStats::prefetchBlobLocal},
+          {{FetchedSource::Remote, ObjectType::PrefetchBlob},
+           &SaplingBackingStoreStats::prefetchBlobRemote},
+      };
 };
 
 // For fbcode/eden/scm/lib/backingstore/src/ffi.rs

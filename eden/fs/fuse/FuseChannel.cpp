@@ -17,6 +17,7 @@
 #include <csignal>
 #include <type_traits>
 
+#include "eden/common/telemetry/StructuredLogger.h"
 #include "eden/common/utils/Bug.h"
 #include "eden/common/utils/IDGen.h"
 #include "eden/common/utils/Synchronized.h"
@@ -26,6 +27,7 @@
 #include "eden/fs/fuse/FuseRequestContext.h"
 #include "eden/fs/privhelper/PrivHelper.h"
 #include "eden/fs/telemetry/FsEventLogger.h"
+#include "eden/fs/telemetry/LogEvent.h"
 #include "eden/fs/utils/StaticAssert.h"
 #include "eden/fs/utils/Thread.h"
 
@@ -232,13 +234,17 @@ struct HandlerEntry {
       StringPiece n,
       Handler h,
       FuseArgRenderer r,
-      FuseStats::DurationPtr s,
+      FuseStats::DurationPtr d,
+      FuseStats::CounterPtr cS,
+      FuseStats::CounterPtr cF,
       AccessType at = AccessType::FsChannelOther,
       SamplingGroup samplingGroup = SamplingGroup::DropAll)
       : name{n},
         handler{h},
         argRenderer{r},
-        stat{s},
+        duration{d},
+        countSuccessful{cS},
+        countFailure{cF},
         samplingGroup{samplingGroup},
         accessType{at} {}
 
@@ -264,7 +270,9 @@ struct HandlerEntry {
   StringPiece name;
   Handler handler = nullptr;
   FuseArgRenderer argRenderer = nullptr;
-  FuseStats::DurationPtr stat = nullptr;
+  FuseStats::DurationPtr duration = nullptr;
+  FuseStats::CounterPtr countSuccessful = nullptr;
+  FuseStats::CounterPtr countFailure = nullptr;
   SamplingGroup samplingGroup = SamplingGroup::DropAll;
   AccessType accessType = AccessType::FsChannelOther;
 };
@@ -281,18 +289,24 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseLookup,
       &argrender::lookup,
       &FuseStats::lookup,
+      &FuseStats::lookupSuccessful,
+      &FuseStats::lookupFailure,
       Read,
       SamplingGroup::Four};
   handlers[FUSE_FORGET] = {
       "FUSE_FORGET",
       &FuseChannel::fuseForget,
       &argrender::forget,
-      &FuseStats::forget};
+      &FuseStats::forget,
+      &FuseStats::forgetSuccessful,
+      &FuseStats::forgetFailure};
   handlers[FUSE_GETATTR] = {
       "FUSE_GETATTR",
       &FuseChannel::fuseGetAttr,
       &argrender::getattr,
       &FuseStats::getattr,
+      &FuseStats::getattrSuccessful,
+      &FuseStats::getattrFailure,
       Read,
       SamplingGroup::Three};
   handlers[FUSE_SETATTR] = {
@@ -300,6 +314,8 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseSetAttr,
       &argrender::setattr,
       &FuseStats::setattr,
+      &FuseStats::setattrSuccessful,
+      &FuseStats::setattrFailure,
       Write,
       SamplingGroup::Two};
   handlers[FUSE_READLINK] = {
@@ -307,24 +323,32 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseReadLink,
       &argrender::readlink,
       &FuseStats::readlink,
+      &FuseStats::readlinkSuccessful,
+      &FuseStats::readlinkFailure,
       Read};
   handlers[FUSE_SYMLINK] = {
       "FUSE_SYMLINK",
       &FuseChannel::fuseSymlink,
       &argrender::symlink,
       &FuseStats::symlink,
+      &FuseStats::symlinkSuccessful,
+      &FuseStats::symlinkFailure,
       Write};
   handlers[FUSE_MKNOD] = {
       "FUSE_MKNOD",
       &FuseChannel::fuseMknod,
       &argrender::mknod,
       &FuseStats::mknod,
+      &FuseStats::mknodSuccessful,
+      &FuseStats::mknodFailure,
       Write};
   handlers[FUSE_MKDIR] = {
       "FUSE_MKDIR",
       &FuseChannel::fuseMkdir,
       &argrender::mkdir,
       &FuseStats::mkdir,
+      &FuseStats::mkdirSuccessful,
+      &FuseStats::mkdirFailure,
       Write,
       SamplingGroup::One};
   handlers[FUSE_UNLINK] = {
@@ -332,12 +356,16 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseUnlink,
       &argrender::unlink,
       &FuseStats::unlink,
+      &FuseStats::unlinkSuccessful,
+      &FuseStats::unlinkFailure,
       Write};
   handlers[FUSE_RMDIR] = {
       "FUSE_RMDIR",
       &FuseChannel::fuseRmdir,
       &argrender::rmdir,
       &FuseStats::rmdir,
+      &FuseStats::rmdirSuccessful,
+      &FuseStats::rmdirFailure,
       Write,
       SamplingGroup::One};
   handlers[FUSE_RENAME] = {
@@ -345,6 +373,8 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseRename,
       &argrender::rename,
       &FuseStats::rename,
+      &FuseStats::renameSuccessful,
+      &FuseStats::renameFailure,
       Write,
       SamplingGroup::One};
   handlers[FUSE_LINK] = {
@@ -352,14 +382,23 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseLink,
       &argrender::link,
       &FuseStats::link,
+      &FuseStats::linkSuccessful,
+      &FuseStats::linkFailure,
       Write};
   handlers[FUSE_OPEN] = {
-      "FUSE_OPEN", &FuseChannel::fuseOpen, &argrender::open, &FuseStats::open};
+      "FUSE_OPEN",
+      &FuseChannel::fuseOpen,
+      &argrender::open,
+      &FuseStats::open,
+      &FuseStats::openSuccessful,
+      &FuseStats::openFailure};
   handlers[FUSE_READ] = {
       "FUSE_READ",
       &FuseChannel::fuseRead,
       &argrender::read,
       &FuseStats::read,
+      &FuseStats::readSuccessful,
+      &FuseStats::readFailure,
       Read,
       SamplingGroup::Three};
   handlers[FUSE_WRITE] = {
@@ -367,6 +406,8 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseWrite,
       &argrender::write,
       &FuseStats::write,
+      &FuseStats::writeSuccessful,
+      &FuseStats::writeFailure,
       Write,
       SamplingGroup::Two};
   handlers[FUSE_STATFS] = {
@@ -374,29 +415,39 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseStatFs,
       &argrender::statfs,
       &FuseStats::statfs,
+      &FuseStats::statfsSuccessful,
+      &FuseStats::statfsFailure,
       Read};
   handlers[FUSE_RELEASE] = {
       "FUSE_RELEASE",
       &FuseChannel::fuseRelease,
       &argrender::release,
-      &FuseStats::release};
+      &FuseStats::release,
+      &FuseStats::releaseSuccessful,
+      &FuseStats::releaseFailure};
   handlers[FUSE_FSYNC] = {
       "FUSE_FSYNC",
       &FuseChannel::fuseFsync,
       &argrender::fsync,
       &FuseStats::fsync,
+      &FuseStats::fsyncSuccessful,
+      &FuseStats::fsyncFailure,
       Write};
   handlers[FUSE_SETXATTR] = {
       "FUSE_SETXATTR",
       &FuseChannel::fuseSetXAttr,
       &argrender::setxattr,
       &FuseStats::setxattr,
+      &FuseStats::setxattrSuccessful,
+      &FuseStats::setxattrFailure,
       Write};
   handlers[FUSE_GETXATTR] = {
       "FUSE_GETXATTR",
       &FuseChannel::fuseGetXAttr,
       &argrender::getxattr,
       &FuseStats::getxattr,
+      &FuseStats::getxattrSuccessful,
+      &FuseStats::getxattrFailure,
       Read,
       SamplingGroup::Three};
   handlers[FUSE_LISTXATTR] = {
@@ -404,6 +455,8 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseListXAttr,
       &argrender::listxattr,
       &FuseStats::listxattr,
+      &FuseStats::listxattrSuccessful,
+      &FuseStats::listxattrFailure,
       Read,
       SamplingGroup::Two};
   handlers[FUSE_REMOVEXATTR] = {
@@ -411,35 +464,47 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseRemoveXAttr,
       &argrender::removexattr,
       &FuseStats::removexattr,
+      &FuseStats::removexattrSuccessful,
+      &FuseStats::removexattrFailure,
       Write};
   handlers[FUSE_FLUSH] = {
       "FUSE_FLUSH",
       &FuseChannel::fuseFlush,
       &argrender::flush,
-      &FuseStats::flush};
+      &FuseStats::flush,
+      &FuseStats::flushSuccessful,
+      &FuseStats::flushFailure};
   handlers[FUSE_INIT] = {"FUSE_INIT"};
   handlers[FUSE_OPENDIR] = {
       "FUSE_OPENDIR",
       &FuseChannel::fuseOpenDir,
       &argrender::opendir,
-      &FuseStats::opendir};
+      &FuseStats::opendir,
+      &FuseStats::opendirSuccessful,
+      &FuseStats::opendirFailure};
   handlers[FUSE_READDIR] = {
       "FUSE_READDIR",
       &FuseChannel::fuseReadDir,
       &argrender::readdir,
       &FuseStats::readdir,
+      &FuseStats::readdirSuccessful,
+      &FuseStats::readdirFailure,
       Read,
       SamplingGroup::Three};
   handlers[FUSE_RELEASEDIR] = {
       "FUSE_RELEASEDIR",
       &FuseChannel::fuseReleaseDir,
       &argrender::releasedir,
-      &FuseStats::releasedir};
+      &FuseStats::releasedir,
+      &FuseStats::releasedirSuccessful,
+      &FuseStats::releasedirFailure};
   handlers[FUSE_FSYNCDIR] = {
       "FUSE_FSYNCDIR",
       &FuseChannel::fuseFsyncDir,
       &argrender::fsyncdir,
       &FuseStats::fsyncdir,
+      &FuseStats::fsyncdirSuccessful,
+      &FuseStats::fsyncdirFailure,
       Write};
   handlers[FUSE_GETLK] = {"FUSE_GETLK"};
   handlers[FUSE_SETLK] = {"FUSE_SETLK"};
@@ -449,17 +514,26 @@ constexpr auto kFuseHandlers = [] {
       &FuseChannel::fuseAccess,
       &argrender::access,
       &FuseStats::access,
+      &FuseStats::accessSuccessful,
+      &FuseStats::accessFailure,
       Read};
   handlers[FUSE_CREATE] = {
       "FUSE_CREATE",
       &FuseChannel::fuseCreate,
       &argrender::create,
       &FuseStats::create,
+      &FuseStats::createSuccessful,
+      &FuseStats::createFailure,
       Write,
       SamplingGroup::One};
   handlers[FUSE_INTERRUPT] = {"FUSE_INTERRUPT"};
   handlers[FUSE_BMAP] = {
-      "FUSE_BMAP", &FuseChannel::fuseBmap, &argrender::bmap, &FuseStats::bmap};
+      "FUSE_BMAP",
+      &FuseChannel::fuseBmap,
+      &argrender::bmap,
+      &FuseStats::bmap,
+      &FuseStats::bmapSuccessful,
+      &FuseStats::bmapFailure};
   handlers[FUSE_DESTROY] = {"FUSE_DESTROY"};
   handlers[FUSE_IOCTL] = {"FUSE_IOCTL"};
   handlers[FUSE_POLL] = {"FUSE_POLL"};
@@ -468,12 +542,16 @@ constexpr auto kFuseHandlers = [] {
       "FUSE_BATCH_FORGET",
       &FuseChannel::fuseBatchForget,
       &argrender::batchforget,
-      &FuseStats::forgetmulti};
+      &FuseStats::forgetmulti,
+      &FuseStats::forgetmultiSuccessful,
+      &FuseStats::forgetmultiFailure};
   handlers[FUSE_FALLOCATE] = {
       "FUSE_FALLOCATE",
       &FuseChannel::fuseFallocate,
       &argrender::fallocate,
       &FuseStats::fallocate,
+      &FuseStats::fallocateSuccessful,
+      &FuseStats::fallocateFailure,
       Write};
 #ifdef __linux__
   handlers[FUSE_READDIRPLUS] = {"FUSE_READDIRPLUS", Read};
@@ -657,9 +735,9 @@ FuseChannel::InvalidationEntry::~InvalidationEntry() {
 
 FuseChannel::InvalidationEntry::
     InvalidationEntry(InvalidationEntry&& other) noexcept(
-        std::is_nothrow_move_constructible_v<PathComponent>&&
-            std::is_nothrow_move_constructible_v<folly::Promise<folly::Unit>>&&
-                std::is_nothrow_move_constructible_v<DataRange>)
+        std::is_nothrow_move_constructible_v<PathComponent> &&
+        std::is_nothrow_move_constructible_v<folly::Promise<folly::Unit>> &&
+        std::is_nothrow_move_constructible_v<DataRange>)
     : type(other.type), inode(other.inode) {
   switch (type) {
     case InvalidationType::INODE:
@@ -789,11 +867,14 @@ FuseChannel::FuseChannel(
     const folly::Logger* straceLogger,
     std::shared_ptr<ProcessInfoCache> processInfoCache,
     std::shared_ptr<FsEventLogger> fsEventLogger,
+    const std::shared_ptr<StructuredLogger>& structuredLogger,
     folly::Duration requestTimeout,
     std::shared_ptr<Notifier> notifier,
     CaseSensitivity caseSensitive,
     bool requireUtf8Path,
     int32_t maximumBackgroundRequests,
+    size_t maximumInFlightRequests,
+    std::chrono::nanoseconds highFuseRequestsLogInterval,
     bool useWriteBackCache,
     size_t fuseTraceBusCapacity)
     : privHelper_{privHelper},
@@ -802,12 +883,15 @@ FuseChannel::FuseChannel(
       numThreads_(numThreads),
       dispatcher_(std::move(dispatcher)),
       straceLogger_(straceLogger),
+      structuredLogger_(structuredLogger),
       mountPath_(mountPath),
       requestTimeout_(requestTimeout),
       notifier_(std::move(notifier)),
       caseSensitive_{caseSensitive},
       requireUtf8Path_{requireUtf8Path},
       maximumBackgroundRequests_{maximumBackgroundRequests},
+      maximumInFlightRequests_{maximumInFlightRequests},
+      highFuseRequestsLogInterval_{highFuseRequestsLogInterval},
       useWriteBackCache_{useWriteBackCache},
       fuseDevice_(std::move(fuseDevice)),
       processAccessLog_(std::move(processInfoCache)),
@@ -1771,7 +1855,23 @@ void FuseChannel::processSession() {
           // in both. I'm sure this could be improved with some cleverness.
           auto request = std::make_shared<FuseRequestContext>(this, *header);
 
-          ++state_.wlock()->pendingRequests;
+          auto now = std::chrono::steady_clock::now();
+          auto should_log = false;
+          {
+            auto state = state_.wlock();
+            ++state->pendingRequests;
+
+            if (state->pendingRequests == maximumInFlightRequests_ &&
+                now >= state->lastHighFuseRequestsLog_ +
+                        highFuseRequestsLogInterval_) {
+              should_log = true;
+              state->lastHighFuseRequestsLog_ = now;
+            }
+          }
+
+          if (should_log) {
+            this->structuredLogger_->logEvent(ManyLiveFsChannelRequests{});
+          }
 
           auto headerCopy = *header;
 
@@ -1793,7 +1893,7 @@ void FuseChannel::processSession() {
                   folly::makeFutureWith([&] {
                     request->startRequest(
                         dispatcher_->getStats().copy(),
-                        handlerEntry->stat,
+                        handlerEntry->duration,
                         *(liveRequestWatches_.get()));
                     auto fut = (this->*handlerEntry->handler)(
                         *request, request->getReq(), arg);
@@ -1808,7 +1908,10 @@ void FuseChannel::processSession() {
                     }
                   }).ensure([request] {
                     }).within(requestTimeout_),
-                  notifier_.get())
+                  notifier_.get(),
+                  dispatcher_->getStats().copy(),
+                  handlerEntry->countSuccessful,
+                  handlerEntry->countFailure)
               .ensure([this, request, requestId, headerCopy] {
                 traceBus_->publish(FuseTraceEvent::finish(
                     requestId, headerCopy, request->getResult()));

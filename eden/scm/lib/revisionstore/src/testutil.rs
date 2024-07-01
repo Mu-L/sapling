@@ -13,18 +13,19 @@ use std::sync::Arc;
 use anyhow::Error;
 use anyhow::Result;
 use async_trait::async_trait;
-use edenapi::EdenApi;
-use edenapi::EdenApiError;
 use edenapi::Response;
 use edenapi::ResponseMeta;
+use edenapi::SaplingRemoteApi;
+use edenapi::SaplingRemoteApiError;
 use edenapi::Stats;
-use edenapi_types::EdenApiServerError;
 use edenapi_types::FileAttributes;
+use edenapi_types::FileAuxData;
 use edenapi_types::FileContent;
 use edenapi_types::FileEntry;
 use edenapi_types::FileResponse;
 use edenapi_types::FileSpec;
 use edenapi_types::HistoryEntry;
+use edenapi_types::SaplingRemoteApiServerError;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
 use futures::prelude::*;
@@ -46,7 +47,6 @@ use crate::historystore::HgIdMutableHistoryStore;
 use crate::historystore::RemoteHistoryStore;
 use crate::localstore::LocalStore;
 use crate::remotestore::HgIdRemoteStore;
-use crate::scmstore::file::LazyFile;
 use crate::types::StoreKey;
 
 pub fn delta(data: &str, base: Option<Key>, key: Key) -> Delta {
@@ -207,13 +207,13 @@ impl LocalStore for FakeRemoteHistoryStore {
 }
 
 #[derive(Default)]
-pub struct FakeEdenApi {
+pub struct FakeSaplingRemoteApi {
     files: HashMap<Key, (Bytes, Option<u64>)>,
     trees: HashMap<Key, Bytes>,
     history: HashMap<Key, NodeInfo>,
 }
 
-impl FakeEdenApi {
+impl FakeSaplingRemoteApi {
     pub fn new() -> Self {
         Default::default()
     }
@@ -250,7 +250,7 @@ impl FakeEdenApi {
     fn get_files(
         map: &HashMap<Key, (Bytes, Option<u64>)>,
         reqs: impl Iterator<Item = FileSpec>,
-    ) -> Result<Response<FileResponse>, EdenApiError> {
+    ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
         let entries = reqs
             .filter_map(|spec| {
                 let parents = Parents::default();
@@ -268,9 +268,7 @@ impl FakeEdenApi {
                 };
 
                 if spec.attrs.aux_data {
-                    // TODO(meyer): Compute aux data directly.
-                    let mut file = LazyFile::EdenApi(entry.clone().with_content(content.clone()));
-                    let aux = file.aux_data().ok()?;
+                    let aux = FileAuxData::from_content(&content.hg_file_blob);
                     entry = entry.with_aux_data(aux);
                 }
 
@@ -294,7 +292,8 @@ impl FakeEdenApi {
     fn get_trees(
         map: &HashMap<Key, Bytes>,
         keys: Vec<Key>,
-    ) -> Result<Response<Result<TreeEntry, EdenApiServerError>>, EdenApiError> {
+    ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
+    {
         let entries = keys
             .into_iter()
             .filter_map(|key| {
@@ -316,12 +315,12 @@ impl FakeEdenApi {
 }
 
 #[async_trait]
-impl EdenApi for FakeEdenApi {
-    async fn health(&self) -> Result<ResponseMeta, EdenApiError> {
+impl SaplingRemoteApi for FakeSaplingRemoteApi {
+    async fn health(&self) -> Result<ResponseMeta, SaplingRemoteApiError> {
         Ok(ResponseMeta::default())
     }
 
-    async fn files(&self, keys: Vec<Key>) -> Result<Response<FileResponse>, EdenApiError> {
+    async fn files(&self, keys: Vec<Key>) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
         Self::get_files(
             &self.files,
             keys.into_iter().map(|key| FileSpec {
@@ -337,7 +336,7 @@ impl EdenApi for FakeEdenApi {
     async fn files_attrs(
         &self,
         reqs: Vec<FileSpec>,
-    ) -> Result<Response<FileResponse>, EdenApiError> {
+    ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
         Self::get_files(&self.files, reqs.into_iter())
     }
 
@@ -345,7 +344,7 @@ impl EdenApi for FakeEdenApi {
         &self,
         keys: Vec<Key>,
         _length: Option<u32>,
-    ) -> Result<Response<HistoryEntry>, EdenApiError> {
+    ) -> Result<Response<HistoryEntry>, SaplingRemoteApiError> {
         let entries = keys
             .into_iter()
             .filter_map(|key| {
@@ -364,7 +363,8 @@ impl EdenApi for FakeEdenApi {
         &self,
         keys: Vec<Key>,
         _attrs: Option<TreeAttributes>,
-    ) -> Result<Response<Result<TreeEntry, EdenApiServerError>>, EdenApiError> {
+    ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
+    {
         Self::get_trees(&self.trees, keys)
     }
 }
@@ -408,7 +408,6 @@ mod lfs_mocks {
     use lfs_protocol::ResponseObject;
     use lfs_protocol::Sha256 as LfsSha256;
     use lfs_protocol::Transfer;
-    use mockito::mock;
     use mockito::Mock;
     use types::Sha256;
 
@@ -470,7 +469,11 @@ mod lfs_mocks {
         }
     }
 
-    pub fn get_lfs_batch_mock(status: usize, blobs: &[&TestBlob]) -> Mock {
+    pub fn get_lfs_batch_mock(
+        server: &mut mockito::ServerGuard,
+        status: usize,
+        blobs: &[&TestBlob],
+    ) -> Mock {
         let objects = blobs
             .iter()
             .map(|tb| {
@@ -492,7 +495,7 @@ mod lfs_mocks {
                         actions: vec![(
                             Operation::Download,
                             ObjectAction {
-                                href: format!("{}/repo/download/{}", mockito::server_url(), tb.oid)
+                                href: format!("{}/repo/download/{}", server.url(), tb.oid)
                                     .as_str()
                                     .try_into()
                                     .unwrap(),
@@ -517,16 +520,22 @@ mod lfs_mocks {
 
         let json_response = serde_json::to_string(&r).unwrap();
 
-        mock("POST", "/repo/objects/batch")
+        server
+            .mock("POST", "/repo/objects/batch")
             .with_status(status)
             .with_body(json_response)
             .create()
     }
 
-    pub fn get_lfs_download_mock(status: usize, blob: &TestBlob) -> Vec<Mock> {
+    pub fn get_lfs_download_mock(
+        server: &mut mockito::Server,
+        status: usize,
+        blob: &TestBlob,
+    ) -> Vec<Mock> {
         let mut mocks = vec![];
         for response in blob.response.iter() {
-            let m = mock("GET", format!("/repo/download/{}", blob.oid).as_str())
+            let m = server
+                .mock("GET", format!("/repo/download/{}", blob.oid).as_str())
                 .with_status(status)
                 .with_body(response)
                 .with_header("content-type", "application/octet-stream");
@@ -555,15 +564,16 @@ mod lfs_mocks {
         mocks.into_iter().map(|m| m.create()).collect()
     }
 
-    pub fn make_lfs_config(dir: impl AsRef<Path>, agent_sufix: &str) -> BTreeMap<String, String> {
+    pub fn make_lfs_config(
+        server: &mockito::Server,
+        dir: impl AsRef<Path>,
+        agent_sufix: &str,
+    ) -> BTreeMap<String, String> {
         let mut config = make_config(dir);
         let mut set = |key: &str, value: &str| {
             config.insert(key.to_string(), value.to_string());
         };
-        set(
-            "lfs.url",
-            &[mockito::server_url(), "/repo".to_string()].concat(),
-        );
+        set("lfs.url", &[server.url(), "/repo".to_string()].concat());
         set("lfs.use-client-certs", "false");
         set(
             "experimental.lfs.user-agent",

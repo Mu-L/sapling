@@ -197,8 +197,6 @@ impl Convert for RawBlobstoreConfig {
                 secret_name: raw.secret_name,
             },
             RawBlobstoreConfig::aws_s3(raw) => BlobConfig::AwsS3 {
-                aws_account_id: raw.aws_account_id,
-                aws_role: raw.aws_role,
                 bucket: raw.bucket,
                 region: rusoto_core::Region::from_str(&raw.region)?,
                 num_concurrent_operations: raw
@@ -278,7 +276,6 @@ impl Convert for RawOssDbRemote {
             host: self.host,
             port: self.port,
             database: self.database,
-            secret_group: self.secret_group,
             user_secret: self.user_secret,
             password_secret: self.password_secret,
         })
@@ -362,6 +359,7 @@ impl Convert for RawMetadataConfig {
                     sparse_profiles: raw.sparse_profiles.convert()?,
                     bonsai_blob_mapping: raw.bonsai_blob_mapping.convert()?,
                     deletion_log: raw.deletion_log.convert()?,
+                    commit_cloud: raw.commit_cloud.convert()?,
                 },
             )),
             RawMetadataConfig::oss_remote(raw) => Ok(MetadataDatabaseConfig::OssRemote(

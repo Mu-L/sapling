@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -10,9 +9,7 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
 
-  $ configure modernclient
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.copytrace=on
 
   $ cat >> $HGRCPATH << 'EOF'
   > [extdiff]
@@ -181,12 +178,6 @@
   $ HGEDITOR=cat hg graft 1 5 'merge()' --debug --config worker.backgroundclose=False
   skipping ungraftable merge revision 6
   grafting 5d205f8b35b6 "1"
-    searching for copies back to 5d205f8b35b6
-    unmatched files in local:
-     b
-    all copies found (* = to merge, ! = divergent, % = renamed and deleted):
-     src: 'a' -> dst: 'b' *
-    checking for directory renames
   resolving manifests
    branchmerge: True, force: True
    ancestor: 68795b066622, local: ef0ef43d49e7+, remote: 5d205f8b35b6
@@ -202,21 +193,16 @@
   committing manifest
   committing changelog
   grafting 5345cd5c0f38 "5"
-    searching for copies back to 5d205f8b35b6
-    unmatched files in other (from topological common ancestor):
-     c
   resolving manifests
    branchmerge: True, force: True
    ancestor: 4c60f11aa304, local: 6b9e5368ca4e+, remote: 5345cd5c0f38
   committing files:
   e
+  reusing remotefilelog node bc7ebe2d260cff30d2a39a130d84add36216f791
   committing manifest
   committing changelog
   $ HGEDITOR=cat hg graft 4 3 --log --debug
   grafting 9c233e8e184d "4"
-    searching for copies back to 5d205f8b35b6
-    unmatched files in other (from topological common ancestor):
-     c
   resolving manifests
    branchmerge: True, force: True
    ancestor: 4c60f11aa304, local: 9436191a062e+, remote: 9c233e8e184d
@@ -718,9 +704,6 @@
 
   $ HGEDITOR='echo D1 >' hg graft -r 'desc("D0")' --edit
   grafting b69f5839d2d9 "D0"
-  note: possible conflict - f3b was renamed multiple times to:
-   f3d
-   f3a
   warning: can't find ancestor for 'f3d' copied from 'f3b'!
 
 # Set up the repository for some further tests
@@ -775,15 +758,11 @@
   grafting f58c7e2b28fa "C0"
   merging f1e and f1b to f1e
   merging f2a and f2c to f2c
-  merging f5b and f5a to f5a
 
 # Test the cases A.1 (f4x) and A.7 (f3x).
 
   $ HGEDITOR='echo D2 >' hg graft -r 'desc("D0")' --edit
   grafting b69f5839d2d9 "D0"
-  note: possible conflict - f3b was renamed multiple times to:
-   f3e
-   f3d
   merging f4e and f4a to f4e
   warning: can't find ancestor for 'f3d' copied from 'f3b'!
 
@@ -1033,6 +1012,7 @@
   $ cd ..
 
 # Graft a change into a new file previously grafted into a renamed directory
+# todo: support directory move detection
 
   $ newclientrepo dirmovenewfile
   $ mkdir a
@@ -1050,13 +1030,13 @@
   $ hg up -q 3
   $ hg graft -q 4
   $ hg status --change .
-  M b/x
+  M a/x
 
 # Prepare for test of skipped changesets and how merges can influence it:
 
   $ hg merge -q -r 1 --tool ':local'
   $ hg ci -m m
-  $ echo xx >> b/x
+  $ echo xx >> a/x
   $ hg ci -m xx
 
   $ hg log -G -T '{rev} {desc|firstline}'
@@ -1089,7 +1069,6 @@
   $ hg graft --tool ':local' -r '2 + 6 + 7'
   skipping ungraftable merge revision 6
   grafting 7ea085edaaef "b"
-  grafting 8db0f04dd8b2 "xx"
-  note: graft of 8db0f04dd8b2 created no changes to commit
+  grafting c9302879a6a3 "xx"
 
   $ cd ..

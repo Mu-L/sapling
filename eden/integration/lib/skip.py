@@ -134,7 +134,10 @@ if sys.platform == "win32":
             "test_truncation_upon_open_modifies_file",
         ],
         "hg.update_test.UpdateCacheInvalidationTest": [
-            "test_changing_file_contents_creates_new_inode_and_flushes_dcache"
+            "test_changing_file_contents_creates_new_inode_and_flushes_dcache",
+            # Similar to above, this test is marked flaky on the TestX UI. To avoid
+        # the FilteredFS mixin showing up as broken, we skip it altogether.
+            "test_file_locked_removal",
         ],
         "hg.update_test.UpdateTest": [
             # TODO: A \r\n is used
@@ -155,6 +158,14 @@ if sys.platform == "win32":
             # T146967686
             "test_detect_removed_file_from_dirty_placeholder_directory",
             "test_detect_removed_file_from_placeholder_directory",
+        ],
+        # This is broken on Vanilla EdenFS but only disabled through the TestX
+        # UI. To avoid the FilteredFS mixin showing up as broken, we skip it.
+        "hg.eden_journal_test.EdenJournalTest": [
+            "test_journal_position_write",
+            "test_journal_stream_changes_since",
+            "test_journal_stream_selected_changes_since",
+            "test_journal_stream_selected_changes_since_empty_glob",
         ],
     }
 elif sys.platform.startswith("linux") and not os.path.exists("/etc/redhat-release"):
@@ -451,28 +462,6 @@ TEST_DISABLED.update(FILTEREDFS_PARITY)
 
 # Any future FilteredHg skips should be added here
 FILTEREDFS_TEST_DISABLED = {
-    "hg.doctor_test.DoctorTestTreeOnly": [
-        "test_eden_doctor_fixes_bad_dirstate_file",
-        "test_eden_doctor_fixes_valid_mismatched_parents",
-    ],
-    "hg.update_test.UpdateTestTreeOnly": [
-        "test_update_dir_to_file",
-        "test_mount_state_during_unmount_with_in_progress_checkout",
-    ],
-    "readdir_test.ReaddirTest": [
-        "test_get_attributes_symlink",
-        "test_readdir_directory_symlink_and_other",
-        "test_get_attributes_directory",
-        "test_readdir",
-        "test_get_attributes",
-    ],
-    "patch_test.PatchTest": ["test_patch"],
-    "clone_test.CloneTest": ["test_force_case_insensitive"],
-    "update_test.UpdateTest": [
-        "test_merge_update_untracked_file_with_conflict_in_destination",
-        "test_merge_update_added_file_with_conflict_in_destination",
-        "test_merge_update_untracked_file_with_conflict_in_destination",
-    ],
     # These tests will behave the exact same on FilteredFS. Duplicating them can
     # cause issues on macOS (too many APFS subvolumes), so we'll disable the
     # FilteredHg variants for now.
@@ -485,6 +474,9 @@ FILTEREDFS_TEST_DISABLED = {
         "test_list_no_legacy_bind_mounts",
         "test_disallow_bind_mount_outside_repo",
     ],
+    # These tests don't make sense to run on FilteredFS since the legacy
+    # filtering method doesn't work on FilteredFS.
+    "hg.legacy_filter_test.FilterTestTreeOnly": ["test_read_dir"],
 }
 for (testModule, disabled) in FILTEREDFS_TEST_DISABLED.items():
     # We should add skips for all combinations of FilteredHg mixins.

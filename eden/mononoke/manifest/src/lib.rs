@@ -11,6 +11,10 @@ pub use derive_batch::ManifestChanges;
 
 pub use crate::bonsai::bonsai_diff;
 pub use crate::bonsai::BonsaiDiffFileChange;
+pub use crate::comparison::compare_manifest;
+pub use crate::comparison::compare_manifest_tree;
+pub use crate::comparison::Comparison;
+pub use crate::comparison::ManifestComparison;
 pub use crate::derive::derive_manifest;
 pub use crate::derive::derive_manifest_with_io_sender;
 pub use crate::derive::flatten_subentries;
@@ -27,6 +31,7 @@ pub use crate::ops::Diff;
 pub use crate::ops::ManifestOps;
 pub use crate::ordered_ops::After;
 pub use crate::ordered_ops::ManifestOrderedOps;
+pub use crate::path_tree::PathTree;
 pub use crate::select::PathOrPrefix;
 pub use crate::types::AsyncManifest;
 pub use crate::types::AsyncOrderedManifest;
@@ -35,17 +40,18 @@ pub use crate::types::CombinedId;
 pub use crate::types::Entry;
 pub use crate::types::Manifest;
 pub use crate::types::OrderedManifest;
-pub use crate::types::PathTree;
 pub use crate::types::Traced;
 pub use crate::types::TrieMapOps;
 
 mod bonsai;
+mod comparison;
 mod derive;
 mod derive_batch;
 mod derive_from_predecessor;
 mod implicit_deletes;
 mod ops;
 mod ordered_ops;
+mod path_tree;
 mod select;
 mod types;
 

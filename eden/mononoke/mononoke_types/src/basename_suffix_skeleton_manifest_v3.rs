@@ -33,13 +33,16 @@ use crate::ThriftConvert;
 // See docs/basename_suffix_skeleton_manifest.md and serialization/bssm.thrift
 // for more documentation on this.
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(ThriftConvert, Debug, Clone, PartialEq, Eq, Hash)]
+#[thrift(thrift::bssm::BssmV3Entry)]
 pub enum BssmV3Entry {
+    #[thrift(thrift::bssm::BssmV3File)]
     File,
     Directory(BssmV3Directory),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(ThriftConvert, Debug, Clone, PartialEq, Eq, Hash)]
+#[thrift(thrift::bssm::BssmV3Directory)]
 pub struct BssmV3Directory {
     pub subentries: ShardedMapV2Node<BssmV3Entry>,
 }
@@ -73,51 +76,12 @@ impl Loadable for BssmV3Directory {
     }
 }
 
-impl ThriftConvert for BssmV3Directory {
-    const NAME: &'static str = "BssmV3Directory";
-    type Thrift = thrift::bssm::BssmV3Directory;
-
-    fn from_thrift(t: Self::Thrift) -> Result<Self> {
-        Ok(Self {
-            subentries: ThriftConvert::from_thrift(t.subentries)?,
-        })
-    }
-
-    fn into_thrift(self) -> Self::Thrift {
-        thrift::bssm::BssmV3Directory {
-            subentries: self.subentries.into_thrift(),
-        }
-    }
-}
-
-impl ThriftConvert for BssmV3Entry {
-    const NAME: &'static str = "BssmV3Entry";
-    type Thrift = thrift::bssm::BssmV3Entry;
-
-    fn from_thrift(t: Self::Thrift) -> Result<Self> {
-        Ok(match t {
-            thrift::bssm::BssmV3Entry::file(thrift::bssm::BssmV3File {}) => Self::File,
-            thrift::bssm::BssmV3Entry::directory(dir) => {
-                Self::Directory(ThriftConvert::from_thrift(dir)?)
-            }
-            thrift::bssm::BssmV3Entry::UnknownField(variant) => {
-                anyhow::bail!("Unknown variant: {}", variant)
-            }
-        })
-    }
-
-    fn into_thrift(self) -> Self::Thrift {
-        match self {
-            Self::File => thrift::bssm::BssmV3Entry::file(thrift::bssm::BssmV3File {}),
-            Self::Directory(dir) => thrift::bssm::BssmV3Entry::directory(dir.into_thrift()),
-        }
-    }
-}
-
 impl ShardedMapV2Value for BssmV3Entry {
     type NodeId = ShardedMapV2NodeBssmV3Id;
     type Context = ShardedMapV2NodeBssmV3Context;
     type RollupData = BssmV3RollupCount;
+
+    const WEIGHT_LIMIT: usize = 2000;
 
     // The weight function is overrided because the sharded map is stored
     // inlined in BssmV3Directory. So the weight of the sharded map
@@ -187,6 +151,18 @@ impl BssmV3Directory {
     ) -> BoxStream<'a, Result<(MPathElement, BssmV3Entry)>> {
         self.subentries
             .into_entries(ctx, blobstore)
+            .and_then(|(k, v)| async move { anyhow::Ok((MPathElement::from_smallvec(k)?, v)) })
+            .boxed()
+    }
+
+    pub fn into_subentries_skip<'a>(
+        self,
+        ctx: &'a CoreContext,
+        blobstore: &'a impl Blobstore,
+        skip: usize,
+    ) -> BoxStream<'a, Result<(MPathElement, BssmV3Entry)>> {
+        self.subentries
+            .into_entries_skip(ctx, blobstore, skip)
             .and_then(|(k, v)| async move { anyhow::Ok((MPathElement::from_smallvec(k)?, v)) })
             .boxed()
     }

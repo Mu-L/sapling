@@ -156,7 +156,7 @@ def _flattenresponse(response: Sized, sort: bool = False):
     optionalrepo=True,
 )
 def debugapi(ui, repo=None, **opts) -> None:
-    """send an EdenAPI request and print its output
+    """send an SaplingRemoteAPI request and print its output
 
     The endpoint name is the method name defined on the edenapi object.
 
@@ -178,9 +178,11 @@ def debugapi(ui, repo=None, **opts) -> None:
 
     client = repo and repo.edenapi or edenapi.getclient(ui)
     func = getattr(client, endpoint)
-
-    response = func(*params)
-    response = _flattenresponse(response, sort=opts.get("sort"))
+    try:
+        response = func(*params)
+        response = _flattenresponse(response, sort=opts.get("sort"))
+    except error.HttpError as e:
+        raise error.Abort(e)
     formatted = bindings.pprint.pformat(response)
     ui.write(_("%s\n") % formatted)
 
@@ -191,6 +193,14 @@ def debugapplystreamclonebundle(ui, repo, fname) -> None:
     f = hg.openpath(ui, fname)
     gen = exchange.readbundle(ui, f, fname)
     gen.apply(repo)
+
+
+@command("debugbacktrace|debugbt", [], _("PID"), norepo=True)
+def debugbacktrace(ui, pid) -> None:
+    """attempt to extract backtraces for a specified pid"""
+    from .. import dbgutil
+
+    dbgutil.backtrace_all(ui, int(pid))
 
 
 @command(
@@ -214,6 +224,178 @@ def debugbindag(ui, repo, rev=None, output=None) -> None:
     parentrevs = repo.changelog.parentrevs
     data = dagparser.bindag(revs, parentrevs)
     util.writefile(output or "dag.out", data)
+
+
+def _runbisect(repo, range, bad, skip, node_to_infos=None):
+    """run bisect till completion. yield (i, action, state, nodes, candidate_count, isgood)
+
+    i: iteration count, starts from 1
+    action: 'good' | 'bad' | 'skip' | 'done'
+    state: hbisect state
+    nodes: candidates picked by hbisect.bisect
+    candidate_count: count of remaining candiates
+    isgood: returned by hbisect.bisect
+
+    node_to_infos: optional defaultdict(list), node -> bisect info
+    """
+    import itertools
+
+    from .. import hbisect
+
+    cl = repo.changelog
+    dag = cl.dag
+
+    good = range - bad - skip
+
+    heads = dag.heads(range)
+    roots = dag.roots(range)
+
+    if len(heads) != 1 or len(roots) != 1:
+        raise error.ProgrammingError(
+            "bisect range must have exactly one head and one root"
+        )
+
+    head = heads[0]
+    root = roots[0]
+
+    if (
+        len(bad & dag.sort([head, root])) != 1
+        or len(good & dag.sort([head, root])) != 1
+    ):
+        raise error.ProgrammingError("head and root must be one good one bad")
+
+    if head in bad:
+        first_good, first_bad = root, head
+    else:
+        first_good, first_bad = head, root
+
+    if node_to_infos is not None:
+        node_to_infos[first_good].append("initial good")
+        node_to_infos[first_bad].append("initial bad")
+
+    hbisect.resetstate(repo)
+    state = hbisect.load_state(repo)
+    state["good"] = [first_good]
+    state["bad"] = [first_bad]
+
+    # matches the main "bisect" command implementation, but works in a loop
+    for i in itertools.count(1):
+        nodes, candidate_count, isgood, badnode, goodnode = hbisect.bisect(repo, state)
+
+        if candidate_count == 0:
+            yield i, "done", state, nodes, candidate_count, isgood
+            break
+
+        assert len(nodes) == 1  # only a single node can be tested next
+        node = nodes[0]
+
+        if node in good:
+            action = "good"
+        elif node in bad:
+            action = "bad"
+        else:
+            assert node in skip
+            action = "skip"
+
+        state["current"] = [node]
+        state[action].append(node)
+        if node_to_infos is not None:
+            node_to_infos[node].append(f"#{i} {action}")
+        yield i, action, state, nodes, candidate_count, isgood
+
+
+@command(
+    "debugbisect",
+    [
+        ("r", "range", [], _("bisect range")),
+        ("b", "bad", [], _("bad set")),
+        ("s", "skip", [], _("(non-lazy) skip set")),
+    ],
+)
+def debugbisect(ui, repo, **opts):
+    """show bisect steps given a bisect range"""
+    import textwrap
+
+    from .. import hbisect, templatekw
+
+    cl = repo.changelog
+    range = cl.tonodes(scmutil.revrange(repo, opts["range"]))
+    bad = cl.tonodes(scmutil.revrange(repo, opts["bad"]))
+    skip = cl.tonodes(scmutil.revrange(repo, opts["skip"]))
+
+    node_to_infos = collections.defaultdict(list)
+    displayer = cmdutil.show_changeset(ui, repo, {"template": "{desc|firstline}\n"})
+
+    # matches the main "bisect" command implementation, but works in a loop
+    ui.pushbuffer()
+    for i, action, state, nodes, candidate_count, isgood in _runbisect(
+        repo, range, bad, skip, node_to_infos
+    ):
+        if action == "done":
+            hbisect.printresult(ui, repo, state, displayer, nodes, isgood)
+        else:
+            assert len(nodes) == 1
+            node = nodes[0]
+            ui.write(
+                f"#{'%-2d' % i} choose {repo[node].description().splitlines()[0]},{'%3d' % candidate_count} remaining, marked as {action}\n"
+            )
+    steps = textwrap.indent(ui.popbuffer(), "  ")
+
+    # Draw a graph of chosen nodes.
+    @templatekw.templatekeyword("debugbisect")
+    def debugbisect(repo, ctx, templ, **args):
+        return " ".join(node_to_infos.get(ctx.node()) or [])
+
+    ui.pushbuffer()
+    cmdutil.graphlog(
+        ui,
+        repo,
+        [],
+        {
+            "rev": [hex(n) for n in node_to_infos],
+            "template": "{desc|firstline}: {debugbisect}",
+        },
+    )
+    graph = textwrap.indent(ui.popbuffer(), "  ")
+    templatekw.keywords.pop("debugbisect", None)
+
+    ui.write("Graph:\n%s\nSteps:\n%s" % (graph.rstrip(), steps))
+
+
+@command(
+    "debugbisectall",
+    [
+        ("r", "range", [], _("bisect range")),
+        ("s", "skip", [], _("(non-lazy) skip set")),
+    ],
+)
+def debugbisectall(ui, repo, **opts):
+    """enumerate all "first bad" commits, show bisect step distribution"""
+    cl = repo.changelog
+    dag = cl.dag
+    range = cl.tonodes(scmutil.revrange(repo, opts["range"]))
+    skip = cl.tonodes(scmutil.revrange(repo, opts["skip"]))
+
+    first_bad_candidates = range - skip - dag.roots(range)
+    step_to_desc_list = collections.defaultdict(list)
+    counts = []
+    for first_bad in first_bad_candidates:
+        bad = dag.range([first_bad], range)
+        step_count = len(list(_runbisect(repo, range, bad, skip))) - 1
+        step_to_desc_list[step_count].append(
+            repo[first_bad].description().splitlines()[0]
+        )
+        counts.append(step_count)
+    for step_count, desc_list in sorted(step_to_desc_list.items()):
+        desc_list.sort()
+        ui.write(" %3d |%3d: %s\n" % (step_count, len(desc_list), " ".join(desc_list)))
+    if counts:
+        counts.sort()
+        p = lambda n: counts[min(len(counts) * n // 100, len(counts) - 1)]
+        avg = sum(counts) / len(counts)
+        ui.write(
+            "p50=%d  p75=%d  p90=%d  average=%.2f steps\n" % (p(50), p(75), p(90), avg)
+        )
 
 
 @command(
@@ -3470,12 +3652,13 @@ def debugresetheads(ui, repo) -> None:
 
 
 @command(
-    "debugruntest|debugrt",
+    "debugruntest|debugrt|.t",
     [
         ("i", "fix", False, _("update tests to match output")),
         ("j", "jobs", 0, _("number of jobs to run in parallel")),
         ("x", "ext", [], _("extension modules to import")),
         ("d", "direct", False, _("run without isolation")),
+        ("", "record", False, _("record test state")),
     ],
     norepo=True,
 )
@@ -3597,6 +3780,8 @@ def debugruntest(ui, *paths, **opts) -> int:
 
     exts = ["sapling.testing.ext.hg", "sapling.testing.ext.python"]
     exts += opts.get("ext") or []
+    if opts.get("record"):
+        exts.append("sapling.testing.ext.record")
     jobs = opts.get("jobs") or 0
 
     # limit concurrency for stable order
@@ -3674,6 +3859,46 @@ def debugruntest(ui, *paths, **opts) -> int:
     else:
         ret = 0
     return ret
+
+
+@command(
+    "debugrestoretest",
+    [
+        ("l", "line", 1, _("line number (starts with 1)")),
+        ("c", "case", "", _("test case")),
+        ("", "record-if-needed", False, _("record test state if not already present")),
+    ],
+    _("TEST_FILE"),
+    norepo=True,
+)
+def debugrestoretest(ui, test_file, **opts):
+    """restore test state based on previously recorded data"""
+    from sapling.testing.ext import record
+
+    filename = os.path.realpath(test_file)
+    testcase = opts.get("case") or None
+    loc = int(opts.get("line") or 1) - 1  # line starts from 1, loc starts from 0
+
+    metalog = record.try_locate_metalog(filename, testcase, loc)
+    if metalog is None:
+        if opts.get("record_if_needed"):
+            ui.status_err(_("recording test state\n"))
+            ui.pushbuffer()
+            debugruntest(ui, test_file, record=True)
+            output = ui.popbuffer(errors="backslashreplace")
+            metalog = record.try_locate_metalog(filename, testcase, loc)
+            if metalog is None:
+                ui.status_err(_("output from recording: %s\n") % output)
+                raise error.Abort(_("still no recording"))
+        else:
+            raise error.Abort(
+                _("no recording found for test"),
+                hint=_("use '@prog@ .t --record' to record a test run"),
+            )
+    script_path = record.restore_state_script(metalog)
+    if ui.formatted:
+        ui.status_err(("Run or source the script to enter the testing environment:\n"))
+    ui.write(("%s\n") % script_path)
 
 
 @command("debugthrowrustexception", [], "")

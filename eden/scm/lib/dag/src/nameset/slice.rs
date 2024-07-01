@@ -6,6 +6,7 @@
  */
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +23,7 @@ use tracing::trace;
 use tracing::Level;
 
 use super::hints::Flags;
+use super::id_static::IdStaticSet;
 use super::AsyncNameSetQuery;
 use super::BoxVertexStream;
 use super::Hints;
@@ -101,12 +103,16 @@ struct Iter {
     inner_iter: BoxVertexStream,
     set: SliceSet,
     index: u64,
+    ended: bool,
 }
 
 const SKIP_CACHE_SIZE_THRESHOLD: u64 = 1000;
 
 impl Iter {
     async fn next(&mut self) -> Option<Result<VertexName>> {
+        if self.ended {
+            return None;
+        }
         if self.set.is_take_cache_complete() {
             // Fast path - no need to use inner_iter.
             let index = self.index.max(self.set.skip_count);
@@ -173,6 +179,11 @@ impl Iter {
                     true
                 }
             };
+
+            if next.is_none() {
+                self.ended = true;
+            }
+
             if should_take {
                 return next.map(Ok);
             } else {
@@ -223,6 +234,7 @@ impl AsyncNameSetQuery for SliceSet {
             inner_iter,
             set: self.clone(),
             index: 0,
+            ended: false,
         };
         Ok(iter.into_stream())
     }
@@ -247,17 +259,37 @@ impl AsyncNameSetQuery for SliceSet {
             trace!("iter_rev({:0.6?}): use inner.iter_rev()", self,);
             let count = self.count().await?;
             let iter = self.inner.iter_rev().await?;
+            let count = count.try_into()?;
             Ok(Box::pin(iter.take(count)))
         }
     }
 
-    async fn count(&self) -> Result<usize> {
+    async fn count(&self) -> Result<u64> {
         let count = self.inner.count().await?;
         // consider skip_count
         let count = (count as u64).max(self.skip_count) - self.skip_count;
         // consider take_count
         let count = count.min(self.take_count.unwrap_or(u64::MAX));
-        Ok(count as _)
+        Ok(count)
+    }
+
+    async fn size_hint(&self) -> (u64, Option<u64>) {
+        let (min, max) = self.inner.size_hint().await;
+        // [0 .. min .. max]
+        // [ skip ][--- take ---]
+        let skip = self.skip_count;
+        let take = self.take_count;
+        let min = match take {
+            None => min.saturating_sub(skip),
+            Some(take) => min.saturating_sub(skip).min(take),
+        };
+        let max = match (max, take) {
+            (Some(max), Some(take)) => Some(max.saturating_sub(skip).min(take)),
+            (Some(max), None) => Some(max.saturating_sub(skip)),
+            (None, Some(take)) => Some(take),
+            (None, None) => None,
+        };
+        (min, max)
     }
 
     async fn contains(&self, name: &VertexName) -> Result<bool> {
@@ -319,6 +351,28 @@ impl AsyncNameSetQuery for SliceSet {
 
     fn hints(&self) -> &Hints {
         &self.hints
+    }
+
+    fn specialized_flatten_id(&self) -> Option<Cow<IdStaticSet>> {
+        // Attention! `inner` might have lost order. So we might not have a fast path.
+        // For example, this is flawed:
+        let inner = self.inner.specialized_flatten_id()?.into_owned();
+        let sensitive_flags = Flags::ID_DESC | Flags::ID_ASC;
+        let expected_flags = self.hints().flags() & sensitive_flags;
+        let mut can_use_fast_path = true;
+        if self.skip_count == 0 && inner.spans.count() <= self.take_count.unwrap_or(u64::MAX) {
+            can_use_fast_path = true
+        } else if expected_flags.is_empty() {
+            can_use_fast_path = false;
+        } else if (inner.hints().flags() & sensitive_flags) != expected_flags {
+            can_use_fast_path = false;
+        }
+        if can_use_fast_path {
+            let result = inner.slice_spans(self.skip_count, self.take_count.unwrap_or(u64::MAX));
+            Some(Cow::Owned(result))
+        } else {
+            None
+        }
     }
 }
 
@@ -413,6 +467,23 @@ mod tests {
             format!("{:?}", set),
             "<slice <static [a, b, c] + 6 more> [..4]>"
         );
+    }
+
+    #[test]
+    fn test_size_hint_sets() {
+        let bytes = b"\x11\x22\x33";
+        for skip in 0..(bytes.len() + 2) {
+            for size_hint_adjust in 0..7 {
+                let vec_set = VecQuery::from_bytes(&bytes[..]).adjust_size_hint(size_hint_adjust);
+                let vec_set = NameSet::from_query(vec_set);
+                for take in 0..(bytes.len() + 2) {
+                    let set = SliceSet::new(vec_set.clone(), skip as _, Some(take as _));
+                    check_invariants(&set).unwrap();
+                }
+                let set = SliceSet::new(vec_set, skip as _, None);
+                check_invariants(&set).unwrap();
+            }
+        }
     }
 
     quickcheck::quickcheck! {

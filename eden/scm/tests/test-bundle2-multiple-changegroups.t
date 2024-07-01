@@ -1,9 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
 #inprocess-hg-incompatible
-  $ configure modernclient
 
 Create an extension to test bundle2 with multiple changegroups
 

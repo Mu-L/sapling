@@ -1,7 +1,5 @@
-#debugruntest-compatible
 #require fsmonitor no-eden
 
-  $ configure modernclient
   $ . "$TESTDIR/histedit-helpers.sh"
   $ enable histedit fsmonitor rebase hgevents sparse
   $ newclientrepo repo

@@ -107,14 +107,16 @@ subcmd = subcmd_mod.Decorator()
 # For a non-unix system (like Windows), we will define our own error codes.
 try:
     EX_OK: int = os.EX_OK
-    EX_USAGE: int = os.EX_USAGE
     EX_SOFTWARE: int = os.EX_SOFTWARE
     EX_OSFILE: int = os.EX_OSFILE
 except AttributeError:  # On a non-unix system
     EX_OK: int = 0
-    EX_USAGE: int = 64
     EX_SOFTWARE: int = 70
     EX_OSFILE: int = 72
+
+# The Rust CLI depends on this value staying constant. Instead of fetching it
+# from the os library, let's just define it here.
+EX_USAGE: int = 64
 
 
 # We have different mitigations on different platforms due to cmd differences
@@ -140,8 +142,17 @@ def _get_unmount_timeout_suggestions(path: str) -> str:
 def do_version(
     args: argparse.Namespace, format_json: bool = False, verbose: bool = False
 ) -> int:
+    def notNone(x: Optional[str], y: str) -> str:
+        return y if x is None else x
+
     instance = get_eden_instance(args)
-    versions_info = version_mod.get_version_info(instance)
+    running_version = None
+    try:
+        running_version = instance.get_running_version()
+    except EdenNotRunningError:
+        pass
+
+    versions_info = version_mod.get_version_info(running_version)
 
     if format_json:
         if versions_info.installed_version == "-":
@@ -160,19 +171,29 @@ def do_version(
             )
 
         if verbose:
-            print(
-                f"Installed: {versions_info.installed_version}{f' ({versions_info.installed_version_age} days old)' if versions_info.installed_version_age else ''}"
+            inst_days_old = (
+                None
+                if versions_info.installed_version_age is None
+                else f" ({versions_info.installed_version_age} days old)"
             )
             print(
-                f"Running:   {versions_info.running_version}{f' ({versions_info.running_version_age} days old)' if versions_info.running_version_age else ''}"
+                f"Installed: {versions_info.installed_version}{notNone(inst_days_old, '')}"
+            )
+            running_days_old = (
+                None
+                if versions_info.running_version_age is None
+                else f" ({versions_info.running_version_age} days old)"
+            )
+            print(
+                f"Running:   {versions_info.running_version}{notNone(running_days_old, '')}"
             )
             if versions_info.ages_deltas:
                 print(
                     f"Running version is {versions_info.ages_deltas} days older than installed"
                 )
         else:
-            print(f"Installed: {versions_info.installed_version}")
-            print(f"Running:   {versions_info.running_version}")
+            print(f"Installed: {notNone(versions_info.installed_version, '-')}")
+            print(f"Running:   {notNone(versions_info.running_version, '-')}")
 
         if versions_info.is_dev:
             print("(Dev version of EdenFS seems to be running)")
@@ -795,7 +816,8 @@ class CloneCmd(Subcmd):
             help=(
                 "Clone the path with a specified Backing Store implementation. "
                 "Currently only supports 'filteredhg' (all), 'recas' (Linux), "
-                "and 'http' (Linux)."
+                "and 'http' (Linux). Takes precedent over the inferred backing"
+                "store type from the existing repository we're cloning from."
             ),
         )
 
@@ -870,27 +892,39 @@ class CloneCmd(Subcmd):
         args.path = os.path.realpath(args.path)
         args.nfs = args.nfs or is_nfs_default()
 
-        # Check if requested path is inside an existing checkout
+        # Check if requested path is inside an existing checkout or backing_repo of existing checkout
         instance = EdenInstance(args.config_dir, args.etc_eden_dir, args.home_dir)
-        existing_checkout, rel_path = config_mod.detect_nested_checkout(
+        problem_type, existing_checkout = config_mod.detect_checkout_path_problem(
             args.path,
             instance,
         )
-        if existing_checkout is not None and rel_path is not None:
-            if args.allow_nested_checkout:
-                print(
-                    """\
-Warning: Creating a nested checkout. This is not recommended because it
-may cause `eden doctor` and `eden rm` to encounter spurious behavior."""
-                )
-            else:
+        if problem_type is not None and existing_checkout is not None:
+            if problem_type == config_mod.CheckoutPathProblemType.NESTED_CHECKOUT:
+                if args.allow_nested_checkout:
+                    print(
+                        """\
+    Warning: Creating a nested checkout. This is not recommended because it
+    may cause `eden doctor` and `eden rm` to encounter spurious behavior."""
+                    )
+                else:
+                    print_stderr(
+                        f"""\
+    error: destination path {args.path} is within an existing checkout {existing_checkout.path}.
+
+    Nested checkouts are usually not intended/recommended and may cause
+    `eden doctor` and `eden rm` to encounter spurious behavior. If you DO
+    want nested checkouts, re-run `eden clone` with --allow-nested-checkout or -n."""
+                    )
+                    return 1
+            if problem_type == config_mod.CheckoutPathProblemType.INSIDE_BACKING_REPO:
                 print_stderr(
                     f"""\
-error: destination path {args.path} is within an existing checkout {existing_checkout.path}.
+    error: destination path {args.path} is being created within backing repo of an existing checkout
+    {existing_checkout.path} located at {existing_checkout.get_backing_repo_path()}.
 
-Nested checkouts are usually not intended/recommended and may cause
-`eden doctor` and `eden rm` to encounter spurious behavior. If you DO
-want nested checkouts, re-run `eden clone` with --allow-nested-checkout or -n."""
+    Checkouts inside backing repo are usually not intended/recommended and may cause
+    `eden doctor` and `eden rm` to encounter spurious behavior and may also degrade performance
+    of source control operations."""
                 )
                 return 1
 
@@ -1054,6 +1088,14 @@ is case-sensitive. This is not recommended and is intended only for testing."""
         # Check to see if repo_arg points to an existing EdenFS mount
         checkout_config = instance.get_checkout_config_for_path(repo_arg)
         if checkout_config is not None:
+            if backing_store_type is not None:
+                # If the user specified a backing store type, make sure it takes
+                # priority over the existing checkout config.
+                if backing_store_type != checkout_config.scm_type:
+                    checkout_config = checkout_config._replace(
+                        scm_type=backing_store_type
+                    )
+
             repo = util.get_repo(str(checkout_config.backing_repo), backing_store_type)
             if repo is None:
                 raise RepoError(
@@ -1125,6 +1167,14 @@ is case-sensitive. This is not recommended and is intended only for testing."""
 class ConfigCmd(Subcmd):
     def run(self, args: argparse.Namespace) -> int:
         raise NotImplementedError("Stub -- only implemented in Rust")
+
+
+if sys.platform == "win32":
+
+    @subcmd("handles", "Get list of open file handles for a checkout")
+    class HandlesCmd(Subcmd):
+        def run(self, args: argparse.Namespace) -> int:
+            raise NotImplementedError("Stub -- only implemented in Rust")
 
 
 @subcmd("fsconfig", "Query EdenFS daemon configuration")
@@ -1305,7 +1355,7 @@ class MinitopCmd(Subcmd):
 class PrefetchProfileCmd(Subcmd):
     def run(self, args: argparse.Namespace) -> int:
         print_stderr("This is not implemented for python edenfsctl.")
-        return 1
+        return EX_USAGE
 
 
 @subcmd("fsck", "Perform a filesystem check for EdenFS")
@@ -1504,14 +1554,34 @@ class ChownCmd(Subcmd):
 class MountCmd(Subcmd):
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "paths", nargs="+", metavar="path", help="The checkout mount path"
+            "paths", nargs="*", metavar="path", help="The checkout mount path"
         )
         parser.add_argument(
             "--read-only", action="store_true", dest="read_only", help="Read only mount"
         )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            dest="mount_all",
+            help="Remount all unmounted checkouts",
+        )
 
     def run(self, args: argparse.Namespace) -> int:
+        # validation
+        if not args.mount_all and len(args.paths) == 0:
+            raise config_mod.UsageError(
+                "Use either '--all' or path arguments to specify what to mount"
+            )
+
+        if args.mount_all and len(args.paths) > 0:
+            raise config_mod.UsageError(
+                "Flag '--all' and path arguments cannot be combined"
+            )
+
         instance = get_eden_instance(args)
+
+        exitcode = 0
+
         for path in args.paths:
             try:
                 exitcode = instance.mount(path, args.read_only)
@@ -1520,7 +1590,33 @@ class MountCmd(Subcmd):
             except (EdenService.EdenError, EdenNotRunningError) as ex:
                 print_stderr("error: {}", ex)
                 return 1
-        return 0
+
+        if args.mount_all:
+            exitcode = self.remount_checkouts(instance, args.read_only)
+
+        return exitcode
+
+    def remount_checkouts(self, instance: EdenInstance, read_only: bool) -> int:
+        exitcode = 0
+        mounts = instance.get_mounts()
+        for path, mount_info in sorted(mounts.items()):
+            if mount_info.state is None:
+                print(f"Found unmounted checkout at {path}, attempting to mount")
+                try:
+                    mount_exitcode = instance.mount(path, read_only)
+                    if mount_exitcode:
+                        print(
+                            f"Remount {path} failed. exit_code={mount_exitcode}. Please run `eden doctor` to fix it"
+                        )
+                        exitcode = 1
+                    else:
+                        print(f"Mount succeeded, path: {path}")
+                except Exception as ex:
+                    print(
+                        f"Failed to mount {path}:\n{ex}\nPlease run 'eden doctor' to fix it"
+                    )
+                    exitcode = 1
+        return exitcode
 
 
 # Types of removal
@@ -2069,7 +2165,7 @@ class RestartCmd(Subcmd):
             "--only-if-running",
             action="store_true",
             default=False,
-            help="Only perform a restart if there is already an EdenFS instance"
+            help="Only perform a restart if there is already an EdenFS instance "
             "running.",
         )
         migration_group = parser.add_mutually_exclusive_group()
@@ -2690,7 +2786,14 @@ def main() -> int:
     # Increase how often it's sampled.
     par_telemetry.set_sample_rate(automation=10000)
     parser = create_parser()
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        # For some reason argparse calls sys.exit(2) when it encounters a parse
+        # error... This makes it hard for us to distinguish between edenfsctl
+        # failing w/ exit code 2 and a parse error. Let's catch the parse
+        # error and return a more appropriate exit code.
+        return EX_USAGE
 
     # The default event loop on 3.8+ will cause an ugly backtrace when
     # edenfsctl is interrupted. Switching back to the selector event loop.

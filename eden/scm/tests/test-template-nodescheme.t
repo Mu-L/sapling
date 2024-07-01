@@ -1,8 +1,6 @@
-#debugruntest-compatible
 
 #require git no-eden
 
-  $ configure modernclient
 
   $ newclientrepo
   $ hg log -r . -T '{nodescheme}\n'

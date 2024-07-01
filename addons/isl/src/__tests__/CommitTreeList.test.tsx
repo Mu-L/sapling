@@ -19,8 +19,7 @@ import {
   openCommitInfoSidebar,
 } from '../testUtils';
 import {CommandRunner} from '../types';
-import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
-import {act} from 'react-dom/test-utils';
+import {fireEvent, render, screen, waitFor, within, act} from '@testing-library/react';
 
 describe('CommitTreeList', () => {
   beforeEach(() => {
@@ -341,6 +340,50 @@ describe('CommitTreeList', () => {
       fireEvent.click(openButton);
       expect(commitInfoIsOpen()).toBeTruthy();
       expect(CommitInfoTestUtils.withinCommitInfo().getByText('Commit B')).toBeInTheDocument();
+    });
+  });
+
+  describe('render dag subset', () => {
+    describe('obsolete stacks', () => {
+      beforeEach(() => {
+        render(<App />);
+        act(() => {
+          simulateRepoConnected();
+          closeCommitInfoSidebar();
+          expectMessageSentToServer({
+            type: 'subscribe',
+            kind: 'smartlogCommits',
+            subscriptionID: expect.anything(),
+          });
+          simulateCommits({
+            value: [
+              COMMIT('1', 'some public base', '0', {phase: 'public'}),
+              COMMIT('a', 'Commit A', '1', {successorInfo: {hash: 'a2', type: 'rebase'}}),
+              COMMIT('b', 'Commit B', 'a', {successorInfo: {hash: 'b2', type: 'rebase'}}),
+              COMMIT('c', 'Commit C', 'b', {successorInfo: {hash: 'c2', type: 'rebase'}}),
+              COMMIT('d', 'Commit D', 'c', {successorInfo: {hash: 'd2', type: 'rebase'}}),
+              COMMIT('e', 'Commit E', 'd', {isDot: true}),
+            ],
+          });
+        });
+      });
+      it('hides obsolete stacks by default', () => {
+        expect(screen.queryByText('Commit A')).toBeInTheDocument();
+        expect(screen.queryByText('Commit B')).not.toBeInTheDocument();
+        expect(screen.queryByText('Commit C')).not.toBeInTheDocument();
+        expect(screen.queryByText('Commit D')).toBeInTheDocument();
+        expect(screen.queryByText('Commit E')).toBeInTheDocument();
+      });
+
+      it('can configure to not hide obsolete stacks', () => {
+        fireEvent.click(screen.getByTestId('settings-gear-button'));
+        fireEvent.click(screen.getByTestId('condense-obsolete-stacks'));
+        expect(screen.queryByText('Commit A')).toBeInTheDocument();
+        expect(screen.queryByText('Commit B')).toBeInTheDocument();
+        expect(screen.queryByText('Commit C')).toBeInTheDocument();
+        expect(screen.queryByText('Commit D')).toBeInTheDocument();
+        expect(screen.queryByText('Commit E')).toBeInTheDocument();
+      });
     });
   });
 });

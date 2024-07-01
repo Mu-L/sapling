@@ -14,7 +14,7 @@ oncall("mononoke")
 
 symlink(
     name = "public_tests",
-    srcs = glob(["*.t"]),
+    srcs = glob(["**/*.t"]),
     visibility = ["PUBLIC"],
 )
 
@@ -34,13 +34,13 @@ buck_filegroup(
         "library-commit.sh",
         "library-push-redirector.sh",
         "library-snapshot.sh",
+        "library-xrepo-git-submodule-expansion.sh",
         "library-xrepo-sync-with-git-submodules.sh",
         "raw_text.txt",
     ],
 )
 
 python_binary(
-    # @autodeps-skip
     name = "integration_runner_real",
     srcs = ["integration_runner_real.py"],
     main_function = "eden.mononoke.tests.integration.integration_runner_real.run",
@@ -71,8 +71,7 @@ python_binary(
 dott_test(
     name = "admin",
     dott_files = glob([
-        "test-admin-*.t",
-        "test-mononoke-admin*.t",
+        "admin/*.t",
     ]),
     deps = [
         "//eden/mononoke:admin",
@@ -80,6 +79,7 @@ dott_test(
         "//eden/mononoke:blobstore_healer",
         "//eden/mononoke:mononoke",
         "//eden/mononoke/git/gitimport:gitimport",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 
@@ -87,7 +87,7 @@ dott_test(
     name = "newadmin",
     disable_all_network_access_target = False,
     dott_files = glob([
-        "test-newadmin-*.t",
+        "newadmin/*.t",
     ]),
     deps = [
         # TODO(T175880214): remove dependency to admin
@@ -103,7 +103,7 @@ dott_test(
 dott_test(
     name = "import",
     dott_files = glob([
-        "test-import-*.t",
+        "import/*.t",
     ]),
     deps = [
         "//eden/mononoke:backfill_derived_data",
@@ -116,7 +116,7 @@ dott_test(
 dott_test(
     name = "ephemeral-store",
     dott_files = glob([
-        "test-ephemeral-store-*.t",
+        "ephemeral_store/*.t",
     ]),
     deps = [
         "//eden/mononoke:backfill_derived_data",
@@ -163,11 +163,7 @@ dott_test(
 dott_test(
     name = "backfill-derived",
     dott_files = glob(
-        ["test-backfill-*.t"],
-        exclude = [
-            "test-backfill-derived-data.t",
-            "test-backfill-derived-data-dependent-types.t",
-        ],
+        ["backfill_derived/*.t"],
     ),
     deps = [
         "//eden/mononoke:backfill_derived_data",
@@ -181,7 +177,7 @@ dott_test(
 
 dott_test(
     name = "backsyncer",
-    dott_files = glob(["test-backsyncer-*.t"]),
+    dott_files = glob(["backsyncer/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -202,7 +198,7 @@ dott_test(
 
 dott_test(
     name = "blobimport",
-    dott_files = glob(["test-blobimport*.t"]),
+    dott_files = glob(["blobimport/*.t"]),
     deps = [
         "//eden/mononoke:blobimport",
         "//eden/mononoke/tools/admin:newadmin",
@@ -249,7 +245,7 @@ dott_test(
 
 dott_test(
     name = "cross-repo",
-    dott_files = glob(["test-cross-repo-*.t"]),
+    dott_files = glob(["cross_repo/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -278,7 +274,7 @@ dott_test(
     name = "edenapi",
     dott_files =
         glob([
-            "test-edenapi-*.t",
+            "edenapi/*.t",
         ]),
     deps = [
         "//eden/mononoke:admin",
@@ -304,9 +300,10 @@ dott_test(
 
 dott_test(
     name = "gitimport",
+    disable_all_network_access_target = False,
     dott_files =
         glob([
-            "test-gitimport*.t",
+            "gitimport/*.t",
         ]),
     deps = [
         "//eden/mononoke:admin",
@@ -319,15 +316,17 @@ dott_test(
 
 dott_test(
     name = "gitbundle",
+    disable_all_network_access_target = False,
     dott_files =
         glob([
-            "test-gitbundle*.t",
+            "gitbundle/*.t",
         ]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:mononoke",
         "//eden/mononoke/git/gitimport:gitimport",
         "//eden/mononoke/tools/admin:newadmin",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 
@@ -335,7 +334,7 @@ dott_test(
     name = "mononoke-git-server",
     dott_files =
         glob([
-            "test-mononoke-git-server*.t",
+            "mononoke_git_server/*.t",
         ]),
     deps = [
         "//eden/mononoke:admin",
@@ -352,8 +351,7 @@ dott_test(
     dott_files =
         glob(
             [
-                "test-hooks*.t",
-                "test-hook-*.t",
+                "hooks/*.t",
             ],
             exclude = ["test-hook-tailer.t"],
         ),
@@ -365,7 +363,7 @@ dott_test(
 
 dott_test(
     name = "lfs-server",
-    dott_files = glob(["test-lfs-server*.t"]),
+    dott_files = glob(["lfs_server/*.t"]),
     deps = [
         "//eden/mononoke:blobimport",
         "//eden/mononoke/lfs_server:lfs_server",
@@ -395,7 +393,7 @@ dott_test(
 
 dott_test(
     name = "mega-repo",
-    dott_files = glob(["test-megarepo*.t"]),
+    dott_files = glob(["megarepo/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -426,8 +424,7 @@ dott_test(
     name = "mononoke-hg-sync",
     disable_all_network_access_target = False,
     dott_files = glob([
-        "test-mononoke-hg-sync-job*.t",
-        "test-mononoke-sync-to-backup*.t",
+        "mononoke_hg_sync/*.t",
     ]),
     deps = [
         "//eden/mononoke:admin",
@@ -443,7 +440,7 @@ dott_test(
 
 dott_test(
     name = "mononoke-hg-sync-mysql",
-    dott_files = ["test-mononoke-hg-sync-job-generate-bundles-loop.t"],
+    dott_files = ["mononoke_hg_sync/test-mononoke-hg-sync-job-generate-bundles-loop.t"],
     use_mysql = True,
     deps = [
         "//eden/mononoke:blobimport",
@@ -463,7 +460,7 @@ dott_test(
 
 dott_test(
     name = "push-redirector",
-    dott_files = glob(["test-push-redirector-*.t"]),
+    dott_files = glob(["push_redirector/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -490,7 +487,7 @@ dott_test(
 
 dott_test(
     name = "repo-import",
-    dott_files = glob(["test-repo-import*.t"]),
+    dott_files = glob(["repo_import/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -516,7 +513,7 @@ dott_test(
 
 dott_test(
     name = "segmented-changelog",
-    dott_files = glob(["test-cmd-segmented-changelog-*.t"]),
+    dott_files = glob(["segmented_changelog/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -531,20 +528,7 @@ dott_test(
     dott_files =
         glob(
             [
-                "test-bookmark-*.t",
-                "test-commitcloud*.t",
-                "test-getpack*.t",
-                "test-gettreepack*.t",
-                "test-infinitepush*.t",
-                "test-multiplexed-*.t",
-                "test-push-*.t",
-                "test-pushrebase*.t",
-                "test-server-*.t",
-            ],
-            exclude = [
-                "test-infinitepush-*lfs.t",
-                "test-push-protocol-lfs.t",
-                "test-push-redirector-*.t",
+                "server/*.t",
             ],
         ),
     deps = [
@@ -566,10 +550,10 @@ dott_test(
     name = "server-mysql",
     dott_files =
         [
-            "test-infinitepush-mutation.t",
-            "test-pushrebase.t",
-            "test-server-init.t",
-            "test-server-lookup.t",
+            "server/test-infinitepush-mutation.t",
+            "server/test-pushrebase.t",
+            "server/test-server-init.t",
+            "server/test-server-lookup.t",
         ],
     use_mysql = True,
     deps = [
@@ -580,7 +564,7 @@ dott_test(
 
 dott_test(
     name = "sqlblob",
-    dott_files = glob(["test-sqlblob*.t"]),
+    dott_files = glob(["sqlblob/*.t"]),
     deps = [
         "//eden/mononoke:blobimport",
         "//eden/mononoke:mononoke",
@@ -612,7 +596,7 @@ dott_test(
 dott_test(
     name = "walker",
     disable_all_network_access_target = False,
-    dott_files = glob(["test-new-walker-*.t"]),
+    dott_files = glob(["walker/*.t"]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -627,7 +611,7 @@ dott_test(
     name = "gitexport",
     disable_all_network_access_target = False,
     dott_files = glob(
-        ["test-gitexport*.t"],
+        ["gitexport/*.t"],
     ),
     deps = [
         "//eden/mononoke:mononoke",

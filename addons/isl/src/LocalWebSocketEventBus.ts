@@ -54,7 +54,8 @@ export class LocalWebSocketEventBus {
     if (this.disposed || this.opening || this.status.type === 'open') {
       return this.websocket;
     }
-    const wsUrl = new URL(`ws://${this.host}/ws`);
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = new URL(`${wsProtocol}//${this.host}/ws`);
     const token = initialParams.get('token');
     if (token) {
       wsUrl.searchParams.append('token', token);
@@ -121,7 +122,7 @@ export class LocalWebSocketEventBus {
 
   private scheduleReconnect() {
     this.setStatus({type: 'reconnecting'});
-    logger.info(`websocket connecion closed. Retrying in ${this.exponentialReconnectDelay}ms`);
+    logger.info(`websocket connection closed. Retrying in ${this.exponentialReconnectDelay}ms`);
     setTimeout(() => {
       this.startConnection();
     }, this.exponentialReconnectDelay);

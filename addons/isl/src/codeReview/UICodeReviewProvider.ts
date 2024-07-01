@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import type {FieldConfig} from '../CommitInfoView/types';
 import type {Operation} from '../operations/Operation';
 import type {Dag} from '../previews';
 import type {CommitInfo, DiffId, DiffSummary, Hash} from '../types';
@@ -29,7 +30,7 @@ export interface UICodeReviewProvider {
   /** If this provider is capable of landing from the UI, this component renders the land button */
   DiffLandButtonContent?(props: {diff?: DiffSummary; commit: CommitInfo}): JSX.Element | null;
   formatDiffNumber(diffId: DiffId): string;
-
+  isSplitSuggestionSupported(): boolean;
   submitOperation(
     commits: Array<CommitInfo>,
     options?: {
@@ -43,6 +44,9 @@ export interface UICodeReviewProvider {
   ): Operation;
 
   submitCommandName(): string;
+
+  /** If provided, any form of submitting for code review is currently disabled for this provider for the given reason */
+  submitDisabledReason?: () => string | undefined;
 
   RepoInfo(): JSX.Element | null;
 
@@ -81,6 +85,8 @@ export interface UICodeReviewProvider {
     allDiffSummaries: Map<string, DiffSummary>,
   ): Array<CommitInfo>;
 
+  commitMessageFieldsSchema: Array<FieldConfig>;
+
   enableMessageSyncing: boolean;
 
   supportsSuggestedReviewers: boolean;
@@ -88,4 +94,6 @@ export interface UICodeReviewProvider {
   supportsComparingSinceLastSubmit: boolean;
 
   supportsRenderingMarkup: boolean;
+
+  gotoDistanceWarningAgeCutoff: number;
 }

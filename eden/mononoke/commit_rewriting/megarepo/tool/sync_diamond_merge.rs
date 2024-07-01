@@ -12,6 +12,7 @@
 //! USE WITH CARE!
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::format_err;
@@ -29,14 +30,17 @@ use commit_graph::CommitGraphRef;
 use commit_transformation::upload_commits;
 use context::CoreContext;
 use cross_repo_sync::create_commit_syncers;
-use cross_repo_sync::get_x_repo_submodule_metadata_file_prefx_from_config;
 use cross_repo_sync::rewrite_commit;
+use cross_repo_sync::submodule_metadata_file_prefix_and_dangling_pointers;
 use cross_repo_sync::update_mapping_with_version;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
 use cross_repo_sync::CommitSyncOutcome;
 use cross_repo_sync::CommitSyncer;
+use cross_repo_sync::InMemoryRepo;
+use cross_repo_sync::Large;
 use cross_repo_sync::SubmoduleDeps;
+use cross_repo_sync::SubmoduleExpansionData;
 use cross_repo_sync::Syncers;
 use futures::compat::Future01CompatExt;
 use futures::future::FutureExt;
@@ -204,7 +208,15 @@ pub async fn do_sync_diamond_merge(
 
     let new_merge_cs_id = rewritten.get_changeset_id();
     info!(ctx.logger(), "uploading merge commit {}", new_merge_cs_id);
-    upload_commits(ctx, vec![rewritten], &small_repo, &large_repo).await?;
+    let submodule_expansion_content_ids = Vec::<(Arc<Repo>, HashSet<_>)>::new();
+    upload_commits(
+        ctx,
+        vec![rewritten],
+        &small_repo,
+        &large_repo,
+        submodule_expansion_content_ids,
+    )
+    .await?;
 
     update_mapping_with_version(
         ctx,
@@ -281,10 +293,35 @@ async fn create_rewritten_merge_commit(
         p2 => remapped_p2,
     };
 
+    let (x_repo_submodule_metadata_file_prefix, dangling_submodule_pointers) =
+        submodule_metadata_file_prefix_and_dangling_pointers(
+            small_repo.repo_identity().id(),
+            &root_version,
+            syncers.small_to_large.live_commit_sync_config.clone(),
+        )
+        .await?;
+
     let submodule_deps = syncers.small_to_large.get_submodule_deps();
 
+    let large_repo_id = Large(large_repo.repo_identity().id());
+    let fallback_repos = vec![Arc::new(small_repo.clone())]
+        .into_iter()
+        .chain(submodule_deps.repos())
+        .collect::<Vec<_>>();
+    let large_in_memory_repo = InMemoryRepo::from_repo(large_repo, fallback_repos)?;
+    let submodule_expansion_data = match submodule_deps {
+        SubmoduleDeps::ForSync(deps) => Some(SubmoduleExpansionData {
+            submodule_deps: deps,
+            x_repo_submodule_metadata_file_prefix: x_repo_submodule_metadata_file_prefix.as_str(),
+            large_repo_id,
+            large_repo: large_in_memory_repo,
+            dangling_submodule_pointers,
+        }),
+        SubmoduleDeps::NotNeeded | SubmoduleDeps::NotAvailable => None,
+    };
+
     let source_repo = syncers.small_to_large.get_source_repo();
-    let maybe_rewritten = rewrite_commit(
+    let rewrite_res = rewrite_commit(
         &ctx,
         merge_bcs,
         &remapped_parents,
@@ -293,19 +330,14 @@ async fn create_rewritten_merge_commit(
             .get_mover_by_version(&version_p1)
             .await?,
         source_repo,
-        submodule_deps,
         Default::default(),
         Default::default(),
-        get_x_repo_submodule_metadata_file_prefx_from_config(
-            small_repo.repo_identity().id(),
-            &root_version,
-            syncers.small_to_large.live_commit_sync_config.clone(),
-        )
-        .await?,
+        submodule_expansion_data,
     )
     .await?;
-    let mut rewritten =
-        maybe_rewritten.ok_or_else(|| Error::msg("merge commit was unexpectedly rewritten out"))?;
+    let mut rewritten = rewrite_res
+        .rewritten
+        .ok_or_else(|| Error::msg("merge commit was unexpectedly rewritten out"))?;
 
     let mut additional_file_changes = generate_additional_file_changes(
         ctx.clone(),
@@ -404,7 +436,7 @@ fn find_root(new_branch: &Vec<BonsaiChangeset>) -> Result<ChangesetId, Error> {
         }
     }
 
-    validate_roots(roots).map(|root| *root)
+    validate_roots(roots).copied()
 }
 
 async fn find_new_branch_oldest_first(

@@ -11,6 +11,8 @@ import type {ServerSideTracker} from './analytics/serverSideTracker';
 import type {Logger} from './logger';
 import type {ServerPlatform} from './serverPlatform';
 import type {RepositoryContext} from './serverTypes';
+import type {ExecaError} from 'execa';
+import type {TypeaheadResult} from 'isl/src/CommitInfoView/types';
 import type {Serializable} from 'isl/src/serialize';
 import type {
   ServerToClientMessage,
@@ -26,20 +28,19 @@ import type {
   FetchedUncommittedChanges,
   LandInfo,
   CodeReviewProviderSpecificClientToServerMessages,
-  StableInfo,
   StableLocationData,
 } from 'isl/src/types';
 import type {ExportStack, ImportedStack} from 'shared/types/stack';
 
 import {generatedFilesDetector} from './GeneratedFiles';
 import {Internal} from './Internal';
-import {Repository} from './Repository';
+import {Repository, absolutePathForFileInRepo} from './Repository';
 import {repositoryCache} from './RepositoryCache';
-import {findPublicAncestor, parseExecJson} from './utils';
+import {parseExecJson} from './utils';
 import {serializeToString, deserializeFromString} from 'isl/src/serialize';
+import {Readable} from 'node:stream';
 import {revsetForComparison} from 'shared/Comparison';
 import {randomId, nullthrows, notEmpty} from 'shared/utils';
-import {Readable} from 'stream';
 
 export type IncomingMessage = ClientToServerMessage;
 type IncomingMessageWithPayload = ClientToServerMessageWithPayload;
@@ -168,19 +169,8 @@ export default class ServerToClientAPI {
       );
     }
 
-    this.repoDisposables.push(
-      repo.subscribeToHeadCommit(head => {
-        const allCommits = repo.getSmartlogCommits();
-        const ancestor = findPublicAncestor(allCommits?.commits.value, head);
-        this.tracker.track('HeadCommitChanged', {
-          extras: {
-            hash: head.hash,
-            public: ancestor?.hash,
-            bookmarks: ancestor?.remoteBookmarks,
-          },
-        });
-      }),
-    );
+    repo.ref();
+    this.repoDisposables.push({dispose: () => repo.unref()});
 
     this.processQueuedMessages();
   }
@@ -288,7 +278,13 @@ export default class ServerToClientAPI {
         if (data.type.startsWith('platform/')) {
           this.platform.handleMessageFromClient(
             /*repo=*/ undefined,
-            /*ctx*/ undefined,
+            // even if we don't have a repo, we can still make a RepositoryContext to execute commands
+            {
+              cwd: this.connection.cwd,
+              cmd: this.connection.command ?? 'sl',
+              logger: this.logger,
+              tracker: this.tracker,
+            },
             data as PlatformSpecificClientToServerMessages,
             message => this.postMessage(message),
             (dispose: () => unknown) => {
@@ -578,7 +574,9 @@ export default class ServerToClientAPI {
         logger?.log('refresh requested');
         repo.fetchSmartlogCommits();
         repo.fetchUncommittedChanges();
+        repo.checkForMergeConflicts();
         repo.codeReviewProvider?.triggerDiffSummariesFetch(repo.getAllDiffIds());
+        generatedFilesDetector.clear(); // allow generated files to be rechecked
         break;
       }
       case 'pageVisibility': {
@@ -623,19 +621,85 @@ export default class ServerToClientAPI {
           });
         break;
       }
-      case 'fetchAllCommitChangedFiles': {
+      case 'fetchPendingSignificantLinesOfCode':
+        {
+          repo
+            .fetchPendingSignificantLinesOfCode(ctx, data.hash, data.includedFiles)
+            .then(value => {
+              this.postMessage({
+                type: 'fetchedPendingSignificantLinesOfCode',
+                requestId: data.requestId,
+                hash: data.hash,
+                linesOfCode: {value},
+              });
+            })
+            .catch(err => {
+              this.postMessage({
+                type: 'fetchedPendingSignificantLinesOfCode',
+                hash: data.hash,
+                requestId: data.requestId,
+                linesOfCode: {error: err as Error},
+              });
+            });
+        }
+        break;
+      case 'fetchSignificantLinesOfCode':
+        {
+          repo
+            .fetchSignificantLinesOfCode(ctx, data.hash, data.excludedFiles)
+            .then(value => {
+              this.postMessage({
+                type: 'fetchedSignificantLinesOfCode',
+                hash: data.hash,
+                linesOfCode: {value},
+              });
+            })
+            .catch(err => {
+              this.postMessage({
+                type: 'fetchedSignificantLinesOfCode',
+                hash: data.hash,
+                linesOfCode: {error: err as Error},
+              });
+            });
+        }
+        break;
+      case 'fetchPendingAmendSignificantLinesOfCode':
+        {
+          repo
+            .fetchPendingAmendSignificantLinesOfCode(ctx, data.hash, data.includedFiles)
+            .then(value => {
+              this.postMessage({
+                type: 'fetchedPendingAmendSignificantLinesOfCode',
+                requestId: data.requestId,
+                hash: data.hash,
+                linesOfCode: {value},
+              });
+            })
+            .catch(err => {
+              this.postMessage({
+                type: 'fetchedPendingAmendSignificantLinesOfCode',
+                hash: data.hash,
+                requestId: data.requestId,
+                linesOfCode: {error: err as Error},
+              });
+            });
+        }
+        break;
+      case 'fetchCommitChangedFiles': {
         repo
           .getAllChangedFiles(ctx, data.hash)
           .then(files => {
             this.postMessage({
-              type: 'fetchedAllCommitChangedFiles',
+              type: 'fetchedCommitChangedFiles',
               hash: data.hash,
-              result: {value: files},
+              result: {
+                value: {filesSample: files.slice(0, data.limit), totalFileCount: files.length},
+              },
             });
           })
           .catch(err => {
             this.postMessage({
-              type: 'fetchedAllCommitChangedFiles',
+              type: 'fetchedCommitChangedFiles',
               hash: data.hash,
               result: {error: err as Error},
             });
@@ -834,17 +898,31 @@ export default class ServerToClientAPI {
         break;
       }
       case 'fetchAndSetStables': {
-        Internal.fetchStableLocations?.(ctx).then((stables: StableLocationData | undefined) => {
-          this.logger.info('fetched stable locations', stables);
-          if (stables == null) {
-            return;
-          }
-          this.postMessage({type: 'fetchedStables', stables});
-          repo.stableLocations = [...stables.stables, ...stables.special, ...stables.manual]
-            .map(stable => stable.value)
-            .filter(notEmpty);
-          repo.fetchSmartlogCommits();
-        });
+        Internal.fetchStableLocations?.(ctx, data.additionalStables).then(
+          (stables: StableLocationData | undefined) => {
+            this.logger.info('fetched stable locations', stables);
+            if (stables == null) {
+              return;
+            }
+            this.postMessage({type: 'fetchedStables', stables});
+            repo.stableLocations = [
+              ...stables.stables,
+              ...stables.special,
+              ...Object.values(stables.manual),
+            ]
+              .map(stable => stable?.value)
+              .filter(notEmpty);
+            repo.fetchSmartlogCommits();
+          },
+        );
+        break;
+      }
+      case 'fetchStableLocationAutocompleteOptions': {
+        Internal.fetchStableLocationAutocompleteOptions?.(ctx).then(
+          (result: Result<Array<TypeaheadResult>>) => {
+            this.postMessage({type: 'fetchedStableLocationAutocompleteOptions', result});
+          },
+        );
         break;
       }
       case 'generateAICommitMessage': {
@@ -885,6 +963,38 @@ export default class ServerToClientAPI {
         break;
       }
       case 'gotUiState': {
+        break;
+      }
+      case 'getConfiguredMergeTool': {
+        repo.getMergeTool(ctx).then((tool: string | null) => {
+          this.postMessage({
+            type: 'gotConfiguredMergeTool',
+            tool: tool ?? undefined,
+          });
+        });
+        break;
+      }
+      case 'getRepoUrlAtHash': {
+        const args = ['url', '--rev', data.revset];
+        // validate that the path is a valid file in repo
+        if (data.path != null && absolutePathForFileInRepo(data.path, repo) != null) {
+          args.push(data.path);
+        }
+        repo
+          .runCommand(args, 'RepoUrlCommand', ctx)
+          .then(result => {
+            this.postMessage({
+              type: 'gotRepoUrlAtHash',
+              url: {value: result.stdout},
+            });
+          })
+          .catch((err: ExecaError) => {
+            this.logger.error('Failed to get repo url at hash:', err);
+            this.postMessage({
+              type: 'gotRepoUrlAtHash',
+              url: {error: err},
+            });
+          });
         break;
       }
       default: {

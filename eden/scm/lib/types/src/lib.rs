@@ -7,6 +7,8 @@
 
 //! Common types used by sibling crates
 
+pub mod augmented_tree;
+pub mod blake3;
 pub mod errors;
 pub mod fetch_mode;
 pub mod hash;
@@ -23,6 +25,12 @@ pub mod sha;
 pub mod tree;
 pub mod workingcopy_client;
 
+pub use crate::augmented_tree::AugmentedDirectoryNode;
+pub use crate::augmented_tree::AugmentedFileNode;
+pub use crate::augmented_tree::AugmentedTreeChildEntry;
+pub use crate::augmented_tree::AugmentedTreeEntry;
+pub use crate::augmented_tree::AugmentedTreeEntryWithDigest;
+pub use crate::blake3::Blake3;
 pub use crate::hgid::HgId;
 pub use crate::key::Key;
 pub use crate::node::Node;
@@ -33,6 +41,7 @@ pub use crate::path::PathComponentBuf;
 pub use crate::path::RepoPath;
 pub use crate::path::RepoPathBuf;
 pub use crate::sha::Sha256;
+pub use crate::tree::FileType;
 
 pub type Id20 = HgId;
 

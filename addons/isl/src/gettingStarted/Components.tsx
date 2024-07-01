@@ -6,20 +6,20 @@
  */
 
 import {Link as LinkEl} from '../Link';
+import {Button} from '../components/Button';
 import {T} from '../i18n';
 import platform from '../platform';
 import {themeState} from '../theme';
 import {Ribbon} from './Ribbon';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {useAtomValue} from 'jotai';
 import {Icon} from 'shared/Icon';
 
 export function DismissButton({dismiss}: {dismiss: () => void}) {
   return (
     <div className="dismiss">
-      <VSCodeButton appearance="icon" onClick={dismiss}>
+      <Button icon onClick={dismiss}>
         <Icon icon="x" />
-      </VSCodeButton>
+      </Button>
     </div>
   );
 }
@@ -132,14 +132,16 @@ export function Callout({
   alt,
 }: {
   title: React.ReactNode;
-  imgLight: string;
-  imgDark: string;
+  imgLight?: string;
+  imgDark?: string;
   alt: string;
 }) {
   const theme = useAtomValue(themeState);
   return (
     <div className="callout">
-      <img src={theme === 'light' ? imgLight : imgDark} alt={alt} className="callout-image" />
+      {imgLight && imgDark && (
+        <img src={theme === 'light' ? imgLight : imgDark} alt={alt} className="callout-image" />
+      )}
       <span>{title}</span>
     </div>
   );

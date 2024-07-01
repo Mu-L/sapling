@@ -35,18 +35,46 @@ def testsetup(t: TestTmp):
     use_watchman = os.getenv("HGFSMONITOR_TESTS") == "1"
     # similar to the one above, but considerably uglier
     if os.getenv("HGTEST_USE_EDEN") == "1":
+        import re
+
         edenpath = str(t.path / "bin" / "eden")
+        t.setenv("HGTEST_USE_EDEN", "1")
+        if "eden" not in t.shenv.cmdtable:
+            t.requireexe("eden")
+        t.registerfallbackmatch(
+            lambda a, b: (
+                b == "update complete"
+                or re.match(
+                    r"[0-9]+ files merged, [0-9]+ files unresolved",
+                    b,
+                )
+            )
+            and re.match(
+                r"[0-9]+ files updated, [0-9]+ files merged, [0-9]+ files removed, [0-9]+ files unresolved",
+                a,
+            )
+        )
     else:
         edenpath = None
-
-    hgrc = _get_hgrc(testdir, use_watchman, edenpath)
-
-    hgrcpath = t.path / "hgrc"
-    hgrcpath.write_bytes(hgrc.encode())
 
     # extra hgrc fixup via $TESTDIR/features.py
     testfile = t.getenv("TESTFILE")
     featurespy = os.path.join(testdir, "features.py")
+
+    inprocesshg = True
+    modernconfigs = True
+    if os.path.exists(testfile):
+        with open(testfile, "rb") as f:
+            content = f.read().decode("utf-8", errors="ignore")
+        if "#inprocess-hg-incompatible" in content:
+            inprocesshg = False
+        if "#modern-config-incompatible" in content:
+            modernconfigs = False
+
+    hgrc = _get_hgrc(testdir, use_watchman, str(t.path), edenpath, modernconfigs)
+
+    hgrcpath = t.path / "hgrc"
+    hgrcpath.write_bytes(hgrc.encode())
 
     if os.path.exists(featurespy):
         with open(featurespy, "r") as f:
@@ -56,12 +84,6 @@ def testsetup(t: TestTmp):
             if setup:
                 testname = os.path.basename(testfile)
                 setup(testname, str(hgrcpath))
-    inprocesshg = True
-    if os.path.exists(testfile):
-        with open(testfile, "rb") as f:
-            content = f.read().decode("utf-8", errors="ignore")
-        if "#inprocess-hg-incompatible" in content:
-            inprocesshg = False
 
     # the 'f' utility in $TESTDIR/f
     fpath = os.path.join(testdir, "f")
@@ -119,6 +141,10 @@ def testsetup(t: TestTmp):
 
     if use_watchman:
         watchman_sock = os.getenv("WATCHMAN_SOCK")
+        t.requireexe(
+            "watchman",
+            fullpath=t.path.parents[2] / "install" / "bin" / "watchmanscript",
+        )
         if watchman_sock:
             environ["WATCHMAN_SOCK"] = watchman_sock
             environ["HGFSMONITOR_TESTS"] = "1"
@@ -141,6 +167,10 @@ def testsetup(t: TestTmp):
     if os.path.exists(tinitpath):
         with open(tinitpath, "rb") as f:
             t.sheval(f.read().decode())
+
+    # set up dotfiles related to configs
+    if modernconfigs:
+        _setupmodernclient(t)
 
     hgpath = None
     run = None
@@ -261,6 +291,15 @@ def hg(stdin: BinaryIO, stdout: BinaryIO, stderr: BinaryIO, env: Env) -> int:
         pycompat.stdin, pycompat.stdout, pycompat.stderr = origstdio
 
 
+def _setupmodernclient(t: TestTmp):
+    # touch $TESTTMP/.eagerepo to enable eager repo by default
+    (t.path / ".eagerepo").touch()
+    # for dummy ssh
+    t.setenv("DUMMYSSH_STABLE_ORDER", 1)
+    # for commitcloud
+    t.setenv("COMMITCLOUD", 1)
+
+
 def _rawsystem(
     shenv, stdin, stdout, stderr, orig, cmd: str, environ=None, cwd=None, out=None
 ):
@@ -300,9 +339,21 @@ def _execpython(path):
     return env
 
 
-def _get_hgrc(testdir: str, use_watchman: bool, edenpath: Optional[str]) -> str:
+def _get_hgrc(
+    testdir: str,
+    use_watchman: bool,
+    testtmp: str,
+    edenpath: Optional[str],
+    modernconfigs: bool,
+) -> str:
     fpath = os.path.join(testdir, "default_hgrc.py")
     result = ""
     if os.path.exists(fpath):
-        result = _execpython(fpath).get("get_content")(use_watchman, edenpath=edenpath)
+        result = _execpython(fpath).get("get_content")(
+            use_watchman,
+            edenpath=edenpath,
+            modernconfig=modernconfigs,
+            testdir=testdir,
+            testtmp=testtmp,
+        )
     return result

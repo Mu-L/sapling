@@ -1,4 +1,6 @@
 #testcases normalcheckout nativecheckout
+#chg-compatible
+#debugruntest-incompatible
   $ configure modernclient
   $ enable sparse
   $ setconfig commands.update.check=none
@@ -155,14 +157,14 @@ Hard killing the process leaves the pending config file around
   > from sapling import extensions, localrepo
   > def setparents(orig, repo, *args, **kwargs):
   >     # os._exit skips all cleanup
-  >     os._exit(100)
+  >     os._exit(255)
   > 
   > def extsetup(ui):
   >     extensions.wrapfunction(localrepo.localrepository, "setparents",
   >                             setparents)
   > EOF
   $ hg up .^ --config extensions.killer=$TESTTMP/killer.py
-  [100]
+  [255]
   $ cat .hg/sparseprofileconfigs
   {} (no-eol)
   $ ls .hg/sparseprofileconfigs*
@@ -181,6 +183,13 @@ And is cleaned up on the next update
   $ hg files
   alwaysincluded
   includedbyconfig
+
+Empty (truncated after power cycle) sparseprofileconfigs does not break things
+
+  $ echo 'x' > .hg/sparseprofileconfigs
+  $ hg status
+  $ hg files
+  alwaysincluded
 
 Reset
   $ cp .hg/hgrc.bak .hg/hgrc

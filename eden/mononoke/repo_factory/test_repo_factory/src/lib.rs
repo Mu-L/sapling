@@ -35,7 +35,11 @@ use changeset_fetcher::ArcChangesetFetcher;
 use changeset_fetcher::SimpleChangesetFetcher;
 use changesets::ArcChangesets;
 use changesets_impl::SqlChangesetsBuilder;
+use commit_cloud::sql::builder::SqlCommitCloudBuilder;
+use commit_cloud::ArcCommitCloud;
 use commit_graph::ArcCommitGraph;
+use commit_graph::ArcCommitGraphWriter;
+use commit_graph::BaseCommitGraphWriter;
 use commit_graph::CommitGraph;
 use commit_graph_compat::ChangesetsCommitGraphCompat;
 use context::CoreContext;
@@ -62,6 +66,7 @@ use metaconfig_types::ArcRepoConfig;
 use metaconfig_types::BlameVersion;
 use metaconfig_types::DerivedDataConfig;
 use metaconfig_types::DerivedDataTypesConfig;
+use metaconfig_types::GitDeltaManifestV2Config;
 use metaconfig_types::HookManagerParams;
 use metaconfig_types::InfinitepushNamespace;
 use metaconfig_types::InfinitepushParams;
@@ -92,19 +97,21 @@ use repo_cross_repo::ArcRepoCrossRepo;
 use repo_cross_repo::RepoCrossRepo;
 use repo_derived_data::ArcRepoDerivedData;
 use repo_derived_data::RepoDerivedData;
-use repo_derived_data_service::ArcDerivedDataManagerSet;
-use repo_derived_data_service::DerivedDataManagerSet;
 use repo_hook_file_content_provider::RepoHookFileContentProvider;
 use repo_identity::ArcRepoIdentity;
 use repo_identity::RepoIdentity;
 use repo_lock::AlwaysUnlockedRepoLock;
 use repo_lock::ArcRepoLock;
 use repo_lock::SqlRepoLock;
+use repo_metadata_checkpoint::ArcRepoMetadataCheckpoint;
+use repo_metadata_checkpoint::SqlRepoMetadataCheckpointBuilder;
 use repo_permission_checker::AlwaysAllowRepoPermissionChecker;
 use repo_permission_checker::ArcRepoPermissionChecker;
 use repo_sparse_profiles::ArcRepoSparseProfiles;
 use repo_sparse_profiles::RepoSparseProfiles;
 use repo_sparse_profiles::SqlSparseProfilesSizes;
+use repo_stats_logger::ArcRepoStatsLogger;
+use repo_stats_logger::RepoStatsLogger;
 use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
 use segmented_changelog::new_test_segmented_changelog;
@@ -145,6 +152,7 @@ pub struct TestRepoFactory {
     name: String,
     config: RepoConfig,
     blobstore: Arc<dyn Blobstore>,
+    bookmarks_cache: Option<ArcBookmarksCache>,
     live_commit_sync_config: Option<Arc<dyn LiveCommitSyncConfig>>,
     metadata_db: SqlConnections,
     hg_mutation_db: SqlConnections,
@@ -162,6 +170,11 @@ pub fn default_test_repo_config() -> RepoConfig {
         types: DerivableType::iter().collect(),
         unode_version: UnodeVersion::V2,
         blame_version: BlameVersion::V2,
+        git_delta_manifest_v2_config: Some(GitDeltaManifestV2Config {
+            max_inlined_object_size: 100,
+            max_inlined_delta_size: 100,
+            delta_chunk_size: 1000,
+        }),
         ..Default::default()
     };
     RepoConfig {
@@ -257,6 +270,7 @@ impl TestRepoFactory {
         metadata_con.execute_batch(SqlSparseProfilesSizes::CREATION_QUERY)?;
         metadata_con.execute_batch(StreamingCloneBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlCommitGraphStorageBuilder::CREATION_QUERY)?;
+        metadata_con.execute_batch(SqlCommitCloudBuilder::CREATION_QUERY)?;
         let metadata_db = SqlConnections::new_single(match callbacks {
             Some(callbacks) => Connection::with_sqlite_callbacks(metadata_con, callbacks),
             None => Connection::with_sqlite(metadata_con),
@@ -278,6 +292,7 @@ impl TestRepoFactory {
             derived_data_lease: None,
             filenodes_override: None,
             live_commit_sync_config: None,
+            bookmarks_cache: None,
         })
     }
 
@@ -301,6 +316,12 @@ impl TestRepoFactory {
     /// Use a particular blobstore for repos built by this factory.
     pub fn with_blobstore(&mut self, blobstore: Arc<dyn Blobstore>) -> &mut Self {
         self.blobstore = blobstore;
+        self
+    }
+
+    /// Set the bookmarks cache for repos built by this factory.
+    pub fn with_bookmarks_cache(&mut self, bookmarks_cache: ArcBookmarksCache) -> &mut Self {
+        self.bookmarks_cache = Some(bookmarks_cache);
         self
     }
 
@@ -392,8 +413,7 @@ impl TestRepoFactory {
     pub fn changesets(
         &self,
         repo_identity: &ArcRepoIdentity,
-        commit_graph: &ArcCommitGraph,
-        repo_config: &ArcRepoConfig,
+        commit_graph_writer: &ArcCommitGraphWriter,
     ) -> Result<ArcChangesets> {
         let changesets = Arc::new(
             SqlChangesetsBuilder::from_sql_connections(self.metadata_db.clone())
@@ -401,11 +421,8 @@ impl TestRepoFactory {
         );
 
         Ok(Arc::new(ChangesetsCommitGraphCompat::new(
-            self.fb,
             changesets,
-            commit_graph.clone(),
-            repo_identity.name().to_string(),
-            repo_config.commit_graph_config.scuba_table.as_deref(),
+            commit_graph_writer.clone(),
         )?))
     }
 
@@ -478,7 +495,7 @@ impl TestRepoFactory {
     ) -> Result<ArcBonsaiGlobalrevMapping> {
         Ok(Arc::new(
             SqlBonsaiGlobalrevMappingBuilder::from_sql_connections(self.metadata_db.clone())
-                .build(repo_identity.id()),
+                .build(RendezVousOptions::for_test(), repo_identity.id()),
         ))
     }
 
@@ -502,6 +519,17 @@ impl TestRepoFactory {
     ) -> Result<ArcBonsaiTagMapping> {
         Ok(Arc::new(
             SqlBonsaiTagMappingBuilder::from_sql_connections(self.metadata_db.clone())
+                .build(repo_identity.id()),
+        ))
+    }
+
+    /// Construct Repo Metadata Checkpoint using the in-memory metadata
+    pub fn repo_metadata_checkpoint(
+        &self,
+        repo_identity: &ArcRepoIdentity,
+    ) -> Result<ArcRepoMetadataCheckpoint> {
+        Ok(Arc::new(
+            SqlRepoMetadataCheckpointBuilder::from_sql_connections(self.metadata_db.clone())
                 .build(repo_identity.id()),
         ))
     }
@@ -722,41 +750,6 @@ impl TestRepoFactory {
         ))
     }
 
-    /// Set of DerivedDataManagers for DDS
-    pub fn derived_data_manager_set(
-        &self,
-        repo_identity: &ArcRepoIdentity,
-        repo_config: &ArcRepoConfig,
-        changesets: &ArcChangesets,
-        commit_graph: &ArcCommitGraph,
-        bonsai_hg_mapping: &ArcBonsaiHgMapping,
-        bonsai_git_mapping: &ArcBonsaiGitMapping,
-        filenodes: &ArcFilenodes,
-        repo_blobstore: &ArcRepoBlobstore,
-    ) -> Result<ArcDerivedDataManagerSet> {
-        let config = repo_config.derived_data_config.clone();
-        let lease = self.derived_data_lease.as_ref().map_or_else(
-            || Arc::new(InProcessLease::new()) as Arc<dyn LeaseOps>,
-            |lease| lease(),
-        );
-        let logger = self.ctx.logger().clone();
-        anyhow::Ok(Arc::new(DerivedDataManagerSet::new(
-            repo_identity.id(),
-            repo_identity.name().to_string(),
-            changesets.clone(),
-            commit_graph.clone(),
-            bonsai_hg_mapping.clone(),
-            bonsai_git_mapping.clone(),
-            filenodes.clone(),
-            repo_blobstore.as_ref().clone(),
-            lease,
-            logger,
-            MononokeScubaSampleBuilder::with_discard(),
-            config,
-            None, // derivation_service_client = None
-        )?))
-    }
-
     /// ACL regions
     pub fn acl_regions(
         &self,
@@ -831,6 +824,16 @@ impl TestRepoFactory {
         Ok(Arc::new(CommitGraph::new(Arc::new(sql_storage))))
     }
 
+    /// Commit graph writer
+    pub fn commit_graph_writer(
+        &self,
+        commit_graph: &ArcCommitGraph,
+    ) -> Result<ArcCommitGraphWriter> {
+        Ok(Arc::new(BaseCommitGraphWriter::new(CommitGraph::clone(
+            commit_graph,
+        ))))
+    }
+
     /// Warm bookmarks cache
     pub async fn warm_bookmarks_cache(
         &self,
@@ -840,14 +843,40 @@ impl TestRepoFactory {
         repo_derived_data: &ArcRepoDerivedData,
         phases: &ArcPhases,
     ) -> Result<ArcBookmarksCache> {
-        let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(
-            self.ctx.clone(),
-            bookmarks.clone(),
-            bookmark_update_log.clone(),
-            repo_identity.clone(),
-        );
-        warm_bookmarks_cache_builder.add_all_warmers(repo_derived_data, phases)?;
-        warm_bookmarks_cache_builder.wait_until_warmed();
-        Ok(Arc::new(warm_bookmarks_cache_builder.build().await?))
+        match self.bookmarks_cache {
+            Some(ref cache) => Ok(cache.clone()),
+            None => {
+                let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(
+                    self.ctx.clone(),
+                    bookmarks.clone(),
+                    bookmark_update_log.clone(),
+                    repo_identity.clone(),
+                );
+                warm_bookmarks_cache_builder.add_all_warmers(repo_derived_data, phases)?;
+                warm_bookmarks_cache_builder.wait_until_warmed();
+                Ok(Arc::new(warm_bookmarks_cache_builder.build().await?))
+            }
+        }
+    }
+
+    /// Commit cloud
+    pub fn commit_cloud(
+        &self,
+        _repo_identity: &RepoIdentity,
+        bonsai_hg_mapping: &ArcBonsaiHgMapping,
+        repo_derived_data: &ArcRepoDerivedData,
+    ) -> Result<ArcCommitCloud> {
+        Ok(Arc::new(commit_cloud::CommitCloud {
+            storage: SqlCommitCloudBuilder::from_sql_connections(self.metadata_db.clone())
+                .new(false),
+            bonsai_hg_mapping: bonsai_hg_mapping.clone(),
+            repo_derived_data: repo_derived_data.clone(),
+            core_ctx: self.ctx.clone(),
+        }))
+    }
+
+    /// Function to create a logger for repos stats
+    pub async fn repo_stats_logger(&self) -> Result<ArcRepoStatsLogger> {
+        Ok(Arc::new(RepoStatsLogger::noop()))
     }
 }

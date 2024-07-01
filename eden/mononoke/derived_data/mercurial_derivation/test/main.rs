@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(fbcode_build), allow(unused_crate_dependencies))]
 
+mod augmented_manifest_tests;
 mod file_history_test;
 mod tracing_blobstore;
 mod utils;
@@ -783,12 +784,12 @@ async fn test_get_manifest_from_bonsai(fb: FacebookInit) {
         .expect("merge should have succeeded");
         let entries = get_entries(ms_hash).await.unwrap();
 
-        assert!(entries.get("1").is_some());
-        assert!(entries.get("2").is_some());
-        assert!(entries.get("3").is_some());
-        assert!(entries.get("4").is_some());
-        assert!(entries.get("5").is_some());
-        assert!(entries.get("base").is_none());
+        assert!(entries.contains_key("1"));
+        assert!(entries.contains_key("2"));
+        assert!(entries.contains_key("3"));
+        assert!(entries.contains_key("4"));
+        assert!(entries.contains_key("5"));
+        assert!(!entries.contains_key("base"));
 
         // check trivial merge reuse of p1. This is different to Mercurial, but still OK.
         // It biases us towards looking at p1 history for a file whose content is identical

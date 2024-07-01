@@ -8,17 +8,16 @@
 mod copy_trace;
 mod dag_copy_trace;
 mod error;
-mod git_copy_trace;
 mod rename_finders;
 mod utils;
 
 pub use crate::copy_trace::CopyTrace;
 pub use crate::copy_trace::TraceResult;
 pub use crate::dag_copy_trace::DagCopyTrace;
-pub use crate::git_copy_trace::GitCopyTrace;
 pub use crate::rename_finders::ContentSimilarityRenameFinder;
 pub use crate::rename_finders::MetadataRenameFinder;
 pub use crate::rename_finders::RenameFinder;
+pub use crate::utils::content_similarity;
 pub use crate::utils::is_content_similar;
 
 #[cfg(test)]

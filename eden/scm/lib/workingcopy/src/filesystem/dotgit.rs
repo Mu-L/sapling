@@ -44,10 +44,8 @@ impl DotGitFileSystem {
         store: Arc<dyn FileStore>,
         config: &dyn Config,
     ) -> Result<Self> {
-        let git = RunGitOptions {
-            git_dir: Some(vfs.root().join(".git")),
-            ..RunGitOptions::from_config(config)
-        };
+        let mut git = RunGitOptions::from_config(config);
+        git.set_git_dir(vfs.root().join(".git"));
         let treestate = create_treestate(&git, dot_dir, vfs.case_sensitive())?;
         let treestate = Arc::new(Mutex::new(treestate));
         Ok(DotGitFileSystem {
@@ -164,12 +162,7 @@ impl FileSystem for DotGitFileSystem {
         manifests: &[Arc<TreeManifest>],
         dot_dir: &'static str,
     ) -> Result<Option<DynMatcher>> {
-        crate::sparse::sparse_matcher(
-            &self.vfs,
-            manifests,
-            self.store.clone(),
-            &self.vfs.root().join(dot_dir),
-        )
+        Ok(None)
     }
 
     fn set_parents(&self, p1: HgId, p2: Option<HgId>, p1_tree: Option<HgId>) -> Result<()> {

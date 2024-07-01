@@ -1,11 +1,9 @@
-#debugruntest-compatible
 #require fsmonitor icasefs no-eden
 
 (Run this test using HGFSMONITOR_TESTS=1)
 
 Updating across a rename
 
-  $ configure modernclient
   $ newclientrepo
 
   $ echo >> a

@@ -5,6 +5,8 @@
  * GNU General Public License version 2.
  */
 
+#![feature(async_closure)]
+
 mod mem_writes_changesets;
 use std::collections::HashMap;
 use std::path::Path;
@@ -46,6 +48,7 @@ use mononoke_app::fb303::AliveService;
 use mononoke_app::fb303::Fb303AppExtension;
 use mononoke_app::MononokeApp;
 use mononoke_app::MononokeAppBuilder;
+use mononoke_types::hash::GitSha1;
 use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
 use repo_authorization::AuthorizationContext;
@@ -153,6 +156,14 @@ struct GitimportArgs {
     /// commits which are not derived may create high load for the derived data service
     #[clap(long)]
     bypass_derived_data_backfilling: bool,
+    /// The refs to exclude while importing the repo. Can be used to skip cross-synced refs to avoid
+    /// race condition with live gitimport
+    #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
+    exclude_refs: Vec<String>,
+    /// The refs to be included while importing the repo. When provided, gitimport will only import the
+    /// explicitly specified refs
+    #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
+    include_refs: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -222,7 +233,6 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
     } else {
         repo
     };
-
     let backfill_derivation = if args.bypass_derived_data_backfilling {
         if args.generate_bookmarks {
             warn!(
@@ -349,11 +359,27 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                 .build()
                 .await
                 .context("failed to build RepoContext")?;
+            let existing_tags = repo
+                .inner()
+                .bonsai_tag_mapping
+                .get_all_entries()
+                .await
+                .context("Failed to fetch bonsai tag mapping")?
+                .into_iter()
+                .map(|entry| (entry.tag_name, entry.tag_hash))
+                .collect::<HashMap<_, _>>();
             for (maybe_tag_id, name, changeset) in
                 mapping
                     .iter()
                     .filter_map(|(maybe_tag_id, name, changeset)| {
-                        changeset.map(|cs| (maybe_tag_id, name, cs))
+                        // Exclude the ref if its specified in the exclude-list OR if its not explicitly specified in the include-list (if exists)
+                        let exclude_ref = args.exclude_refs.contains(name)
+                            || !(args.include_refs.is_empty() || args.include_refs.contains(name));
+                        if exclude_ref {
+                            None
+                        } else {
+                            changeset.map(|cs| (maybe_tag_id, name, cs))
+                        }
                     })
             {
                 let final_changeset = changeset.clone();
@@ -369,13 +395,29 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                     continue;
                 }
                 if let Some(tag_id) = maybe_tag_id {
-                    // The ref getting imported is a tag, so store the raw git Tag object.
-                    upload_git_tag(&ctx, &uploader, path, &prefs, tag_id).await?;
-                    // Create the changeset corresponding to the commit pointed to by the tag.
-                    create_changeset_for_annotated_tag(
-                        &ctx, &uploader, path, &prefs, tag_id, changeset,
-                    )
-                    .await?;
+                    let new_or_updated_tag = existing_tags.get(&name).map_or(true, |tag_hash| {
+                        if let Ok(new_hash) = GitSha1::from_object_id(tag_id) {
+                            *tag_hash != new_hash
+                        } else {
+                            false
+                        }
+                    });
+                    // Only upload the tag if it's new or has changed.
+                    if new_or_updated_tag {
+                        // The ref getting imported is a tag, so store the raw git Tag object.
+                        upload_git_tag(&ctx, &uploader, path, &prefs, tag_id).await?;
+                        // Create the changeset corresponding to the commit pointed to by the tag.
+                        create_changeset_for_annotated_tag(
+                            &ctx,
+                            &uploader,
+                            path,
+                            &prefs,
+                            tag_id,
+                            Some(name.clone()),
+                            changeset,
+                        )
+                        .await?;
+                    }
                 }
                 let bookmark_key = BookmarkKey::new(&name)?;
 
@@ -404,6 +446,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                                     Some(old_changeset),
                                     allow_non_fast_forward,
                                     pushvars.as_ref(),
+                                    Some(gitimport_result.len()),
                                 )
                                 .await
                                 .with_context(|| format!("failed to move bookmark {name} from {old_changeset:?} to {final_changeset:?}"))?;
@@ -421,7 +464,12 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                     // The bookmark doesn't yet exist. Create it.
                     None => {
                         repo_context
-                            .create_bookmark(&bookmark_key, final_changeset, pushvars.as_ref())
+                            .create_bookmark(
+                                &bookmark_key,
+                                final_changeset,
+                                pushvars.as_ref(),
+                                Some(gitimport_result.len()),
+                            )
                             .await
                             .with_context(|| {
                                 format!("failed to create bookmark {name} during gitimport")

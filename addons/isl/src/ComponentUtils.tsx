@@ -28,6 +28,9 @@ const styles = stylex.create({
   spacer: {
     flexGrow: 1,
   },
+  alignStart: {
+    alignItems: 'flex-start',
+  },
 });
 
 export type ReactProps<T extends HTMLElement> = React.DetailedHTMLProps<React.HTMLAttributes<T>, T>;
@@ -41,8 +44,13 @@ export function LargeSpinner() {
 }
 
 export function Center(props: ContainerProps) {
-  const {className, ...rest} = props;
-  return <div {...stylexPropsWithClassName(styles.center, className)} {...rest} />;
+  const {className, xstyle, ...rest} = props;
+  return (
+    <div
+      {...stylexPropsWithClassName([styles.center, xstyle].filter(notEmpty), className)}
+      {...rest}
+    />
+  );
 }
 
 /** Flexbox container with horizontal children. */
@@ -70,14 +78,20 @@ export function FlexSpacer() {
   return <div {...stylex.props(styles.spacer)} />;
 }
 
-type ContainerProps = ReactProps<HTMLDivElement> & {xstyle?: stylex.StyleXStyles};
+type ContainerProps = ReactProps<HTMLDivElement> & {xstyle?: stylex.StyleXStyles} & {
+  /** If true, use alignItems: flex-start instead of centering */
+  alignStart?: boolean;
+};
 
 /** See `<Row>` and `<Column>`. */
 function FlexBox(props: ContainerProps, flexDirection: 'row' | 'column') {
-  const {className, style, ...rest} = props;
+  const {className, style, alignStart, xstyle, ...rest} = props;
   return (
     <div
-      {...stylexPropsWithClassName([styles.flex, props.xstyle].filter(notEmpty), className)}
+      {...stylexPropsWithClassName(
+        [styles.flex, alignStart && styles.alignStart, xstyle].filter(notEmpty),
+        className,
+      )}
       {...rest}
       style={{flexDirection, ...style}}
     />

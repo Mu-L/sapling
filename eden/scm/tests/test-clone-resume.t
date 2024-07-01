@@ -1,9 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
 
-  $ configure modernclient
   $ setconfig devel.segmented-changelog-rev-compat=true
   $ setconfig clone.nativecheckout=True
   $ setconfig checkout.use-rust=true
@@ -24,7 +22,8 @@ Bare clone the repo
 
 Set a failpoint to force incomplete checkout.
   $ FAILPOINTS=checkout-post-progress=return hg checkout tip
-  abort: checkout error: Error set by checkout-post-progress FAILPOINTS
+  abort: checkout errors:
+   Error set by checkout-post-progress FAILPOINTS
   [255]
 
 Verify we see the warning for other commands
@@ -50,6 +49,7 @@ Verify we can disable resumable checkouts
   $ chmod -R a-w dir2
   $ hg checkout tip --config checkout.resumable=False
   abort: * (glob)
+   dir2/x: Permission denied (os error 13) (unix-permissions !)
   [255]
   $ chmod -R a+w dir2
   $ test -f .hg/updateprogress

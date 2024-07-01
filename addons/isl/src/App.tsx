@@ -27,6 +27,7 @@ import {TopLevelToast} from './TopLevelToast';
 import {ViewportOverlayRoot} from './ViewportOverlay';
 import {tracker} from './analytics';
 import {enableReactTools, enableReduxTools} from './atoms/debugToolAtoms';
+import {Button} from './components/Button';
 import {islDrawerState} from './drawerState';
 import {GettingStartedModal} from './gettingStarted/GettingStartedModal';
 import {I18nSupport, t, T} from './i18n';
@@ -41,7 +42,6 @@ import {ModalContainer} from './useModal';
 import {usePromise} from './usePromise';
 import {isDev, isTest} from './utils';
 import * as stylex from '@stylexjs/stylex';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {Provider, atom, useAtomValue, useSetAtom, useStore} from 'jotai';
 import React, {useMemo} from 'react';
 import {ContextMenus} from 'shared/ContextMenu';
@@ -258,32 +258,40 @@ function ISLNullState({repoError}: {repoError: RepositoryError}) {
       }
     } else if (repoError.type === 'cwdDoesNotExist') {
       content = (
-        <ErrorNotice
-          title={
-            <T replace={{$cwd: repoError.cwd}}>
-              cwd $cwd does not exist. Make sure the folder exists.
-            </T>
-          }
-          error={
-            new Error(
-              t('$cwd not found', {
-                replace: {$cwd: repoError.cwd},
-              }),
-            )
-          }
-          buttons={[
-            <VSCodeButton
-              key="help-button"
-              appearance="secondary"
-              onClick={e => {
-                platform.openExternalLink('https://sapling-scm.com/docs/introduction/installation');
-                e.preventDefault();
-                e.stopPropagation();
-              }}>
-              <T>See installation docs</T>
-            </VSCodeButton>,
-          ]}
-        />
+        <>
+          {Internal.InternalInstallationDocs ? (
+            <Internal.InternalInstallationDocs repoError={repoError} />
+          ) : (
+            <ErrorNotice
+              title={
+                <T replace={{$cwd: repoError.cwd}}>
+                  cwd $cwd does not exist. Make sure the folder exists.
+                </T>
+              }
+              error={
+                new Error(
+                  t('$cwd not found', {
+                    replace: {$cwd: repoError.cwd},
+                  }),
+                )
+              }
+              buttons={[
+                <Button
+                  key="help-button"
+                  onClick={e => {
+                    platform.openExternalLink(
+                      'https://sapling-scm.com/docs/introduction/installation',
+                    );
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}>
+                  <T>See installation docs</T>
+                </Button>,
+              ]}
+            />
+          )}
+          <CwdSelections dismiss={() => null} />
+        </>
       );
     } else if (repoError.type === 'invalidCommand') {
       if (Internal.InvalidSlCommand) {
@@ -298,9 +306,8 @@ function ISLNullState({repoError}: {repoError: RepositoryError}) {
             }
             details={<T replace={{$path: repoError.path ?? '(no path found)'}}>PATH: $path'</T>}
             buttons={[
-              <VSCodeButton
+              <Button
                 key="help-button"
-                appearance="secondary"
                 onClick={e => {
                   platform.openExternalLink(
                     'https://sapling-scm.com/docs/introduction/installation',
@@ -309,7 +316,7 @@ function ISLNullState({repoError}: {repoError: RepositoryError}) {
                   e.stopPropagation();
                 }}>
                 <T>See installation docs</T>
-              </VSCodeButton>,
+              </Button>,
             ]}
           />
         );

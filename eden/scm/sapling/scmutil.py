@@ -936,6 +936,11 @@ def addremove(repo, matcher, prefix, opts=None, dry_run=None, similarity=None):
     if similarity is None:
         similarity = float(opts.get("similarity") or 0)
 
+    # Is there a better place for this?
+    from . import git
+
+    git.maybe_cleanup_submodule_in_treestate(repo)
+
     rejected = []
 
     def badfn(f, msg):
@@ -1041,7 +1046,7 @@ def _findrenames(repo, matcher, added, removed, similarity):
         for old, new, score in similar.findrenames(repo, added, removed, similarity):
             if repo.ui.verbose or not matcher.exact(old) or not matcher.exact(new):
                 repo.ui.status(
-                    _("recording removal of %s as rename to %s " "(%d%% similar)\n")
+                    _("recording removal of %s as rename to %s (%d%% similar)\n")
                     % (matcher.rel(old), matcher.rel(new), score * 100)
                 )
             renames[new] = old

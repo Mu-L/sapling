@@ -204,6 +204,9 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   folly::SemiFuture<folly::Unit> semifuture_prefetchFiles(
       std::unique_ptr<PrefetchParams> params) override;
 
+  folly::SemiFuture<std::unique_ptr<PrefetchResult>> semifuture_prefetchFilesV2(
+      std::unique_ptr<PrefetchParams> params) override;
+
   folly::SemiFuture<std::unique_ptr<Glob>> semifuture_predictiveGlobFiles(
       std::unique_ptr<GlobParams> params) override;
 
@@ -276,6 +279,10 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   semifuture_debugGetBlobMetadata(
       std::unique_ptr<DebugGetBlobMetadataRequest> request) override;
 
+  folly::SemiFuture<std::unique_ptr<DebugGetScmTreeResponse>>
+  semifuture_debugGetTree(
+      std::unique_ptr<DebugGetScmTreeRequest> request) override;
+
   void debugInodeStatus(
       std::vector<TreeInodeDebugInfo>& inodeInfo,
       std::unique_ptr<std::string> mountPoint,
@@ -297,6 +304,10 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
 
   void debugOutstandingThriftRequests(
       std::vector<ThriftRequestMetadata>& outstandingCalls) override;
+
+  void debugOutstandingHgEvents(
+      std::vector<HgEvent>& outstandingEvents,
+      std::unique_ptr<std::string> mountPoint) override;
 
   void debugStartRecordingActivity(
       ActivityRecorderResult& result,
@@ -369,6 +380,9 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   void injectFault(std::unique_ptr<FaultDefinition> fault) override;
   bool removeFault(std::unique_ptr<RemoveFaultArg> fault) override;
   int64_t unblockFault(std::unique_ptr<UnblockFaultArg> info) override;
+  void getBlockedFaults(
+      GetBlockedFaultsResponse& out,
+      std::unique_ptr<GetBlockedFaultsRequest> request) override;
 
   folly::SemiFuture<std::unique_ptr<SetPathObjectIdResult>>
   semifuture_setPathObjectId(

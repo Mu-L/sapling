@@ -11,7 +11,7 @@ import type react from 'react';
 import {layout} from '../stylexUtils';
 import {spacing} from '../tokens.stylex';
 import * as stylex from '@stylexjs/stylex';
-import {useId} from 'react';
+import {useEffect, useId, useRef} from 'react';
 
 const cssVarFocusWithinBorder = '--checkbox-focus-within-color';
 const styles = stylex.create({
@@ -24,7 +24,6 @@ const styles = stylex.create({
     alignItems: 'center',
     position: 'relative',
     outline: 'none',
-    marginRight: spacing.pad,
     userSelect: 'none',
   },
   input: {
@@ -32,6 +31,13 @@ const styles = stylex.create({
     outline: 'none',
     appearance: 'none',
     position: 'absolute',
+  },
+  disabled: {
+    opacity: 0.5,
+    cursor: 'not-allowed',
+  },
+  withChildren: {
+    marginRight: spacing.pad,
   },
   checkmark: {
     background: 'var(--checkbox-background)',
@@ -63,30 +69,67 @@ function Checkmark({checked}: {checked: boolean}) {
   );
 }
 
+function Indeterminate() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      xmlns="http://www.w3.org/2000/svg"
+      fill={'currentColor'}
+      {...stylex.props(styles.checkmark)}>
+      <rect x="4" y="4" height="8" width="8" rx="2" />
+    </svg>
+  );
+}
+
 export function Checkbox({
   children,
   checked,
   onChange,
+  disabled,
+  indeterminate,
   xstyle,
   ...rest
 }: {
-  children: react.ReactNode;
+  children?: react.ReactNode;
   checked: boolean;
-  onChange: (checked: boolean) => unknown;
+  /** "indeterminate" state is neither true nor false, and renders as a box instead of a checkmark.
+   * Usually represents partial selection of children. */
+  indeterminate?: boolean;
+  disabled?: boolean;
+  onChange?: (checked: boolean) => unknown;
   xstyle?: stylex.StyleXStyles;
 } & Omit<ReactProps<HTMLInputElement>, 'onChange'>) {
   const id = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Indeterminate cannot be set in HTML, use an effect to synchronize
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.indeterminate = indeterminate === true;
+    }
+  }, [indeterminate]);
   return (
-    <label htmlFor={id} {...stylex.props(layout.flexRow, styles.label, xstyle)}>
+    <label
+      htmlFor={id}
+      {...stylex.props(
+        layout.flexRow,
+        styles.label,
+        children != null && styles.withChildren,
+        disabled && styles.disabled,
+        xstyle,
+      )}>
       <input
+        ref={inputRef}
         type="checkbox"
         id={id}
         checked={checked}
-        onChange={e => onChange(e.target.checked)}
+        onChange={e => !disabled && onChange?.(e.target.checked)}
+        disabled={disabled}
         {...stylex.props(styles.input)}
         {...rest}
       />
-      <Checkmark checked={checked} />
+      {indeterminate === true ? <Indeterminate /> : <Checkmark checked={checked} />}
       {children}
     </label>
   );

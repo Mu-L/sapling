@@ -226,6 +226,9 @@ fn parse_with_repo_definition(
         everstore_local_path,
         git_concurrency,
         metadata_logger_config,
+        zelos_config,
+        bookmark_name_for_objects_count,
+        default_objects_count,
         ..
     } = named_repo_config;
 
@@ -343,6 +346,7 @@ fn parse_with_repo_definition(
     let deep_sharding_config = deep_sharding_config.convert()?;
     let git_concurrency = git_concurrency.convert()?;
     let metadata_logger_config = metadata_logger_config.convert()?.unwrap_or_default();
+    let zelos_config = zelos_config.convert()?;
 
     Ok(RepoConfig {
         enabled,
@@ -388,6 +392,9 @@ fn parse_with_repo_definition(
         everstore_local_path,
         git_concurrency,
         metadata_logger_config,
+        zelos_config,
+        bookmark_name_for_objects_count,
+        default_objects_count,
     })
 }
 
@@ -432,6 +439,11 @@ fn parse_common_config(
     let scuba_censored_table = common.scuba_censored_table;
     let scuba_censored_local_path = common.scuba_local_path_censored;
     let internal_identity = common.internal_identity.convert()?;
+    let git_memory_upper_bound = common
+        .git_memory_upper_bound
+        .map(|bound| bound.try_into())
+        .transpose()?;
+    let edenapi_dumper_scuba_table = common.edenapi_dumper_scuba_table;
 
     let censored_scuba_params = CensoredScubaParams {
         table: scuba_censored_table,
@@ -471,6 +483,8 @@ fn parse_common_config(
         censored_scuba_params,
         redaction_config,
         internal_identity,
+        git_memory_upper_bound,
+        edenapi_dumper_scuba_table,
     })
 }
 
@@ -840,6 +854,7 @@ mod test {
             [[hooks]]
             name="hook2a"
             implementation="hook2"
+            log_only=true
             config_ints={ int1 = 44 }
             config_ints_64={ int2 = 42 }
             [hooks.config_string_lists]
@@ -896,7 +911,7 @@ mod test {
             [walker_config]
             scrub_enabled = true
             validate_enabled = true
-            
+
             [git_concurrency]
             trees_and_blobs = 500
             commits = 1000
@@ -924,6 +939,10 @@ mod test {
 
             [commit_graph_config]
             scuba_table = "commit_graph"
+
+            [metadata_logger_config]
+            bookmarks = ["master", "release"]
+            sleep_interval_secs = 100
 
             [deep_sharding_config.status]
         "#;
@@ -955,6 +974,8 @@ mod test {
             scuba_censored_table="censored_table"
             scuba_local_path_censored="censored_local_path"
             trusted_parties_hipster_tier="tier1"
+            git_memory_upper_bound=100
+            edenapi_dumper_scuba_table="dumped_requests"
 
             [internal_identity]
             identity_type = "SERVICE_IDENTITY"
@@ -977,6 +998,7 @@ mod test {
         sparse_profiles = { db_address = "sparse_profiles_db_address" }
         bonsai_blob_mapping = { sharded = { shard_map = "blob_mapping_shards", shard_num = 12 } }
         deletion_log = { db_address = "deletion_log" }
+        commit_cloud = { db_address = "commit_cloud_db_address" }
 
         [main.blobstore.multiplexed_wal]
         multiplex_id = 1
@@ -1087,6 +1109,9 @@ mod test {
                 deletion_log: Some(RemoteDatabaseConfig {
                     db_address: "deletion_log".into(),
                 }),
+                commit_cloud: Some(RemoteDatabaseConfig {
+                    db_address: "commit_cloud_db_address".into(),
+                }),
             }),
             ephemeral_blobstore: None,
         };
@@ -1143,6 +1168,7 @@ mod test {
                         config: HookConfig {
                             bypass: Some(HookBypass::new_with_commit_msg("@allow_hook1".into())),
                             options: Some(r#"{"test": "abcde"}"#.to_string()),
+                            log_only: false,
                             strings: hashmap! {},
                             ints: hashmap! {},
                             ints_64: hashmap! {},
@@ -1157,6 +1183,7 @@ mod test {
                         config: HookConfig {
                             bypass: None,
                             options: None,
+                            log_only: true,
                             strings: hashmap! {},
                             ints: hashmap! {
                                 "int1".into() => 44,
@@ -1241,6 +1268,8 @@ mod test {
                         blame_filesize_limit: Some(101),
                         hg_set_committer_extra: false,
                         blame_version: BlameVersion::V2,
+                        git_delta_manifest_version: Default::default(),
+                        git_delta_manifest_v2_config: Default::default(),
                     },],
                     scuba_table: None,
                 },
@@ -1311,6 +1340,7 @@ mod test {
                 commit_graph_config: CommitGraphConfig {
                     scuba_table: Some("commit_graph".to_string()),
                     preloaded_commit_graph_blobstore_key: None,
+                    disable_commit_graph_v2_with_empty_common: false,
                 },
                 deep_sharding_config: Some(ShardingModeConfig { status: hashmap!() }),
                 everstore_local_path: None,
@@ -1319,7 +1349,16 @@ mod test {
                     commits: 1000,
                     tags: 1000,
                 }),
-                metadata_logger_config: MetadataLoggerConfig::default(),
+                metadata_logger_config: MetadataLoggerConfig {
+                    bookmarks: vec![
+                        BookmarkKey::new("master").unwrap(),
+                        BookmarkKey::new("release").unwrap(),
+                    ],
+                    sleep_interval_secs: 100,
+                },
+                zelos_config: None,
+                bookmark_name_for_objects_count: None,
+                default_objects_count: None,
             },
         );
 
@@ -1397,6 +1436,9 @@ mod test {
                 everstore_local_path: None,
                 git_concurrency: None,
                 metadata_logger_config: MetadataLoggerConfig::default(),
+                zelos_config: None,
+                bookmark_name_for_objects_count: None,
+                default_objects_count: None,
             },
         );
         assert_eq!(
@@ -1422,7 +1464,9 @@ mod test {
                 internal_identity: Identity {
                     id_type: "SERVICE_IDENTITY".to_string(),
                     id_data: "internal".to_string(),
-                }
+                },
+                git_memory_upper_bound: Some(100),
+                edenapi_dumper_scuba_table: Some("dumped_requests".to_string()),
             }
         );
         assert_eq!(
@@ -1554,6 +1598,7 @@ mod test {
         filenodes = { sharded = { shard_map = "some-shards", shard_num = 123 } }
         mutation = { db_address = "some_db" }
         sparse_profiles = { db_address = "some_db" }
+        commit_cloud = { db_address = "some_db" }
 
         [multiplex_store.blobstore.multiplexed_wal]
         multiplex_id = 1
@@ -1641,6 +1686,9 @@ mod test {
                         },
                         bonsai_blob_mapping: None,
                         deletion_log: None,
+                        commit_cloud:  Some(RemoteDatabaseConfig {
+                            db_address: "some_db".into(),
+                        }),
                     }),
                     ephemeral_blobstore: None,
                 },
@@ -1692,6 +1740,7 @@ mod test {
         filenodes = { sharded = { shard_map = "other-other-shards", shard_num = 789 } }
         mutation = { db_address = "other_other_mutation_db" }
         sparse_profiles = { db_address = "test_db" }
+        commit_cloud = { db_address = "other_other_other_mutation_db" }
 
         [storage.multiplex_store.blobstore]
         disabled = {}
@@ -1737,6 +1786,7 @@ mod test {
                         sparse_profiles: RemoteDatabaseConfig { db_address: "test_db".into(), },
                         bonsai_blob_mapping: None,
                         deletion_log: None,
+                        commit_cloud: Some(RemoteDatabaseConfig { db_address: "other_other_other_mutation_db".into(), }),
                     }),
 
                     ephemeral_blobstore: None,

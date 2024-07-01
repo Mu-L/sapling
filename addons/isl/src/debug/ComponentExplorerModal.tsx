@@ -13,13 +13,16 @@ import {Link} from '../Link';
 import {Tooltip} from '../Tooltip';
 import {Badge} from '../components/Badge';
 import {Button} from '../components/Button';
+import {ButtonDropdown} from '../components/ButtonDropdown';
 import {Checkbox} from '../components/Checkbox';
 import {Divider} from '../components/Divider';
 import {Dropdown} from '../components/Dropdown';
+import {Panels} from '../components/Panels';
 import {RadioGroup} from '../components/Radio';
 import {Tag} from '../components/Tag';
 import {TextArea} from '../components/TextArea';
 import {TextField} from '../components/TextField';
+import {Typeahead} from '../components/Typeahead';
 import {T} from '../i18n';
 import {layout} from '../stylexUtils';
 import {colors, font, radius, spacing} from '../tokens.stylex';
@@ -41,6 +44,18 @@ export default function ComponentExplorer(_: {dismiss: (_: unknown) => unknown})
   const [checkbox1, setCheckbox1] = useState(false);
   const [checkbox2, setCheckbox2] = useState(true);
   const [dropdownChoice, setDropdownChoice] = useState('B');
+  const buttonDropdownOptions = [
+    {
+      id: 'action 1',
+      label: 'Action 1',
+    },
+    {
+      id: 'action 2',
+      label: 'Action 2',
+    },
+  ];
+  const [activePanel, setActivePanel] = useState<'fruit' | 'vegetables'>('fruit');
+  const [buttonDropdownChoice, setButtonDropdownChoice] = useState(buttonDropdownOptions[0]);
   return (
     <div {...stylex.props(styles.container)}>
       <h2>
@@ -138,11 +153,64 @@ export default function ComponentExplorer(_: {dismiss: (_: unknown) => unknown})
           />
         </Row>
         <Row>
+          <ButtonDropdown
+            icon={<Icon icon="rocket" />}
+            options={buttonDropdownOptions}
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+          <ButtonDropdown
+            options={buttonDropdownOptions}
+            buttonDisabled
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+          <ButtonDropdown
+            options={buttonDropdownOptions}
+            pickerDisabled
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+          <ButtonDropdown
+            icon={<Icon icon="rocket" />}
+            kind="icon"
+            options={buttonDropdownOptions}
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+          <ButtonDropdown
+            kind="icon"
+            options={buttonDropdownOptions}
+            buttonDisabled
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+          <ButtonDropdown
+            kind="icon"
+            options={buttonDropdownOptions}
+            pickerDisabled
+            selected={buttonDropdownChoice}
+            onClick={selected => console.log('click!', selected)}
+            onChangeSelected={setButtonDropdownChoice}
+          />
+        </Row>
+        <Row>
           <Checkbox checked={checkbox1} onChange={setCheckbox1}>
             Checkbox
           </Checkbox>
           <Checkbox checked={checkbox2} onChange={setCheckbox2}>
             Checked
+          </Checkbox>
+          <Checkbox checked={false} indeterminate onChange={console.log}>
+            Indeterminate
+          </Checkbox>
+          <Checkbox checked disabled onChange={setCheckbox1}>
+            Disabled
           </Checkbox>
           <RadioGroup
             choices={[
@@ -174,6 +242,10 @@ export default function ComponentExplorer(_: {dismiss: (_: unknown) => unknown})
             Thing
           </Tooltip>
         </Row>
+        <Row>
+          <span>Typeahead:</span>
+          <ExampleTypeahead />
+        </Row>
 
         <Row>
           <Banner>Banner</Banner>
@@ -186,6 +258,16 @@ export default function ComponentExplorer(_: {dismiss: (_: unknown) => unknown})
             title="Error Notice"
             description="description"
             details="details / stack trace"
+          />
+        </Row>
+        <Row>
+          <Panels
+            active={activePanel}
+            panels={{
+              fruit: {label: 'Fruit', render: () => <div>Apple</div>},
+              vegetables: {label: 'Vegetables', render: () => <div>Broccoli</div>},
+            }}
+            onSelect={setActivePanel}
           />
         </Row>
         <GroupName>Spacing</GroupName>
@@ -271,4 +353,42 @@ function Row({children, style}: {children: ReactNode; style?: stylex.StyleXStyle
 
 function GroupName({children}: {children: ReactNode}) {
   return <div {...stylex.props(styles.groupName)}>{children}</div>;
+}
+
+function ExampleTypeahead() {
+  const [value, setValue] = useState('');
+
+  const possibleValues = [
+    'apple',
+    'banana',
+    'cherry',
+    'date',
+    'elderberry',
+    'fig',
+    'grape',
+    'honeydew',
+    'jackfruit',
+    'kiwi',
+  ];
+  const fetchTokens = async (searchTerm: string) => {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return {
+      values: possibleValues
+        .filter(v => v.includes(searchTerm))
+        .map(value => ({
+          label: value,
+          value,
+        })),
+      fetchStartTimestamp: Date.now(),
+    };
+  };
+  return (
+    <Typeahead
+      tokenString={value}
+      setTokenString={setValue}
+      fetchTokens={fetchTokens}
+      autoFocus={false}
+      maxTokens={3}
+    />
+  );
 }

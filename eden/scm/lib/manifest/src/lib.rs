@@ -79,6 +79,10 @@ pub trait Manifest {
         Ok(result)
     }
 
+    fn contains_file(&self, file_path: &RepoPath) -> Result<bool> {
+        Ok(self.get_file(file_path)?.is_some())
+    }
+
     /// Returns an iterator over all the files in the Manifest that satisfy the given Matcher.
     fn files<'a, M: 'static + Matcher + Sync + Send>(
         &'a self,

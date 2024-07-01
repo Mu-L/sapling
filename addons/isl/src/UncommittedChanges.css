@@ -171,6 +171,8 @@
 .file-actions {
   display: flex;
   flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--halfpad);
 }
 
 .file-actions .tooltip-creator {
@@ -237,17 +239,18 @@
 .uncommitted-changes .button-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0 var(--pad);
+  gap: var(--halfpad) var(--pad);
   align-items: center;
 }
 
-.quick-commit-inputs vscode-text-field {
+.quick-commit-inputs input[type='text'] {
   opacity: 0;
   transition: opacity 0.1s;
+  z-index: 1;
 }
-.uncommitted-changes:hover vscode-text-field,
-.uncommitted-changes vscode-text-field:focus-within,
-.quick-commit-inputs vscode-text-field:not([current-value='']) {
+.uncommitted-changes:hover input[type='text'],
+.uncommitted-changes input[type='text']:focus-within,
+.quick-commit-inputs input[type='text']:not(:placeholder-shown) {
   opacity: 1;
 }
 

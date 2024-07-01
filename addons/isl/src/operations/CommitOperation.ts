@@ -18,6 +18,7 @@ import {DagCommitInfo} from '../dag/dagCommitInfo';
 import {t} from '../i18n';
 import {readAtom} from '../jotaiUtils';
 import {uncommittedChangesWithPreviews} from '../previews';
+import {authorString} from '../serverAPIState';
 import {Operation} from './Operation';
 
 export class CommitOperation extends Operation {
@@ -111,12 +112,19 @@ export class CommitOperation extends Operation {
       return dag;
     }
 
+    const now = new Date(Date.now());
+
+    // The fake optimistic commit can be resolved into a real commit by taking the
+    // first child of the given parent that's created after the commit operation was created.
+    const optimisticRevset = `first(sort((children(${base})-${base}) & date(">${now.toUTCString()}"),date))`;
+
     // NOTE: We might want to check the "active bookmark" state
     // and update bookmarks accordingly.
     const hash = `OPTIMISTIC_COMMIT_${base}`;
     const description = this.message.slice(title.length);
+    const author = readAtom(authorString);
     const info = DagCommitInfo.fromCommitInfo({
-      author: baseInfo?.author ?? '',
+      author: author ?? baseInfo?.author ?? '',
       description,
       title,
       bookmarks: [],
@@ -124,10 +132,11 @@ export class CommitOperation extends Operation {
       isDot: true,
       parents: [base],
       hash,
+      optimisticRevset,
       phase: 'draft',
       filesSample: this.optimisticChangedFiles,
       totalFileCount: this.optimisticChangedFiles.length,
-      date: new Date(),
+      date: now,
     });
 
     return dag.replaceWith([base, hash], (h, _c) => {

@@ -127,11 +127,14 @@ class deferredpullattempt(pullattempt):
         return None
 
 
+@util.no_recursion
 def calculate_attempts(repo, xs):
-    """Calculate the "pullattempt"s for the given names."""
+    """Calculate the "pullattempt"s for the given names.
+    This function might return None or a list.
+    """
     # If paths.default is not set. Do not attempt to pull.
     if repo.ui.paths.get("default") is None:
-        return False
+        return
 
     def sortkey(tup):
         name, func = tup
@@ -250,6 +253,24 @@ def _pullhoistnames(repo, x):
             # XXX: remotenames.hoist config should be the "source" but is
             # ignored here. See "_pullremotebookmarks" for reasons.
             return pullattempt(bookmarknames=[x])
+
+
+@builtinautopullpredicate("commitschemes", priority=100, rewritepullrev=True)
+def _commitscheme(repo, x, rewritepullrev=False):
+    # Translate commit of a foreign scheme to local repo's scheme.
+    if not repo.commitscheme.possible_schemes(x):
+        return None
+
+    def generateattempt() -> Optional[pullattempt]:
+        localnode = repo.commitscheme.translate(x, "local")
+        if not localnode:
+            return None
+        return pullattempt(headnodes=[localnode])
+
+    if rewritepullrev:
+        return generateattempt()
+    else:
+        return deferredpullattempt(generate=generateattempt)
 
 
 def loadpredicate(ui, extname, registrarobj):

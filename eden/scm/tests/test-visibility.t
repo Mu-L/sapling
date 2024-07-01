@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -6,7 +5,7 @@
   $ enable amend rebase undo directaccess shelve
   $ setconfig experimental.evolution=obsolete
   $ setconfig visibility.enabled=true visibility.verbose=true
-  $ setconfig mutation.record=true mutation.enabled=true mutation.date="0 0"
+  $ setconfig mutation.enabled=true
   $ setconfig hint.ack=undo
 
 Useful functions
@@ -18,7 +17,6 @@ Useful functions
   > }
 
 Setup
-  $ configure modernclient
   $ newclientrepo
   $ mkcommit root
   $ mkcommit public1

@@ -264,6 +264,24 @@ struct Type {
   1: string name;
 }
 
+// # `rust.Serde`
+//
+// Selectively enable/disable derivation of serde serialization functions for a
+// given type.
+@scope.Struct
+struct Serde {
+  1: bool enabled;
+}
+
+// # `rust.Mod`
+//
+// Use this annotation to explicitly set a non-default name for the module that
+// contains the services exceptions and error types.
+@scope.Service
+struct Mod {
+  1: string name;
+}
+
 @scope.Field
 @scope.Typedef
 @scope.Struct

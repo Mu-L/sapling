@@ -1,9 +1,7 @@
-#debugruntest-compatible
 
 #require no-eden
 
 
-  $ configure modernclient
 
   $ shortlog() {
   >     hg log -G --template '{node|short} {author} {date|hgdate} - {desc|firstline}\n'

@@ -269,6 +269,31 @@ export function onOperationExited(
   });
 }
 
+/**
+ * If no operations are running or queued, returns undefined.
+ * If something is running or queued, return a Promise that resolves
+ * when there's no operation running and nothing remains queued (the UI is "idle")
+ * Does not wait for optimistic state to be resolved, only for commands to finish.
+ */
+export function waitForNothingRunning(): Promise<void> | undefined {
+  const currentOperation = readAtom(operationList).currentOperation;
+  const somethingRunning = currentOperation != null && currentOperation?.exitCode == null;
+  const anythingQueued = readAtom(queuedOperations).length > 0;
+  if (!somethingRunning && !anythingQueued) {
+    // nothing running, nothing queued -> return undefined immediately
+    return undefined;
+  }
+  return serverAPI
+    .nextMessageMatching(
+      'operationProgress',
+      // something running but nothing queued -> resolve when the operation exits
+      // something queued -> resolve when the next operation exits, but only once the queue is empty
+      // something running but exits non-zero -> everything queue'd will be cancelled anyway, resolve immediately
+      msg => msg.kind === 'exit' && (msg.exitCode !== 0 || readAtom(queuedOperations).length === 0),
+    )
+    .then(() => undefined);
+}
+
 export const queuedOperations = atomResetOnCwdChange<Array<Operation>>([]);
 registerDisposable(
   queuedOperations,
@@ -320,13 +345,7 @@ function runOperationImpl(operation: Operation): Promise<undefined | Error> {
   // and mark those to not be rewritten.
   serverAPI.postMessage({
     type: 'runOperation',
-    operation: {
-      args: operation.getArgs(),
-      id: operation.id,
-      stdin: operation.getStdin(),
-      runner: operation.runner,
-      trackEventName: operation.trackEventName,
-    },
+    operation: operation.getRunnableOperation(),
   });
   const defered = defer<undefined | Error>();
   operationCompletionCallbacks.set(operation.id, (err?: Error) => {

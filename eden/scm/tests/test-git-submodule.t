@@ -1,5 +1,5 @@
 #require git no-windows no-eden
-#debugruntest-compatible
+#modern-config-incompatible
 
   $ . $TESTDIR/git.sh
   $ setconfig diff.git=true ui.allowemptycommit=true
@@ -69,7 +69,8 @@ Checking out commits triggers submodule updates
   $ echo mod/*/*
   mod/1/A mod/1/B mod/2/C mod/2/D
 
-  $ hg checkout main
+  $ LOG=ext::sigtrace=debug hg checkout main --config extensions.sigtrace= --config sigtrace.interval=60
+  DEBUG ext::sigtrace: starting sigtrace thread
   0 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ echo mod/*/*
   mod/1/A mod/2/C

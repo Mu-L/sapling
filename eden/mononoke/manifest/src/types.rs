@@ -17,6 +17,7 @@ use blobstore::LoadableError;
 use blobstore::Storable;
 use blobstore::StoreLoadable;
 use context::CoreContext;
+use either::Either;
 use futures::stream;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
@@ -27,7 +28,6 @@ use mononoke_types::basename_suffix_skeleton_manifest_v3::BssmV3Entry;
 use mononoke_types::fsnode::Fsnode;
 use mononoke_types::fsnode::FsnodeEntry;
 use mononoke_types::fsnode::FsnodeFile;
-use mononoke_types::path::MPath;
 use mononoke_types::sharded_map_v2::LoadableShardedMapV2Node;
 use mononoke_types::skeleton_manifest::SkeletonManifest;
 use mononoke_types::skeleton_manifest::SkeletonManifestEntry;
@@ -43,7 +43,6 @@ use mononoke_types::FileUnodeId;
 use mononoke_types::FsnodeId;
 use mononoke_types::MPathElement;
 use mononoke_types::ManifestUnodeId;
-use mononoke_types::NonRootMPath;
 use mononoke_types::SkeletonManifestId;
 use mononoke_types::TrieMap;
 use serde_derive::Deserialize;
@@ -63,6 +62,8 @@ pub trait TrieMapOps<Store, Value>: Sized {
         ctx: &CoreContext,
         blobstore: &Store,
     ) -> Result<BoxStream<'async_trait, Result<(SmallVec<[u8; 24]>, Value)>>>;
+
+    fn is_empty(&self) -> bool;
 }
 
 #[async_trait]
@@ -81,6 +82,10 @@ impl<Store, V: Send> TrieMapOps<Store, V> for TrieMap<V> {
         _blobstore: &Store,
     ) -> Result<BoxStream<'async_trait, Result<(SmallVec<[u8; 24]>, V)>>> {
         Ok(stream::iter(self).map(Ok).boxed())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -117,6 +122,10 @@ impl<Store: Blobstore> TrieMapOps<Store, Entry<TestShardedManifestDirectory, ()>
             .map_ok(|(k, v)| (k, convert_test_sharded_manifest(v)))
             .boxed())
     }
+
+    fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
 }
 
 #[async_trait]
@@ -145,6 +154,10 @@ impl<Store: Blobstore> TrieMapOps<Store, Entry<BssmV3Directory, ()>>
             .map_ok(|(k, v)| (k, bssm_v3_to_mf_entry(v)))
             .boxed())
     }
+
+    fn is_empty(&self) -> bool {
+        self.size() == 0
+    }
 }
 
 #[async_trait]
@@ -172,6 +185,13 @@ pub trait AsyncManifest<Store: Send + Sync>: Sized + 'static {
         blobstore: &Store,
         prefix: &[u8],
         after: &[u8],
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>;
+    /// List all subentries, skipping the first N
+    async fn list_skip(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        skip: usize,
     ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>;
     async fn lookup(
         &self,
@@ -203,6 +223,12 @@ pub trait Manifest: Sync + Sized + 'static {
             self.list()
                 .filter(move |(k, _)| k.as_ref() > after && k.starts_with(prefix)),
         )
+    }
+    fn list_skip<'a>(
+        &'a self,
+        skip: usize,
+    ) -> Box<dyn Iterator<Item = (MPathElement, Entry<Self::TreeId, Self::LeafId>)> + 'a> {
+        Box::new(self.list().skip(skip))
     }
     fn lookup(&self, name: &MPathElement) -> Option<Entry<Self::TreeId, Self::LeafId>>;
 }
@@ -247,6 +273,21 @@ impl<M: Manifest + Send, Store: Send + Sync> AsyncManifest<Store> for M {
     {
         Ok(stream::iter(
             Manifest::list_prefix_after(self, prefix, after)
+                .map(anyhow::Ok)
+                .collect::<Vec<_>>(),
+        )
+        .boxed())
+    }
+
+    async fn list_skip(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+        skip: usize,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        Ok(stream::iter(
+            Manifest::list_skip(self, skip)
                 .map(anyhow::Ok)
                 .collect::<Vec<_>>(),
         )
@@ -390,6 +431,21 @@ impl<
             .boxed())
     }
 
+    async fn list_skip(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        skip: usize,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        let Combined(m, n) = self;
+        Ok(m.list_skip(ctx, blobstore, skip)
+            .await?
+            .zip(n.list_skip(ctx, blobstore, skip).await?)
+            .map(combine_entries::<M, N, Store>)
+            .boxed())
+    }
+
     async fn lookup(
         &self,
         ctx: &CoreContext,
@@ -407,6 +463,7 @@ impl<
             (Some(Entry::Leaf(m_leaf)), Some(Entry::Leaf(n_leaf))) => {
                 Ok(Some(Entry::Leaf(CombinedId(m_leaf, n_leaf))))
             }
+            (None, None) => Ok(None),
             _ => bail!("Found non-matching entry types during lookup for {}", name),
         }
     }
@@ -417,6 +474,133 @@ impl<
         blobstore: &Store,
     ) -> Result<Self::TrieMapType> {
         self.list(ctx, blobstore).await?.try_collect().await
+    }
+}
+
+#[async_trait]
+impl<
+    M: AsyncManifest<Store> + Send + Sync,
+    N: AsyncManifest<Store> + Send + Sync,
+    Store: Send + Sync,
+> AsyncManifest<Store> for Either<M, N>
+{
+    type TreeId = Either<<M as AsyncManifest<Store>>::TreeId, <N as AsyncManifest<Store>>::TreeId>;
+    type LeafId = Either<<M as AsyncManifest<Store>>::LeafId, <N as AsyncManifest<Store>>::LeafId>;
+    type TrieMapType =
+        Either<<M as AsyncManifest<Store>>::TrieMapType, <N as AsyncManifest<Store>>::TrieMapType>;
+
+    async fn list(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        let stream = match self {
+            Either::Left(m) => m
+                .list(ctx, blobstore)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.left_entry()))
+                .boxed(),
+            Either::Right(n) => n
+                .list(ctx, blobstore)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.right_entry()))
+                .boxed(),
+        };
+        Ok(stream)
+    }
+
+    async fn list_prefix(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        prefix: &[u8],
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        let stream = match self {
+            Either::Left(m) => m
+                .list_prefix(ctx, blobstore, prefix)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.left_entry()))
+                .boxed(),
+            Either::Right(n) => n
+                .list_prefix(ctx, blobstore, prefix)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.right_entry()))
+                .boxed(),
+        };
+        Ok(stream)
+    }
+
+    async fn list_prefix_after(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        prefix: &[u8],
+        after: &[u8],
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        let stream = match self {
+            Either::Left(m) => m
+                .list_prefix_after(ctx, blobstore, prefix, after)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.left_entry()))
+                .boxed(),
+            Either::Right(n) => n
+                .list_prefix_after(ctx, blobstore, prefix, after)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.right_entry()))
+                .boxed(),
+        };
+        Ok(stream)
+    }
+
+    async fn list_skip(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        skip: usize,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        let stream = match self {
+            Either::Left(m) => m
+                .list_skip(ctx, blobstore, skip)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.left_entry()))
+                .boxed(),
+            Either::Right(n) => n
+                .list_skip(ctx, blobstore, skip)
+                .await?
+                .map_ok(|(path, entry)| (path, entry.right_entry()))
+                .boxed(),
+        };
+        Ok(stream)
+    }
+
+    async fn lookup(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<Self::TreeId, Self::LeafId>>> {
+        match self {
+            Either::Left(m) => Ok(m.lookup(ctx, blobstore, name).await?.map(Entry::left_entry)),
+            Either::Right(n) => Ok(n
+                .lookup(ctx, blobstore, name)
+                .await?
+                .map(Entry::right_entry)),
+        }
+    }
+
+    async fn into_trie_map(
+        self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+    ) -> Result<Self::TrieMapType> {
+        match self {
+            Either::Left(m) => Ok(Either::Left(m.into_trie_map(ctx, blobstore).await?)),
+            Either::Right(n) => Ok(Either::Right(n.into_trie_map(ctx, blobstore).await?)),
+        }
     }
 }
 
@@ -473,6 +657,21 @@ impl<Store: Blobstore> AsyncManifest<Store> for BssmV3Directory {
         anyhow::Ok(
             self.clone()
                 .into_prefix_subentries_after(ctx, blobstore, prefix, after)
+                .map_ok(|(path, entry)| (path, bssm_v3_to_mf_entry(entry)))
+                .boxed(),
+        )
+    }
+
+    async fn list_skip(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        skip: usize,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        anyhow::Ok(
+            self.clone()
+                .into_subentries_skip(ctx, blobstore, skip)
                 .map_ok(|(path, entry)| (path, bssm_v3_to_mf_entry(entry)))
                 .boxed(),
         )
@@ -647,6 +846,21 @@ impl<Store: Blobstore> AsyncManifest<Store> for TestShardedManifest {
         anyhow::Ok(
             self.clone()
                 .into_prefix_subentries_after(ctx, blobstore, prefix, after)
+                .map_ok(|(path, entry)| (path, convert_test_sharded_manifest(entry)))
+                .boxed(),
+        )
+    }
+
+    async fn list_skip(
+        &self,
+        ctx: &CoreContext,
+        blobstore: &Store,
+        skip: usize,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::LeafId>)>>>
+    {
+        anyhow::Ok(
+            self.clone()
+                .into_subentries_skip(ctx, blobstore, skip)
                 .map_ok(|(path, entry)| (path, convert_test_sharded_manifest(entry)))
                 .boxed(),
         )
@@ -909,6 +1123,20 @@ impl<T, L> Entry<T, L> {
         }
     }
 
+    pub fn left_entry<T2, L2>(self) -> Entry<Either<T, T2>, Either<L, L2>> {
+        match self {
+            Entry::Tree(tree) => Entry::Tree(Either::Left(tree)),
+            Entry::Leaf(leaf) => Entry::Leaf(Either::Left(leaf)),
+        }
+    }
+
+    pub fn right_entry<T2, L2>(self) -> Entry<Either<T2, T>, Either<L2, L>> {
+        match self {
+            Entry::Tree(tree) => Entry::Tree(Either::Right(tree)),
+            Entry::Leaf(leaf) => Entry::Leaf(Either::Right(leaf)),
+        }
+    }
+
     pub fn is_tree(&self) -> bool {
         match self {
             Entry::Tree(_) => true,
@@ -954,144 +1182,6 @@ where
             Entry::Tree(tree) => Entry::Tree(tree.store(ctx, blobstore).await?),
             Entry::Leaf(leaf) => Entry::Leaf(leaf.store(ctx, blobstore).await?),
         })
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PathTree<V> {
-    pub value: V,
-    pub subentries: TrieMap<Self>,
-}
-
-impl<V> PathTree<V> {
-    pub fn deconstruct(self) -> (V, Vec<(MPathElement, Self)>) {
-        (
-            self.value,
-            self.subentries
-                .into_iter()
-                .map(|(path, subtree)| {
-                    (
-                        MPathElement::from_smallvec(path)
-                            .expect("Only MPaths are inserted into PathTree"),
-                        subtree,
-                    )
-                })
-                .collect(),
-        )
-    }
-
-    pub fn get(&self, path: &MPath) -> Option<&V> {
-        let mut tree = self;
-        for elem in path {
-            match tree.subentries.get(elem.as_ref()) {
-                Some(subtree) => tree = subtree,
-                None => return None,
-            }
-        }
-        Some(&tree.value)
-    }
-}
-
-impl<V> PathTree<V>
-where
-    V: Default,
-{
-    pub fn insert(&mut self, path: MPath, value: V) {
-        let node = path.into_iter().fold(self, |node, element| {
-            node.subentries.get_or_insert_default(element)
-        });
-        node.value = value;
-    }
-
-    pub fn insert_and_merge<T>(&mut self, path: MPath, value: T)
-    where
-        V: Extend<T>,
-    {
-        let node = path.into_iter().fold(self, |node, element| {
-            node.subentries.get_or_insert_default(element)
-        });
-        node.value.extend(std::iter::once(value));
-    }
-
-    pub fn insert_and_prune(&mut self, path: MPath, value: V) {
-        let node = path.into_iter().fold(self, |node, element| {
-            node.subentries.get_or_insert_default(element)
-        });
-        node.value = value;
-        node.subentries.clear();
-    }
-}
-
-impl<V> Default for PathTree<V>
-where
-    V: Default,
-{
-    fn default() -> Self {
-        Self {
-            value: Default::default(),
-            subentries: Default::default(),
-        }
-    }
-}
-
-impl<V> FromIterator<(MPath, V)> for PathTree<V>
-where
-    V: Default,
-{
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = (MPath, V)>,
-    {
-        let mut tree: Self = Default::default();
-        for (path, value) in iter {
-            tree.insert(path, value);
-        }
-        tree
-    }
-}
-
-impl<V> FromIterator<(NonRootMPath, V)> for PathTree<V>
-where
-    V: Default,
-{
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = (NonRootMPath, V)>,
-    {
-        let mut tree: Self = Default::default();
-        for (path, value) in iter {
-            tree.insert(MPath::from(path), value);
-        }
-        tree
-    }
-}
-
-pub struct PathTreeIter<V> {
-    frames: Vec<(MPath, PathTree<V>)>,
-}
-
-impl<V> Iterator for PathTreeIter<V> {
-    type Item = (MPath, V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (path, path_tree) = self.frames.pop()?;
-        let (value, subentries) = path_tree.deconstruct();
-
-        for (name, subentry) in subentries {
-            self.frames.push((path.join(&name), subentry));
-        }
-        Some((path, value))
-    }
-}
-
-impl<V> IntoIterator for PathTree<V> {
-    type Item = (MPath, V);
-    type IntoIter = PathTreeIter<V>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        PathTreeIter {
-            frames: vec![(MPath::ROOT, self)],
-        }
     }
 }
 

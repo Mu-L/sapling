@@ -5,7 +5,7 @@
 
 from collections import defaultdict
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from . import edenapi_upload, error, hg, mutation, phases, scmutil
 from .bookmarks import readremotenames, saveremotenames
@@ -59,12 +59,50 @@ def push(
     edenapi = edenapi or get_edenapi_for_dest(repo, dest)
     opargs = opargs or {}
 
-    draft_nodes = repo.dageval(lambda: only([head_node], public()))
-    if repo.dageval(lambda: merges(draft_nodes)):
-        raise error.UnsupportedEdenApiPush(
-            _("merge commit is not supported by EdenApi push yet")
-        )
+    curr_bookmark_val = get_remote_bookmark_value(repo, edenapi, remote_bookmark, force)
+    draft_nodes = get_draft_nodes(
+        repo, dest, head_node, remote_bookmark, curr_bookmark_val
+    )
+    maybe_log_debug_info(repo, head_node, draft_nodes)
 
+    # upload revs via EdenApi
+
+    ui.status_err(
+        _("pushing rev %s to destination %s bookmark %s\n")
+        % (short(head_node), edenapi.url(), remote_bookmark)
+    )
+    upload_draft_nodes(repo, draft_nodes)
+
+    # create remote bookmark
+    if curr_bookmark_val.node is None:
+        if opargs.get("create"):
+            create_remote_bookmark(
+                ui, edenapi, remote_bookmark, head_node, curr_bookmark_val, opargs
+            )
+            ui.debug("remote bookmark %s created\n" % remote_bookmark)
+            record_remote_bookmark(repo, remote_bookmark, head_node)
+            return 0
+        else:
+            raise error.Abort(
+                _("could not find remote bookmark '%s', use '--create' to create it")
+                % remote_bookmark
+            )
+
+    if is_plain_push(repo, head_node, force):
+        plain_push(
+            repo, edenapi, remote_bookmark, head_node, curr_bookmark_val, force, opargs
+        )
+    else:
+        # update the exiting bookmark with push rebase
+        return push_rebase(repo, dest, head_node, draft_nodes, remote_bookmark, opargs)
+
+
+def is_plain_push(repo, head_node, force):
+    return force or repo[head_node].phase() == phases.public
+
+
+def maybe_log_debug_info(repo, head_node, draft_nodes):
+    ui = repo.ui
     if ui.configbool(CFG_SECTION, CFG_KEY_ENABLE_DEBUG_INFO):
         commit_infos = []
         for node in draft_nodes:
@@ -83,13 +121,25 @@ def push(
         else:
             ui.write(_x("head commit %s is not a draft commit\n") % short(head_node))
 
-    # upload revs via EdenApi
 
-    ui.status_err(
-        _("pushing rev %s to destination %s bookmark %s\n")
-        % (short(head_node), edenapi.url(), remote_bookmark)
-    )
+def get_draft_nodes(repo, dest, head_node, remote_bookmark, curr_bookmark_val):
+    bookmark_node = curr_bookmark_val.node
+    # pull the remote_bookmark to avoid wrongly treating some commits as draft
+    if bookmark_node and curr_bookmark_val.source == RemoteBookmarkValueSource.SERVER:
+        repo.pull(
+            source=dest,
+            bookmarknames=(remote_bookmark,),
+            remotebookmarks={remote_bookmark: bookmark_node},
+        )
+    draft_nodes = repo.dageval(lambda: only([head_node], public()))
+    if repo.dageval(lambda: merges(draft_nodes)):
+        raise error.UnsupportedEdenApiPush(
+            _("merge commit is not supported by EdenApi push yet")
+        )
+    return draft_nodes
 
+
+def upload_draft_nodes(repo, draft_nodes):
     uploaded, failed = edenapi_upload.uploadhgchangesets(repo, draft_nodes)
     if failed:
         raise error.Abort(
@@ -97,34 +147,7 @@ def push(
                 [repo[node].hex() for node in failed]
             )
         )
-    ui.debug(f"uploaded {len(uploaded)} new commits\n")
-
-    curr_bookmark_val = get_remote_bookmark_value(repo, edenapi, remote_bookmark, force)
-
-    # create remote bookmark
-    if curr_bookmark_val.node is None:
-        if opargs.get("create"):
-            create_remote_bookmark(
-                ui, edenapi, remote_bookmark, head_node, curr_bookmark_val, opargs
-            )
-            ui.debug("remote bookmark %s created\n" % remote_bookmark)
-            record_remote_bookmark(repo, remote_bookmark, head_node)
-            return 0
-        else:
-            raise error.Abort(
-                _("could not find remote bookmark '%s', use '--create' to create it")
-                % remote_bookmark
-            )
-
-    if force or repo[head_node].phase() == phases.public:
-        # if the head is already a public commit or force is set, then do a plain
-        # push (no pushrebase)
-        plain_push(
-            repo, edenapi, remote_bookmark, head_node, curr_bookmark_val, force, opargs
-        )
-    else:
-        # update the exiting bookmark with push rebase
-        return push_rebase(repo, dest, head_node, draft_nodes, remote_bookmark, opargs)
+    repo.ui.debug(f"uploaded {len(uploaded)} new commits\n")
 
 
 def plain_push(repo, edenapi, bookmark, to_node, curr_bookmark_val, force, opargs=None):
@@ -141,32 +164,40 @@ def plain_push(repo, edenapi, bookmark, to_node, curr_bookmark_val, force, oparg
         if not is_ancestor:
             if not is_true(pushvars.get("NON_FAST_FORWARD")):
                 raise error.Abort(
-                    _(
-                        "non-fast-forward push to remote bookmark %s from %s to %s "
-                        "(set pushvar NON_FAST_FORWARD=true for a non-fast-forward move)"
-                    )
+                    _("non-fast-forward push to remote bookmark %s from %s to %s")
                     % (bookmark, short(from_node), short(to_node)),
+                    hint="add '--force' or set pushvar NON_FAST_FORWARD=true for a non-fast-forward move",
                 )
 
     repo.ui.status(
         _("moving remote bookmark %s from %s to %s\n")
         % (bookmark, short(from_node), short(to_node))
     )
-    result = edenapi.setbookmark(bookmark, to_node, from_node, pushvars)["data"]
-    if "Err" in result:
-        hint = gen_hint(
-            repo.ui,
-            edenapi,
-            bookmark,
-            curr_bookmark_val,
-            _("bookmark %s has changed since your last pull") % bookmark,
-        )
-        raise error.Abort(
-            _("server error: %s") % result["Err"]["message"],
-            hint=hint,
-        )
 
-    record_remote_bookmark(repo, bookmark, to_node)
+    if not _is_noop_plain_push(repo, from_node, to_node):
+        result = edenapi.setbookmark(bookmark, to_node, from_node, pushvars)["data"]
+        if "Err" in result:
+            hint = gen_hint(
+                repo.ui,
+                edenapi,
+                bookmark,
+                curr_bookmark_val,
+                _("bookmark %s has changed since your last pull") % bookmark,
+            )
+            raise error.Abort(
+                _("server error: %s") % result["Err"]["message"],
+                hint=hint,
+            )
+
+        record_remote_bookmark(repo, bookmark, to_node)
+
+
+def _is_noop_plain_push(repo, from_node, to_node):
+    if from_node == to_node:
+        repo.ui.debug("noop plain push\n")
+        return True
+    else:
+        return False
 
 
 def push_rebase(repo, dest, head_node, stack_nodes, remote_bookmark, opargs=None):
@@ -230,18 +261,19 @@ def push_rebase(repo, dest, head_node, stack_nodes, remote_bookmark, opargs=None
         # change below.
         repo.changelog.filternodes(list(old_to_new_hgids.values()))
 
-        if wnode in old_to_new_hgids:
-            ui.note(_("moving working copy parent\n"))
-            hg.update(repo, old_to_new_hgids[wnode])
+        if not ui.configbool("push", "skip-cleanup-commits"):
+            if wnode in old_to_new_hgids:
+                ui.note(_("moving working copy parent\n"))
+                hg.update(repo, old_to_new_hgids[wnode])
 
-        replacements = {old: [new] for old, new in old_to_new_hgids.items()}
-        scmutil.cleanupnodes(repo, replacements, "pushrebase")
+            replacements = {old: [new] for old, new in old_to_new_hgids.items()}
+            scmutil.cleanupnodes(repo, replacements, "pushrebase")
 
-        entries = [
-            mutation.createsyntheticentry(repo, [node], new_node, "pushrebase")
-            for (node, new_node) in old_to_new_hgids.items()
-        ]
-        mutation.recordentries(repo, entries, skipexisting=False)
+            entries = [
+                mutation.createsyntheticentry(repo, [node], new_node, "pushrebase")
+                for (node, new_node) in old_to_new_hgids.items()
+            ]
+            mutation.recordentries(repo, entries, skipexisting=False)
 
         ui.status(_("updated remote bookmark %s to %s\n") % (bookmark, short(new_head)))
         return 0
@@ -377,7 +409,7 @@ def delete_remote_bookmark(repo, edenapi, bookmark, force, pushvars_strs) -> Non
 ### utils
 
 
-def parse_pushvars(pushvars_strs: Optional[List[str]]) -> List[Tuple[str, str]]:
+def parse_pushvars(pushvars_strs: Optional[List[str]]) -> Dict[str, str]:
     kvs = pushvars_strs or []
     pushvars = {}
     for kv in kvs:

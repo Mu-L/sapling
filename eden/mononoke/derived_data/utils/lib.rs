@@ -54,11 +54,13 @@ use futures::TryStreamExt;
 use futures_stats::TimedTryFutureExt;
 use git_types::MappedGitCommitId;
 use git_types::RootGitDeltaManifestId;
+use git_types::RootGitDeltaManifestV2Id;
 use git_types::TreeHandle;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use lock_ext::LockExt;
 use mercurial_derivation::MappedHgChangesetId;
+use mercurial_derivation::RootHgAugmentedManifestId;
 use metaconfig_types::BlameVersion;
 use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
@@ -80,6 +82,7 @@ pub const POSSIBLE_DERIVED_TYPE_NAMES: &[&str] = &[
     RootUnodeManifestId::NAME,
     RootFastlog::NAME,
     MappedHgChangesetId::NAME,
+    RootHgAugmentedManifestId::NAME,
     RootFsnodeId::NAME,
     RootBlameV2::NAME,
     ChangesetInfo::NAME,
@@ -90,6 +93,7 @@ pub const POSSIBLE_DERIVED_TYPE_NAMES: &[&str] = &[
     RootDeletedManifestV2Id::NAME,
     RootBssmV3DirectoryId::NAME,
     RootGitDeltaManifestId::NAME,
+    RootGitDeltaManifestV2Id::NAME,
     RootTestManifestDirectory::NAME,
     RootTestShardedManifestDirectory::NAME,
 ];
@@ -108,6 +112,7 @@ pub const POSSIBLE_DERIVED_TYPES: &[DerivableType] = &[
     RootDeletedManifestV2Id::VARIANT,
     RootBssmV3DirectoryId::VARIANT,
     RootGitDeltaManifestId::VARIANT,
+    RootGitDeltaManifestV2Id::VARIANT,
     RootTestManifestDirectory::VARIANT,
     RootTestShardedManifestDirectory::VARIANT,
 ];
@@ -120,6 +125,7 @@ lazy_static! {
         let unodes = RootUnodeManifestId::VARIANT;
         let fastlog = RootFastlog::VARIANT;
         let hgchangeset = MappedHgChangesetId::VARIANT;
+        let hg_augmented_mf = RootHgAugmentedManifestId::VARIANT;
         let fsnodes = RootFsnodeId::VARIANT;
         let blame = RootBlameV2::VARIANT;
         let changesets_info = ChangesetInfo::VARIANT;
@@ -128,6 +134,7 @@ lazy_static! {
         let skeleton_mf = RootSkeletonManifestId::VARIANT;
         let bssm_v3 = RootBssmV3DirectoryId::VARIANT;
         let git_delta_manifest = RootGitDeltaManifestId::VARIANT;
+        let git_delta_manifest_v2 = RootGitDeltaManifestV2Id::VARIANT;
         let git_commit = MappedGitCommitId::VARIANT;
         let git_tree = TreeHandle::VARIANT;
         let test_mf = RootTestManifestDirectory::VARIANT;
@@ -136,6 +143,7 @@ lazy_static! {
         let mut dag = HashMap::new();
 
         dag.insert(hgchangeset, vec![]);
+        dag.insert(hg_augmented_mf, vec![hgchangeset]);
         dag.insert(unodes, vec![]);
         dag.insert(blame, vec![unodes]);
         dag.insert(fastlog, vec![unodes]);
@@ -148,6 +156,7 @@ lazy_static! {
         dag.insert(git_tree, vec![]);
         dag.insert(git_commit, vec![git_tree]);
         dag.insert(git_delta_manifest, vec![git_tree, git_commit, unodes]);
+        dag.insert(git_delta_manifest_v2, vec![git_tree, git_commit]);
         dag.insert(test_mf, vec![]);
         dag.insert(test_sharded_mf, vec![]);
 
@@ -526,6 +535,11 @@ fn derived_data_utils_impl(
         MappedHgChangesetId::VARIANT => Ok(Arc::new(
             DerivedUtilsFromManager::<MappedHgChangesetId>::new(repo, config, enabled_config_name),
         )),
+        RootHgAugmentedManifestId::VARIANT => Ok(Arc::new(DerivedUtilsFromManager::<
+            RootHgAugmentedManifestId,
+        >::new(
+            repo, config, enabled_config_name
+        ))),
         RootFsnodeId::VARIANT => Ok(Arc::new(DerivedUtilsFromManager::<RootFsnodeId>::new(
             repo,
             config,
@@ -566,6 +580,11 @@ fn derived_data_utils_impl(
         )),
         RootGitDeltaManifestId::VARIANT => Ok(Arc::new(DerivedUtilsFromManager::<
             RootGitDeltaManifestId,
+        >::new(
+            repo, config, enabled_config_name
+        ))),
+        RootGitDeltaManifestV2Id::VARIANT => Ok(Arc::new(DerivedUtilsFromManager::<
+            RootGitDeltaManifestV2Id,
         >::new(
             repo, config, enabled_config_name
         ))),
@@ -1074,6 +1093,11 @@ pub async fn check_derived(
                 .map_ok(|res| res.is_some())
                 .await
         }
+        DerivableType::HgAugmentedManifests => {
+            ddm.fetch_derived::<RootHgAugmentedManifestId>(ctx, head_cs_id, None)
+                .map_ok(|res| res.is_some())
+                .await
+        }
         DerivableType::Fsnodes => {
             ddm.fetch_derived::<RootFsnodeId>(ctx, head_cs_id, None)
                 .map_ok(|res| res.is_some())
@@ -1112,6 +1136,11 @@ pub async fn check_derived(
         }
         DerivableType::GitDeltaManifests => {
             ddm.fetch_derived::<RootGitDeltaManifestId>(ctx, head_cs_id, None)
+                .map_ok(|res| res.is_some())
+                .await
+        }
+        DerivableType::GitDeltaManifestsV2 => {
+            ddm.fetch_derived::<RootGitDeltaManifestV2Id>(ctx, head_cs_id, None)
                 .map_ok(|res| res.is_some())
                 .await
         }

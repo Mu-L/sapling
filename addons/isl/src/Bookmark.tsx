@@ -5,12 +5,26 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import type {CommitInfo} from './types';
+import type {ContextMenuItem} from 'shared/ContextMenu';
+
 import {bookmarksDataStorage} from './BookmarksData';
+import {Row} from './ComponentUtils';
+import {latestSuccessorUnlessExplicitlyObsolete} from './SuccessionTracker';
 import {Tooltip} from './Tooltip';
 import {tracker} from './analytics';
+import {Button} from './components/Button';
 import {Tag} from './components/Tag';
+import {TextField} from './components/TextField';
+import {T, t} from './i18n';
+import {BookmarkCreateOperation} from './operations/BookmarkCreateOperation';
+import {BookmarkDeleteOperation} from './operations/BookmarkDeleteOperation';
+import {useRunOperation} from './operationsState';
+import {showModal} from './useModal';
 import * as stylex from '@stylexjs/stylex';
 import {useAtomValue} from 'jotai';
+import {useState} from 'react';
+import {useContextMenu} from 'shared/ContextMenu';
 
 const styles = stylex.create({
   stable: {
@@ -19,6 +33,12 @@ const styles = stylex.create({
   },
   fullLength: {
     maxWidth: 'unset',
+  },
+  bookmarkTag: {
+    maxWidth: '200px',
+  },
+  modalButtonBar: {
+    justifyContent: 'flex-end',
   },
 });
 
@@ -44,14 +64,37 @@ export function Bookmark({
   fullLength?: boolean;
   tooltip?: string;
 }) {
+  const bookmark = children;
+  const contextMenu = useContextMenu(makeBookmarkContextMenuOptions);
+
+  const runOperation = useRunOperation();
+
+  function makeBookmarkContextMenuOptions() {
+    const items: Array<ContextMenuItem> = [];
+    if (kind === 'local') {
+      items.push({
+        label: <T replace={{$book: bookmark}}>Delete Bookmark "$book"</T>,
+        onClick: () => {
+          runOperation(new BookmarkDeleteOperation(bookmark));
+        },
+      });
+    }
+    return items;
+  }
+
   if (kind === 'stable') {
-    logExposureOncePerSession(children);
+    logExposureOncePerSession(bookmark);
   }
   const inner = (
     <Tag
-      xstyle={[kind === 'stable' && styles.stable, fullLength === true && styles.fullLength]}
-      title={tooltip == null ? children : undefined}>
-      {children}
+      onContextMenu={contextMenu}
+      xstyle={[
+        kind === 'stable' && styles.stable,
+        fullLength === true && styles.fullLength,
+        styles.bookmarkTag,
+      ]}
+      title={tooltip == null ? bookmark : undefined}>
+      {bookmark}
     </Tag>
   );
   return tooltip ? <Tooltip title={tooltip}>{inner}</Tooltip> : inner;
@@ -83,6 +126,53 @@ export function Bookmarks({
             </Bookmark>
           );
         })}
+    </>
+  );
+}
+
+export async function createBookmarkAtCommit(commit: CommitInfo) {
+  await showModal({
+    type: 'custom',
+    title: <T>Create Bookmark</T>,
+    component: ({returnResultAndDismiss}: {returnResultAndDismiss: (data?: undefined) => void}) => (
+      <CreateBookmarkAtCommitModal commit={commit} dismiss={returnResultAndDismiss} />
+    ),
+  });
+}
+
+function CreateBookmarkAtCommitModal({commit, dismiss}: {commit: CommitInfo; dismiss: () => void}) {
+  const runOperation = useRunOperation();
+  const [bookmark, setBookmark] = useState('');
+  return (
+    <>
+      <TextField
+        autoFocus
+        value={bookmark}
+        onChange={e => setBookmark(e.currentTarget.value)}
+        aria-label={t('Bookmark Name')}
+      />
+      <Row {...stylex.props(styles.modalButtonBar)}>
+        <Button
+          onClick={() => {
+            dismiss();
+          }}>
+          <T>Cancel</T>
+        </Button>
+        <Button
+          primary
+          onClick={() => {
+            runOperation(
+              new BookmarkCreateOperation(
+                latestSuccessorUnlessExplicitlyObsolete(commit),
+                bookmark,
+              ),
+            );
+            dismiss();
+          }}
+          disabled={bookmark.trim().length === 0}>
+          <T>Create</T>
+        </Button>
+      </Row>
     </>
   );
 }

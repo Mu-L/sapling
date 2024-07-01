@@ -23,6 +23,7 @@ import sys
 import time
 import typing
 import uuid
+from enum import Enum
 from pathlib import Path
 from typing import (
     Any,
@@ -137,6 +138,12 @@ currently running, or it simply does not have this checkout mounted yet.
 You can run "eden doctor" to check for problems with EdenFS and try to have it
 automatically remount your checkouts.
 """
+
+
+class CheckoutPathProblemType(Enum):
+    NESTED_CHECKOUT = "nested_checkout"
+    INSIDE_BACKING_REPO = "inside_backing_repo"
+    NONE = None
 
 
 class UsageError(Exception):
@@ -419,6 +426,32 @@ class EdenInstance(AbstractEdenInstance):
 
     def log_sample(self, log_type: str, **kwargs: telemetry.TelemetryTypes) -> None:
         self.get_telemetry_logger().log(log_type, **kwargs)
+
+    def get_known_bad_edenfs_versions(self) -> Dict[str, List[str]]:
+        """
+        Get a dictionary mapping bad EdenFS versions to their reasons.
+        """
+        # 'bad_versions_config' format: [<bad_version_1>|<sev_1(optional):reason_1>,<bad_version_2>|<sev_2(optional):reason_2>]
+        bad_versions_config = self.get_config_strs(
+            "doctor.known-bad-edenfs-versions", default=configutil.Strs()
+        )
+        if not bad_versions_config:
+            return {}
+        bad_versions_map = {}
+        for item in bad_versions_config:
+            if "|" not in item:
+                log.warning(
+                    f"`known-bad-edenfs-versions` config has an invalid entry `{item}`.",
+                )
+                continue
+            version, reason = item.split("|", 1)
+            version = version.strip()
+            reason = reason.strip()
+            if version in bad_versions_map:
+                bad_versions_map[version].append(reason)
+            else:
+                bad_versions_map[version] = [reason]
+        return bad_versions_map
 
     def get_running_version_parts(self) -> Tuple[str, str]:
         """Get a tuple containing (version, release) of the currently running EdenFS
@@ -968,30 +1001,60 @@ Do you want to run `eden mount %s` instead?"""
 
             shutil.rmtree(windows_prefix + os.fsencode(path), onerror=collect_errors)
             if not path.exists():
+                # We were successful.
                 return
 
             print(f"Failed to remove {path}, the following files couldn't be removed:")
             for f in errors:
                 print(os.fsdecode(f[0].strip(windows_prefix)))
 
-            print(
-                f"""
-At this point your EdenFS mount is destroyed, but EdenFS is having
-trouble cleaning up leftovers. You will need to manually remove {path}.
-"""
-            )
-
+            # For those that failed, we might be able to do something with error codes
+            # 5 ERROR_ACCESS_DENIED - Access is denied (file is a running executable).
+            # 32 (ERROR_SHARING_VIOLATION) - The process cannot access the file because it is being used by another process.
+            # See # https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
             used_by_other = any(
                 filter(
-                    lambda x: isinstance(x[1], OSError) and x[1].winerror == 32, errors
+                    lambda x: isinstance(x[1], OSError)
+                    and (x[1].winerror == 32 or x[1].winerror == 5),
+                    errors,
                 )
             )
 
             if used_by_other:
-                winhr = WinFileHandlerReleaser()
-                winhr.try_release(path)
+                # Use the hammer - kill all processes
+                winhr = WinFileHandlerReleaser(self)
+                winhr.stop_adb_server()
+                winhr.stop_buck2()
+                if not winhr.try_release(
+                    path
+                ):  # This will return True if there's a chance it could kill the processes.
+                    raise Exception("Failed to clear all resources")
 
-            raise errors[0][1]
+                # Reset the errors because we're going to do a new pass after killing things
+                errors = []
+                # Try again
+                shutil.rmtree(
+                    windows_prefix + os.fsencode(path), onerror=collect_errors
+                )
+                if not path.exists():
+                    # Success this time.
+                    return
+                print(
+                    f"Failed to remove {path}, the following files couldn't be removed:"
+                )
+                for f in errors:
+                    print(
+                        f"{os.fsdecode(f[0].strip(windows_prefix))} win32 error: {f[1]}"
+                    )
+
+                print(
+                    f"""
+    At this point your EdenFS mount is destroyed, but EdenFS is having
+    trouble cleaning up leftovers. You will need to manually remove {path}.
+    """
+                )
+
+            raise Exception("Failed to delete mount.")
 
     def check_health(self, timeout: Optional[float] = None) -> HealthStatus:
         """
@@ -1708,23 +1771,23 @@ def _do_manual_migration(
     print(get_migration_success_message(migrate_to))
 
 
-def detect_nested_checkout(
+def detect_checkout_path_problem(
     path: Union[str, Path],
     instance: EdenInstance,
-) -> Tuple[Optional[EdenCheckout], Optional[Path]]:
-    """Get a tuple containing (checkout, rel_path) for any checkout that the provided
-    path is nested inside of.
+) -> Tuple[Optional[CheckoutPathProblemType], Optional[EdenCheckout]]:
+    """
+    Get a tuple containing (problem_type, checkout, rel_path) for any checkout that the provided
+    path is nested inside of, or for any checkout whose
+    backing_repo contains the provided path and the relative path of that
+    path within the backing_repo, along with the problem type.
 
-    A tuple of (None, None) is returned if the specified path is not nested inside
+    A tuple of (None, None, None) is returned if the specified path is not nested inside
     any existing checkouts.
     """
     if isinstance(path, str):
         path = Path(path)
 
     path = path.resolve(strict=False)
-    checkout = None
-    checkout_state_dir = None
-
     try:
         # However, we prefer to get the list from the current eden process (if one's running)
         instance.get_running_version()
@@ -1733,25 +1796,32 @@ def detect_nested_checkout(
         return None, None
 
     # Checkout list must be sorted so that parent paths are checked first
-    rel_path = None
     for checkout_path_str, mount_info in sorted(checkout_list):
         # symlinks could have been added since the mount was added, but
         # we will not worry about this case
         checkout_path = Path(checkout_path_str)
-        if path == checkout_path:
-            continue
-        else:
-            try:
-                rel_path = path.relative_to(checkout_path)
-            except ValueError:
-                continue
+        if path != checkout_path and is_child_path(checkout_path, path):
             checkout_state_dir = mount_info.data_dir
             checkout = EdenCheckout(instance, checkout_path, checkout_state_dir)
-            break
-    if checkout_state_dir is not None:
-        return checkout, rel_path
-    else:
-        return None, None
+            return CheckoutPathProblemType.NESTED_CHECKOUT, checkout
+
+        # check if path is inside backing folder of the current checkout
+        backing_repo = mount_info.backing_repo
+        if backing_repo is not None and is_child_path(backing_repo, path):
+            checkout_state_dir = mount_info.data_dir
+            checkout = EdenCheckout(instance, checkout_path_str, checkout_state_dir)
+            return CheckoutPathProblemType.INSIDE_BACKING_REPO, checkout
+
+    return None, None
+
+
+def is_child_path(parent_path: Path, child_path: Path) -> bool:
+    """Returns true if the parent path is a prefix of the child path"""
+    try:
+        rel_path = child_path.relative_to(parent_path)
+        return rel_path != Path("") and rel_path != Path(".")
+    except ValueError:
+        return False
 
 
 def find_eden(

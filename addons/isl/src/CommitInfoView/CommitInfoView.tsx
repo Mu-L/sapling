@@ -9,13 +9,15 @@ import type {CommitInfo, DiffId} from '../types';
 import type {CommitInfoMode, EditedMessage} from './CommitInfoState';
 import type {CommitMessageFields, FieldConfig, FieldsBeingEdited} from './types';
 
-import {Banner, BannerKind} from '../Banner';
+import {Banner, BannerKind, BannerTooltip} from '../Banner';
 import {ChangedFilesWithFetching} from '../ChangedFilesWithFetching';
 import serverAPI from '../ClientToServerAPI';
 import {Commit} from '../Commit';
 import {OpenComparisonViewButton} from '../ComparisonView/OpenComparisonViewButton';
 import {Center} from '../ComponentUtils';
+import {getCachedGeneratedFileStatuses, useGeneratedFileStatuses} from '../GeneratedFile';
 import {numPendingImageUploads} from '../ImageUpload';
+import {Internal} from '../Internal';
 import {Link} from '../Link';
 import {OperationDisabledButton} from '../OperationDisabledButton';
 import {SubmitSelectionButton} from '../SubmitSelectionButton';
@@ -25,6 +27,7 @@ import {latestSuccessorUnlessExplicitlyObsolete} from '../SuccessionTracker';
 import {SuggestedRebaseButton} from '../SuggestedRebase';
 import {Tooltip} from '../Tooltip';
 import {UncommittedChanges} from '../UncommittedChanges';
+import {confirmUnsavedFiles} from '../UnsavedFiles';
 import {tracker} from '../analytics';
 import {
   allDiffSummaries,
@@ -32,8 +35,12 @@ import {
   latestCommitMessageFields,
 } from '../codeReview/CodeReviewInfo';
 import {submitAsDraft, SubmitAsDraftCheckbox} from '../codeReview/DraftCheckbox';
+import {overrideDisabledSubmitModes} from '../codeReview/github/branchPrState';
 import {Badge} from '../components/Badge';
+import {Button} from '../components/Button';
 import {Divider} from '../components/Divider';
+import GatedComponent from '../components/GatedComponent';
+import {RadioGroup} from '../components/Radio';
 import {FoldButton, useRunFoldPreview} from '../fold';
 import {t, T} from '../i18n';
 import {readAtom, writeAtom} from '../jotaiUtils';
@@ -51,7 +58,7 @@ import platform from '../platform';
 import {CommitPreview, uncommittedChangesWithPreviews} from '../previews';
 import {selectedCommits} from '../selection';
 import {commitByHash, latestHeadCommit, repositoryInfo} from '../serverAPIState';
-import {succeedableRevset} from '../types';
+import {GeneratedStatus, succeedableRevset} from '../types';
 import {useModal} from '../useModal';
 import {firstOfIterable} from '../utils';
 import {CommitInfoField} from './CommitInfoField';
@@ -74,15 +81,18 @@ import {
   editedMessageSubset,
   removeNoopEdits,
 } from './CommitMessageFields';
+import {DiffStats, PendingDiffStats} from './DiffStats';
 import {FillCommitMessage} from './FillCommitMessage';
-import {CommitTitleByline, getTopmostEditedField, Section, SmallCapsTitle} from './utils';
-import {VSCodeButton, VSCodeRadio, VSCodeRadioGroup} from '@vscode/webview-ui-toolkit/react';
+import SplitSuggestion from './SplitSuggestion';
+import {CommitTitleByline, getFieldToAutofocus, Section, SmallCapsTitle} from './utils';
+import deepEqual from 'fast-deep-equal';
 import {useAtom, useAtomValue} from 'jotai';
 import {useAtomCallback} from 'jotai/utils';
-import {useCallback, useEffect} from 'react';
+import {useCallback, useEffect, useMemo} from 'react';
 import {ComparisonType} from 'shared/Comparison';
 import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
+import {usePrevious} from 'shared/hooks';
 import {firstLine, notEmpty, nullthrows} from 'shared/utils';
 
 import './CommitInfoView.css';
@@ -165,6 +175,7 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
   const hashOrHead = isCommitMode ? 'head' : commit.hash;
   const [editedMessage, setEditedCommitMessage] = useAtom(editedCommitMessages(hashOrHead));
   const uncommittedChanges = useAtomValue(uncommittedChangesWithPreviews);
+  const selection = useUncommittedSelection();
   const schema = useAtomValue(commitMessageFieldsSchema);
 
   const isFoldPreview = commit.hash.startsWith(FOLD_COMMIT_PREVIEW_HASH_PREFIX);
@@ -176,6 +187,7 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
   const isAmendDisabled = mode === 'amend' && (isPublic || isObsoleted);
 
   const fieldsBeingEdited = useAtomValue(unsavedFieldsBeingEdited(hashOrHead));
+  const previousFieldsBeingEdited = usePrevious(fieldsBeingEdited, deepEqual);
 
   useFetchActiveDiffDetails(commit.diffId);
 
@@ -206,17 +218,30 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
 
   const parsedFields = useAtomValue(latestCommitMessageFields(hashOrHead));
 
+  const provider = useAtomValue(codeReviewProvider);
   const startEditingField = (field: string) => {
-    // Set the latest message value for the edited message of this field.
-    // fieldsBeingEdited is derived from this.
+    const original = parsedFields[field];
+    // If you start editing a tokenized field, add a blank token so you can write a new token instead of
+    // modifying the last existing token.
+    const fieldValue = Array.isArray(original) && original.at(-1) ? [...original, ''] : original;
+
     setEditedCommitMessage(last => ({
       ...last,
-      [field]: parsedFields[field],
+      [field]: fieldValue,
     }));
   };
 
-  const topmostEditedField = getTopmostEditedField(schema, fieldsBeingEdited);
+  const fieldToAutofocus = getFieldToAutofocus(
+    schema,
+    fieldsBeingEdited,
+    previousFieldsBeingEdited,
+  );
 
+  const isSplitSuggestionSupported = provider?.isSplitSuggestionSupported() ?? false;
+  const selectedFiles = uncommittedChanges.filter(f =>
+    selection.isFullyOrPartiallySelected(f.path),
+  );
+  const selectedFilesLength = selectedFiles.length;
   return (
     <div className="commit-info-view" data-testid="commit-info-view">
       {!commit.isDot ? null : (
@@ -226,16 +251,15 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
               'In Commit mode, you can edit the blank commit message for a new commit. \n\n' +
                 'In Amend mode, you can view and edit the commit message for the current head commit.',
             )}>
-            <VSCodeRadioGroup
-              value={mode}
-              onChange={e => setMode((e.target as HTMLOptionElement).value as CommitInfoMode)}>
-              <VSCodeRadio value="commit" checked={mode === 'commit'} tabIndex={0}>
-                <T>Commit</T>
-              </VSCodeRadio>
-              <VSCodeRadio value="amend" checked={mode === 'amend'} tabIndex={0}>
-                <T>Amend</T>
-              </VSCodeRadio>
-            </VSCodeRadioGroup>
+            <RadioGroup
+              horizontal
+              choices={[
+                {title: t('Commit'), value: 'commit'},
+                {title: t('Amend'), value: 'amend'},
+              ]}
+              current={mode}
+              onChange={setMode}
+            />
           </Tooltip>
         </div>
       )}
@@ -250,7 +274,7 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
             const setField = (newVal: string) =>
               setEditedCommitMessage(val => ({
                 ...val,
-                [field.key]: field.type === 'field' ? [newVal] : newVal,
+                [field.key]: field.type === 'field' ? newVal.split(',') : newVal,
               }));
 
             let editedFieldValue = editedMessage?.[field.key];
@@ -265,7 +289,7 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
                 key={field.key}
                 field={field}
                 content={parsedFields[field.key as keyof CommitMessageFields]}
-                autofocus={topmostEditedField === field.key}
+                autofocus={fieldToAutofocus === field.key}
                 readonly={isOptimistic || isAmendDisabled || isObsoleted}
                 isBeingEdited={fieldsBeingEdited[field.key]}
                 startEditingField={() => startEditingField(field.key)}
@@ -292,8 +316,18 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
           <Section data-testid="changes-to-amend">
             <SmallCapsTitle>
               {isCommitMode ? <T>Changes to Commit</T> : <T>Changes to Amend</T>}
-              <Badge>{uncommittedChanges.length}</Badge>
+              <Badge>
+                {selectedFilesLength === uncommittedChanges.length
+                  ? null
+                  : selectedFilesLength + '/'}
+                {uncommittedChanges.length}
+              </Badge>
             </SmallCapsTitle>
+            {uncommittedChanges.length > 0 ? (
+              <GatedComponent featureFlag={Internal.featureFlags?.ShowSplitSuggestion}>
+                <PendingDiffStats commit={commit} />
+              </GatedComponent>
+            ) : null}
             {uncommittedChanges.length === 0 ? (
               <Subtle>
                 {isCommitMode ? <T>No changes to commit</T> : <T>No changes to amend</T>}
@@ -309,22 +343,15 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
               <T>Files Changed</T>
               <Badge>{commit.totalFileCount}</Badge>
             </SmallCapsTitle>
+            <GatedComponent featureFlag={Internal.featureFlags?.ShowSplitSuggestion}>
+              <DiffStats commit={commit} />
+            </GatedComponent>
             <div className="changed-file-list">
               <div className="button-row">
                 <OpenComparisonViewButton
                   comparison={{type: ComparisonType.Committed, hash: commit.hash}}
                 />
-                <VSCodeButton
-                  appearance="icon"
-                  onClick={() => {
-                    tracker.track('OpenAllFiles');
-                    for (const file of commit.filesSample) {
-                      platform.openFile(file.path);
-                    }
-                  }}>
-                  <Icon icon="go-to-file" slot="start" />
-                  <T>Open All Files</T>
-                </VSCodeButton>
+                <OpenAllFilesButton commit={commit} />
               </div>
               <ChangedFilesWithFetching commit={commit} />{' '}
             </div>
@@ -336,18 +363,65 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
           {isFoldPreview ? (
             <FoldPreviewActions />
           ) : (
-            <ActionsBar
-              commit={commit}
-              latestMessage={parsedFields}
-              editedMessage={editedMessage}
-              fieldsBeingEdited={fieldsBeingEdited}
-              isCommitMode={isCommitMode}
-              setMode={setMode}
-            />
+            <>
+              {isSplitSuggestionSupported ? <SplitSuggestion commit={commit} /> : null}
+              <ActionsBar
+                commit={commit}
+                latestMessage={parsedFields}
+                editedMessage={editedMessage}
+                fieldsBeingEdited={fieldsBeingEdited}
+                isCommitMode={isCommitMode}
+                setMode={setMode}
+              />
+            </>
           )}
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * No files are generated -> "Open all" button
+ * All files are generated -> "Open all" button, with warning that they're all generated
+ * Some files are generated -> "Open non-generated files" button
+ */
+function OpenAllFilesButton({commit}: {commit: CommitInfo}) {
+  const paths = useMemo(() => commit.filesSample.map(file => file.path), [commit]);
+  const statuses = useGeneratedFileStatuses(paths);
+  const allAreGenerated = paths.every(file => statuses[file] === GeneratedStatus.Generated);
+  const someAreGenerated = paths.some(file => statuses[file] === GeneratedStatus.Generated);
+  const skipsGenerated = someAreGenerated && !allAreGenerated;
+  return (
+    <Tooltip
+      title={
+        skipsGenerated
+          ? t('Open all non-generated files for editing')
+          : t('Opens all files for editing.\nNote: All files are generated.')
+      }>
+      <Button
+        icon
+        onClick={() => {
+          tracker.track('OpenAllFiles');
+          const statuses = getCachedGeneratedFileStatuses(
+            commit.filesSample.map(file => file.path),
+          );
+          const toOpen = allAreGenerated
+            ? commit.filesSample
+            : commit.filesSample.filter(
+                file =>
+                  statuses[file.path] == null || statuses[file.path] !== GeneratedStatus.Generated,
+              );
+          platform.openFiles(toOpen.map(file => file.path));
+        }}>
+        <Icon icon="go-to-file" slot="start" />
+        {someAreGenerated && !allAreGenerated ? (
+          <T>Open Non-Generated Files</T>
+        ) : (
+          <T>Open All Files</T>
+        )}
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -372,15 +446,15 @@ function areTextFieldsUnchanged(
 
 function FoldPreviewBanner() {
   return (
-    <Banner
-      kind={BannerKind.green}
-      icon={<Icon icon="info" />}
+    <BannerTooltip
       tooltip={t(
         'This is the commit message after combining these commits with the fold command. ' +
           'You can edit this message before confirming and running fold.',
       )}>
-      <T>Previewing result of combined commits</T>
-    </Banner>
+      <Banner kind={BannerKind.green} icon={<Icon icon="info" />}>
+        <T>Previewing result of combined commits</T>
+      </Banner>
+    </BannerTooltip>
   );
 }
 
@@ -418,7 +492,7 @@ function ShowingRemoteMessageBanner({
         onClick: () => {
           runOperation(
             new AmendMessageOperation(
-              succeedableRevset(commit.hash),
+              latestSuccessorUnlessExplicitlyObsolete(commit),
               commitMessageFieldsToString(schema, latestFields),
             ),
           );
@@ -437,26 +511,27 @@ function ShowingRemoteMessageBanner({
     return null;
   }
   return (
-    <>
+    <BannerTooltip
+      tooltip={t(
+        'Viewing the newer commit message from $provider. This message will be used when your code is landed. You can also load the local message instead.',
+        {replace: {$provider: provider.label}},
+      )}>
       <Banner
         icon={<Icon icon="info" />}
-        tooltip={t(
-          'Viewing the newer commit message from $provider. This message will be used when your code is landed. You can also load the local message instead.',
-          {replace: {$provider: provider.label}},
-        )}
+        alwaysShowButtons
         buttons={
-          <VSCodeButton
-            appearance="icon"
+          <Button
+            icon
             data-testid="message-sync-banner-context-menu"
             onClick={e => {
               contextMenu(e);
             }}>
             <Icon icon="ellipsis" />
-          </VSCodeButton>
+          </Button>
         }>
         <T replace={{$provider: provider.label}}>Showing latest commit message from $provider</T>
       </Banner>
-    </>
+    </BannerTooltip>
   );
 }
 
@@ -465,12 +540,12 @@ function FoldPreviewActions() {
   return (
     <div className="commit-info-actions-bar" data-testid="commit-info-actions-bar">
       <div className="commit-info-actions-bar-right">
-        <VSCodeButton appearance="secondary" onClick={cancel}>
+        <Button onClick={cancel}>
           <T>Cancel</T>
-        </VSCodeButton>
-        <VSCodeButton appearance="primary" onClick={run}>
+        </Button>
+        <Button primary onClick={run}>
           <T>Run Combine</T>
-        </VSCodeButton>
+        </Button>
       </div>
     </div>
   );
@@ -573,6 +648,9 @@ function ActionsBar({
     diffSummaries.value && provider?.getSubmittableDiffs([commit], diffSummaries.value);
   const canSubmitIndividualDiffs = submittable && submittable.length > 0;
 
+  const forceEnableSubmit = useAtomValue(overrideDisabledSubmitModes);
+  const submitDisabledReason = forceEnableSubmit ? undefined : provider?.submitDisabledReason?.();
+
   const ongoingImageUploads = useAtomValue(numPendingImageUploads);
   const areImageUploadsOngoing = ongoingImageUploads > 0;
 
@@ -590,9 +668,9 @@ function ActionsBar({
       </div>
       <div className="commit-info-actions-bar-right">
         {isAnythingBeingEdited && !isCommitMode ? (
-          <VSCodeButton appearance="secondary" onClick={() => clearEditedCommitMessage()}>
+          <Button onClick={() => clearEditedCommitMessage()}>
             <T>Cancel</T>
-          </VSCodeButton>
+          </Button>
         ) : null}
 
         {showCommitOrAmend ? (
@@ -611,7 +689,6 @@ function ActionsBar({
             trigger={areImageUploadsOngoing || !anythingToCommit ? 'hover' : 'disabled'}>
             <OperationDisabledButton
               contextKey={isCommitMode ? 'commit' : 'amend'}
-              appearance="secondary"
               disabled={!anythingToCommit || editedMessage == null || areImageUploadsOngoing}
               runOperation={async () => {
                 if (!isCommitMode) {
@@ -631,6 +708,11 @@ function ActionsBar({
                       return;
                     }
                   }
+                }
+
+                const shouldContinue = await confirmUnsavedFiles();
+                if (!shouldContinue) {
+                  return;
                 }
 
                 return doAmendOrCommit();
@@ -654,7 +736,6 @@ function ActionsBar({
             }>
             <OperationDisabledButton
               contextKey={`amend-message-${commit.hash}`}
-              appearance="secondary"
               data-testid="amend-message-button"
               disabled={!isAnythingBeingEdited || editedMessage == null || areImageUploadsOngoing}
               runOperation={async () => {
@@ -695,6 +776,8 @@ function ActionsBar({
             title={
               areImageUploadsOngoing
                 ? t('Image uploads are still pending')
+                : submitDisabledReason
+                ? submitDisabledReason
                 : canSubmitWithCodeReviewProvider
                 ? t('Submit for code review with $provider', {
                     replace: {$provider: codeReviewProviderName ?? 'remote'},
@@ -705,11 +788,21 @@ function ActionsBar({
             }
             placement="top">
             <OperationDisabledButton
+              kind="primary"
               contextKey={`submit-${commit.isDot ? 'head' : commit.hash}`}
-              disabled={!canSubmitWithCodeReviewProvider || areImageUploadsOngoing}
+              disabled={
+                !canSubmitWithCodeReviewProvider ||
+                areImageUploadsOngoing ||
+                submitDisabledReason != null
+              }
               runOperation={async () => {
+                const shouldContinue = await confirmUnsavedFiles();
+                if (!shouldContinue) {
+                  return;
+                }
+
                 let amendOrCommitOp;
-                if (anythingToCommit) {
+                if (commit.isDot && anythingToCommit) {
                   // TODO: we should also amend if there are pending commit message changes, and change the button
                   // to amend message & submit.
                   // Or just remove the submit button if you start editing since we'll update the remote message anyway...

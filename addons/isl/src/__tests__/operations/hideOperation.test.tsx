@@ -16,9 +16,8 @@ import {
   COMMIT,
 } from '../../testUtils';
 import {CommandRunner} from '../../types';
-import {fireEvent, render, screen, within} from '@testing-library/react';
+import {fireEvent, render, screen, within, act} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import {act} from 'react-dom/test-utils';
 
 /*eslint-disable @typescript-eslint/no-non-null-assertion */
 
@@ -119,9 +118,9 @@ describe('hide operation', () => {
     expect(screen.queryByTestId('commit-e')).not.toBeInTheDocument();
   });
 
-  it('does not show uninteresting public base during optimistic hide', () => {
+  it('does not show uninteresting public base during optimistic hide', async () => {
     // Go to another branch so head is not being hidden.
-    CommitTreeListTestUtils.clickGoto('z');
+    await CommitTreeListTestUtils.clickGoto('z');
     rightClickAndChooseFromContextMenu(screen.getByText('Commit A'), 'Hide Commit and Descendants');
 
     const runHideButton = screen.getByText('Hide');

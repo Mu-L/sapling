@@ -158,7 +158,7 @@ py_class!(pub class treemanifest |py| {
     def walk(&self, pymatcher: PyObject) -> PyResult<Vec<PyPathBuf>> {
         let mut result = Vec::new();
         let tree = self.underlying(py);
-        let matcher = extract_matcher(py, pymatcher)?;
+        let matcher = extract_matcher(py, pymatcher)?.0;
         let files = py.allow_threads(move || -> Vec<_> {
             let tree = tree.read();
             tree.files(matcher).collect()
@@ -173,24 +173,35 @@ py_class!(pub class treemanifest |py| {
     /// Like walk(), but includes file node as well.
     def walkfiles(&self, pymatcher: PyObject) -> PyResult<Vec<(PyPathBuf, PyBytes)>> {
         let tree = self.underlying(py);
-        let matcher = extract_matcher(py, pymatcher)?;
-        let files = py.allow_threads(move || -> Vec<_> {
-            let tree = tree.read();
-            tree.files(matcher).collect()
-        });
-        let mut result = Vec::new();
-        for entry in files.into_iter() {
-            let file = entry.map_pyerr(py)?;
-            result.push((file.path.into(), PyBytes::new(py, file.meta.hgid.as_ref())));
+
+        let (matcher, is_rust_matcher) = extract_matcher(py, pymatcher)?;
+
+        if is_rust_matcher {
+            tree.read().files(matcher)
+                .map(|file| {
+                    let file = file?;
+                    Ok((file.path.into(), PyBytes::new(py, file.meta.hgid.as_ref())))
+                })
+                .collect::<Result<Vec<_>>>().map_pyerr(py)
+        } else {
+            let files = py.allow_threads(move || -> Vec<_> {
+                let tree = tree.read();
+                tree.files(matcher).collect()
+            });
+            let mut result = Vec::new();
+            for entry in files.into_iter() {
+                let file = entry.map_pyerr(py)?;
+                result.push((file.path.into(), PyBytes::new(py, file.meta.hgid.as_ref())));
+            }
+            Ok(result)
         }
-        Ok(result)
     }
 
     /// Returns [(path, id)] for directories.
     def walkdirs(&self, pymatcher: PyObject) -> PyResult<Vec<(PyPathBuf, Option<PyBytes>)>> {
         let mut result = Vec::new();
         let tree = self.underlying(py);
-        let matcher = extract_matcher(py, pymatcher)?;
+        let matcher = extract_matcher(py, pymatcher)?.0;
         let dirs = py.allow_threads(move || -> Vec<_> {
             let tree = tree.read();
             tree.dirs(matcher).collect()

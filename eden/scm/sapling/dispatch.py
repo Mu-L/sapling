@@ -784,6 +784,7 @@ def runcommand(
 
     try:
         hintutil.loadhintconfig(lui)
+        bindings.dag.configure(lui._rcfg)
         ui.log("jobid", jobid=encoding.environ.get("HG_JOB_ID", "unknown"))
         ret = _runcommand(ui, options, cmd, d)
 
@@ -826,8 +827,7 @@ def runcommand(
 
 def _log_exception(lui, e):
     try:
-        lui.log(
-            "exceptions",
+        lui.log_exception(
             exception_type=type(e).__name__,
             exception_msg=str(e),
             source="log_exception",
@@ -835,8 +835,7 @@ def _log_exception(lui, e):
     except Exception as e:
         try:
             wrapped = error.ProgrammingError("failed to log exception: {!r}".format(e))
-            lui.log(
-                "exceptions",
+            lui.log_exception(
                 exception_type=type(wrapped).__name__,
                 exception_msg=str(wrapped),
                 source="log_exception_wrapped",
@@ -907,6 +906,9 @@ def _dispatch(req):
         for ui_ in uis:
             ui_.setconfig("profiling", "enabled", "true", "--profile")
 
+    if lui.configbool("experimental", "evalframe-passthrough"):
+        bindings.cext.evalframe_set_pass_through()
+
     with profiling.profile(lui) as profiler:
         # progress behavior might be changed by extensions
         progress.init()
@@ -937,7 +939,9 @@ def _dispatch(req):
 
         cmd, func, args, options, cmdoptions, foundaliases = _parse(lui, args)
 
-        tracing.debug(target="command_info", command=cmd)
+        tracing.debug(
+            target="command_info", command=getattr(func, "legacyname", None) or cmd
+        )
 
         lui.cmdname = ui.cmdname = cmd
         lui.cmdtype = ui.cmdtype = getattr(func, "cmdtype", None)

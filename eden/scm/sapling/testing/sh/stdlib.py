@@ -10,6 +10,7 @@ For .t test specific commands such as "hg", look at t/runtime.py
 instead.
 """
 
+import re
 import sys
 import tarfile
 from functools import wraps
@@ -98,6 +99,15 @@ def wrap(commandfunc) -> Callable[[Env], InterpResult]:
     return wrapper
 
 
+def _unescapechars(s: str) -> str:
+    return (
+        s.replace(r"\n", "\n")
+        .replace(r"\0", "\0")
+        .replace(r"\r", "\r")
+        .replace(r"\t", "\t")
+    )
+
+
 @command
 def echo(args: List[str]) -> str:
     eol = "\n"
@@ -108,19 +118,39 @@ def echo(args: List[str]) -> str:
                 eol = ""
             else:
                 raise NotImplementedError(f"echo {flags}")
-    return " ".join(args) + eol
+    return " ".join([_unescapechars(arg) for arg in args]) + eol
+
+
+@command
+def basename(args: List[str]) -> str:
+    return "".join(arg.rsplit("/", 1)[-1] + "\n" for arg in args)
+
+
+@command
+def dirname(args: List[str]) -> str:
+    return "".join(arg.rsplit("/", 1)[0] + "\n" for arg in args)
 
 
 @command
 def printf(args: List[str]):
-    fmt = (
-        args[0]
-        .replace(r"\n", "\n")
-        .replace(r"\0", "\0")
-        .replace(r"\r", "\r")
-        .replace(r"\t", "\t")
-    )
-    needed = fmt.count("%") - fmt.count("%%") * 2
+    fmt = list(_unescapechars(args[0]))
+    unescapeposs = []
+
+    # special treatment for %b
+    needed = 0
+    i = 0
+    fmtlen = len(fmt)
+    while i + 1 < fmtlen:
+        if fmt[i] == "%":
+            if fmt[i + 1] != "%":
+                if fmt[i + 1] == "b":
+                    unescapeposs.append(needed)
+                    fmt[i + 1] = "s"
+                needed += 1
+            i += 1
+        i += 1
+    fmt = "".join(fmt)
+
     i = 1
     out = []
     if not needed:
@@ -131,6 +161,8 @@ def printf(args: List[str]):
             if len(fmtargs) < needed:
                 fmtargs += ["" * (needed - len(args))]
             i += needed
+            for u in unescapeposs:
+                fmtargs[u] = _unescapechars(fmtargs[u])
             out.append(fmt % tuple(fmtargs))
     return "".join(out)
 
@@ -779,13 +811,20 @@ def mkdir(args: List[str], fs: ShellFS):
 
 
 @command
-def chdir(args: List[str], env: Env, fs: ShellFS):
+def chdir(args: List[str], env: Env, stderr: BinaryIO, fs: ShellFS):
     if args:
         path = args[-1]
     else:
         path = env.getenv("HOME")
-    if path:
+    if not path:
+        stderr.write(f"cd: HOME not set\n".encode())
+        return 1
+    if fs.isdir(path):
         fs.chdir(path)
+        return 0
+    else:
+        stderr.write(f"cd: {path}: No such file or directory\n".encode())
+        return 1
 
 
 @command

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -32,8 +33,7 @@ use cloned::cloned;
 use commit_graph::CommitGraphRef;
 use commit_transformation::upload_commits;
 use context::CoreContext;
-use cross_repo_sync::get_strip_git_submodules_by_version;
-use cross_repo_sync::get_x_repo_submodule_metadata_file_prefx_from_config;
+use cross_repo_sync::get_git_submodule_action_by_version;
 use cross_repo_sync::rewrite_commit;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
@@ -716,6 +716,7 @@ async fn backsync_change_mapping(fb: FacebookInit) -> Result<(), Error> {
     let repos = CommitSyncRepos::LargeToSmall {
         large_repo: source_repo.clone(),
         small_repo: target_repo.clone(),
+        submodule_deps: SubmoduleDeps::ForSync(HashMap::new()),
     };
 
     let current_version = CommitSyncConfigVersion("current_version".to_string());
@@ -1336,6 +1337,7 @@ async fn init_repos(
     let repos = CommitSyncRepos::LargeToSmall {
         large_repo: source_repo.clone(),
         small_repo: target_repo.clone(),
+        submodule_deps: SubmoduleDeps::ForSync(HashMap::new()),
     };
 
     let empty: BTreeMap<_, Option<&str>> = BTreeMap::new();
@@ -1369,10 +1371,12 @@ async fn init_repos(
 
     let live_commit_sync_config = Arc::new(lv_cfg);
 
-    let git_submodules_action = get_strip_git_submodules_by_version(
+    let git_submodules_action = get_git_submodule_action_by_version(
+        &ctx,
         live_commit_sync_config.clone(),
         &version,
         source_repo_id,
+        target_repo_id,
     )
     .await?;
 
@@ -1395,19 +1399,20 @@ async fn init_repos(
     let first_bcs = initial_bcs_id
         .load(&ctx, source_repo.repo_blobstore())
         .await?;
-    upload_commits(&ctx, vec![first_bcs.clone()], &source_repo, &target_repo).await?;
+
+    // No submodules are expanded in backsyncing
+    let submodule_content_ids = Vec::<(Arc<TestRepo>, HashSet<_>)>::new();
+    upload_commits(
+        &ctx,
+        vec![first_bcs.clone()],
+        &source_repo,
+        &target_repo,
+        submodule_content_ids,
+    )
+    .await?;
     let first_bcs_mut = first_bcs.into_mut();
 
-    let source_repo_deps = SubmoduleDeps::NotNeeded;
-    let x_repo_submodule_metadata_file_prefix =
-        get_x_repo_submodule_metadata_file_prefx_from_config(
-            target_repo.repo_identity().id(),
-            &version,
-            live_commit_sync_config,
-        )
-        .await?;
-
-    let maybe_rewritten = {
+    let rewrite_res = {
         let empty_map = HashMap::new();
         cloned!(ctx, source_repo);
         rewrite_commit(
@@ -1416,14 +1421,14 @@ async fn init_repos(
             &empty_map,
             commit_syncer.get_mover_by_version(&version).await?,
             &source_repo,
-            &source_repo_deps,
             Default::default(),
             git_submodules_action,
-            x_repo_submodule_metadata_file_prefix,
+            None, // Submodule expansion data not needed here
         )
         .await
     }?;
-    let rewritten_first_bcs_id = match maybe_rewritten {
+
+    let rewritten_first_bcs_id = match rewrite_res.rewritten {
         Some(mut rewritten) => {
             rewritten.parents.push(initial_commit_in_target);
 
@@ -1707,6 +1712,7 @@ async fn init_merged_repos(
         let repos = CommitSyncRepos::LargeToSmall {
             large_repo: large_repo.clone(),
             small_repo: small_repo.clone(),
+            submodule_deps: SubmoduleDeps::ForSync(HashMap::new()),
         };
 
         let commit_syncer = CommitSyncer::new_with_live_commit_sync_config(

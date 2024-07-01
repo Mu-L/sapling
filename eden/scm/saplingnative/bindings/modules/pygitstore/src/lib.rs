@@ -11,11 +11,14 @@ use std::sync::Arc;
 
 use ::gitstore::git2;
 use ::gitstore::GitStore;
+use configmodel::Config;
 use cpython::*;
+use cpython_ext::convert::ImplInto;
 use cpython_ext::convert::Serde;
 use cpython_ext::PyPath;
 use cpython_ext::ResultPyErrExt;
 use storemodel::types::HgId;
+use types::fetch_mode::FetchMode;
 
 mod impl_into;
 
@@ -30,16 +33,16 @@ pub fn init_module(py: Python, package: &str) -> PyResult<PyModule> {
 py_class!(pub class gitstore |py| {
     data inner: Arc<GitStore>;
 
-    def __new__(_cls, gitdir: &PyPath) -> PyResult<Self> {
-        let store = GitStore::open(gitdir.as_path()).map_pyerr(py)?;
+    def __new__(_cls, gitdir: &PyPath, config: ImplInto<Arc<dyn Config>>) -> PyResult<Self> {
+        let store = GitStore::open(gitdir.as_path(), &config.into()).map_pyerr(py)?;
         Self::create_instance(py, Arc::new(store))
     }
 
-    /// readobj(node, kind="any") -> bytes.
+    /// readobj(node, kind="any", mode="AllowRemote") -> bytes.
     /// Read a git object of the given type.
-    def readobj(&self, node: Serde<HgId>, kind: &str = "any") -> PyResult<PyBytes> {
+    def readobj(&self, node: Serde<HgId>, kind: &str = "any", mode: Serde<FetchMode> = Serde(FetchMode::AllowRemote)) -> PyResult<PyBytes> {
         let kind = str_to_object_type(py, kind)?;
-        let data = self.inner(py).read_obj(node.0, kind).map_pyerr(py)?;
+        let data = self.inner(py).read_obj(node.0, kind, mode.0).map_pyerr(py)?;
         Ok(PyBytes::new(py, &data))
     }
 

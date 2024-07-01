@@ -1,8 +1,6 @@
-#debugruntest-compatible
 
 #require no-eden
 
-  $ configure modernclient
 
   $ newserver master
   $ setconfig extensions.lfs= lfs.url=file:$TESTTMP/lfs-server remotefilelog.lfs=True

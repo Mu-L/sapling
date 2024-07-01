@@ -20,7 +20,7 @@ use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateReason;
 use bookmarks::BookmarksRef;
 use bytes::Bytes;
-use changesets::Changesets;
+use commit_graph::CommitGraph;
 use commit_transformation::create_directory_source_to_target_multi_mover;
 use commit_transformation::create_source_to_target_multi_mover;
 use commit_transformation::DirectoryMultiMover;
@@ -51,6 +51,7 @@ use megarepo_mapping::CommitRemappingState;
 use megarepo_mapping::SourceName;
 use mercurial_derivation::DeriveHgChangeset;
 use mercurial_types::HgFileNodeId;
+use metaconfig_types::RepoConfigArc;
 use mononoke_api::path::MononokePathPrefixes;
 use mononoke_api::ChangesetContext;
 use mononoke_api::Mononoke;
@@ -337,7 +338,7 @@ pub trait MegarepoOp {
             .await?
             .map_err(MegarepoError::internal)
             .try_for_each({
-                async move |path_context| {
+                |path_context| async move {
                     Result::<(), _>::Err(MegarepoError::request(anyhow!(
                         "path {} cannot be added to the target - it's already present",
                         &path_context.path()
@@ -347,7 +348,7 @@ pub trait MegarepoOp {
             .await?;
 
         // Now check if we have a file in target which has the same path
-        // as a directory in additions_merge i.e. detect file-dir conflit
+        // as a directory in additions_merge i.e. detect file-dir conflict
         // where file is from target and dir from additions_merge
         let mut addition_prefixes = vec![];
         for addition in additions {
@@ -464,7 +465,7 @@ pub trait MegarepoOp {
             .await
             .map_err(MegarepoError::internal)?
             .map_err(MegarepoError::internal)
-            .and_then(async move |path| {
+            .and_then(|path| async move {
                 Ok(mover(&path.into_optional_non_root_path().ok_or_else(
                     || MegarepoError::internal(anyhow!("mpath can't be null")),
                 )?)?)
@@ -640,7 +641,7 @@ pub trait MegarepoOp {
         scuba.log_with_msg("Started saving mutable renames", None);
         self.save_mutable_renames(
             ctx,
-            repo.changesets(),
+            repo.commit_graph(),
             mutable_renames,
             moved_commits.iter().map(|(_, css)| &css.mutable_renames),
         )
@@ -653,14 +654,14 @@ pub trait MegarepoOp {
     async fn save_mutable_renames<'a>(
         &'a self,
         ctx: &'a CoreContext,
-        changesets: &'a dyn Changesets,
+        commit_graph: &'a CommitGraph,
         mutable_renames: &'a Arc<MutableRenames>,
         entries_iter: impl Iterator<Item = &'a Vec<MutableRenameEntry>> + Send + 'async_trait,
     ) -> Result<(), Error> {
         for entries in entries_iter {
             for chunk in entries.chunks(100) {
                 mutable_renames
-                    .add_or_overwrite_renames(ctx, changesets, chunk.to_vec())
+                    .add_or_overwrite_renames(ctx, commit_graph, chunk.to_vec())
                     .await?;
             }
         }
@@ -973,51 +974,24 @@ pub trait MegarepoOp {
         Ok(())
     }
 
-    async fn move_bookmark(
-        &self,
-        ctx: &CoreContext,
-        repo: &impl Repo,
-        bookmark: String,
-        cs_id: ChangesetId,
-    ) -> Result<(), MegarepoError> {
-        let mut txn = repo.bookmarks().create_transaction(ctx.clone());
-        let bookmark = BookmarkKey::new(bookmark).map_err(MegarepoError::request)?;
-        let maybe_book_value = repo.bookmarks().get(ctx.clone(), &bookmark).await?;
-
-        match maybe_book_value {
-            Some(old) => {
-                txn.update(&bookmark, cs_id, old, BookmarkUpdateReason::XRepoSync)?;
-            }
-            None => {
-                txn.create(&bookmark, cs_id, BookmarkUpdateReason::XRepoSync)?;
-            }
-        }
-
-        let success = txn
-            .commit()
-            .await
-            .map_err(MegarepoError::internal)?
-            .is_some();
-        if !success {
-            return Err(MegarepoError::internal(anyhow!(
-                "failed to move a bookmark, possibly because of race condition"
-            )));
-        }
-        Ok(())
-    }
-
     async fn check_if_new_sync_target_config_is_equivalent_to_already_existing(
         &self,
         ctx: &CoreContext,
         megarepo_configs: &Arc<dyn MononokeMegarepoConfigs>,
         sync_target_config: &SyncTargetConfig,
     ) -> Result<(), MegarepoError> {
+        let repo = self
+            .find_repo_by_id(ctx, sync_target_config.target.repo_id)
+            .await?;
+        let repo_config = repo.repo().repo_config_arc();
         let existing_config = megarepo_configs
             .get_config_by_version(
                 ctx.clone(),
+                repo_config,
                 sync_target_config.target.clone(),
                 sync_target_config.version.clone(),
             )
+            .await
             .with_context(|| {
                 format!(
                     "while checking existence of {} config",
@@ -1209,12 +1183,16 @@ pub(crate) async fn find_target_sync_config<'a>(
     let state =
         CommitRemappingState::read_state_from_commit(ctx, target_repo, target_cs_id).await?;
 
+    let repo_config = target_repo.repo_config_arc();
     // We have a target config version - let's fetch target config itself.
-    let target_config = megarepo_configs.get_config_by_version(
-        ctx.clone(),
-        target.clone(),
-        state.sync_config_version().clone(),
-    )?;
+    let target_config = megarepo_configs
+        .get_config_by_version(
+            ctx.clone(),
+            repo_config,
+            target.clone(),
+            state.sync_config_version().clone(),
+        )
+        .await?;
 
     Ok((state, target_config))
 }

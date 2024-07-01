@@ -13,16 +13,21 @@ use async_trait::async_trait;
 use blobrepo::save_bonsai_changesets;
 use bonsai_git_mapping::BonsaiGitMappingEntry;
 use bonsai_git_mapping::BonsaiGitMappingRef;
+use bonsai_git_mapping::BonsaisOrGitShas;
 use bonsai_tag_mapping::BonsaiTagMappingRef;
+use borrowed::borrowed;
 use bulk_derivation::BulkDerivation;
 use bytes::Bytes;
 use changesets::ChangesetsRef;
 use cloned::cloned;
+use commit_graph::CommitGraphRef;
 use context::CoreContext;
 use filestore::FilestoreConfigRef;
 use filestore::StoreRequest;
 use futures::stream;
 use futures::stream::Stream;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_stats::TimedTryFutureExt;
 use gix_hash::ObjectId;
 use import_tools::BackfillDerivation;
@@ -86,6 +91,7 @@ impl<R> DirectUploader<R> {
 impl<R> GitUploader for DirectUploader<R>
 where
     R: ChangesetsRef
+        + CommitGraphRef
         + RepoBlobstoreRef
         + BonsaiGitMappingRef
         + BonsaiTagMappingRef
@@ -103,6 +109,31 @@ where
         FileChange::Deletion
     }
 
+    async fn preload_uploaded_commits(
+        &self,
+        ctx: &CoreContext,
+        oids: &[gix_hash::ObjectId],
+    ) -> Result<Vec<(gix_hash::ObjectId, ChangesetId)>, Error> {
+        if self.reupload_commits.reupload_commit() {
+            return Ok(Vec::new());
+        }
+        let oids = BonsaisOrGitShas::GitSha1(
+            oids.iter()
+                .map(|oid| hash::GitSha1::from_bytes(oid.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let result = self.inner.bonsai_git_mapping().get(ctx, oids).await?;
+        result
+            .into_iter()
+            .map(|entry| {
+                entry
+                    .git_sha1
+                    .to_object_id()
+                    .map(|git_sha1| (git_sha1, entry.bcs_id))
+            })
+            .collect()
+    }
+
     async fn check_commit_uploaded(
         &self,
         ctx: &CoreContext,
@@ -111,7 +142,6 @@ where
         if self.reupload_commits.reupload_commit() {
             return Ok(None);
         }
-
         self.inner
             .bonsai_git_mapping()
             .get_bonsai_from_git_sha1(ctx, hash::GitSha1::from_bytes(oid.as_bytes())?)
@@ -156,7 +186,8 @@ where
                 &StoreRequest::new(oid_bytes.len() as u64),
                 stream::once(async move { Ok(oid_bytes) }),
             )
-            .await?
+            .await
+            .context("filestore (upload submodule)")?
         } else if let Some(lfs_meta) = lfs.is_lfs_file(&git_bytes, oid) {
             let blobstore = self.inner.repo_blobstore();
             let filestore_config = *self.inner.filestore_config();
@@ -172,12 +203,15 @@ where
                         lfs_meta.sha256.to_brief(),
                         lfs_meta.size,
                     );
-                    filestore::store(&blobstore, filestore_config, &ctx, &req, bstream).await
+                    filestore::store(&blobstore, filestore_config, &ctx, &req, bstream)
+                        .await
+                        .context("filestore (lfs)")
                 },
             )
             .await?
         } else {
-            let (req, bstream) = git_store_request(ctx, oid, git_bytes)?;
+            let (req, bstream) =
+                git_store_request(ctx, oid, git_bytes).context("git_store_request")?;
             filestore::store(
                 self.inner.repo_blobstore(),
                 *self.inner.filestore_config(),
@@ -185,7 +219,8 @@ where
                 &req,
                 bstream,
             )
-            .await?
+            .await
+            .context("filestore (upload regular)")?
         };
         debug!(
             ctx.logger(),
@@ -248,6 +283,7 @@ where
             .iter()
             .map(|entry| entry.bcs_id)
             .collect::<Vec<_>>();
+        let batch_size = csids.len();
         let config = self.inner.repo_derived_data().active_config();
 
         // Derive all types that don't depend on GitCommit
@@ -259,11 +295,50 @@ where
                 _ => true,
             })
             .collect::<Vec<_>>();
-        self.inner
-            .repo_derived_data()
-            .manager()
-            .derive_bulk(ctx, csids.clone(), None, &non_git_types)
+        // Find the derivation frontier to be resilient to restarts when backfillng wasn't properly
+        // caught up
+        let last_derived = self
+            .inner
+            .commit_graph()
+            .ancestors_frontier_with(ctx, csids.clone(), |csid| {
+                borrowed!(ctx);
+                cloned!(non_git_types);
+                async move {
+                    Ok(stream::iter(non_git_types)
+                        .all(|ddt| async move {
+                            self.inner
+                                .repo_derived_data()
+                                .manager()
+                                .is_derived(ctx, csid, None, ddt.clone())
+                                .await
+                                .unwrap_or(false)
+                        })
+                        .await)
+                }
+            })
             .await?;
+        self.inner
+            .commit_graph()
+            .ancestors_difference_segment_slices(
+                ctx,
+                csids.clone(),
+                last_derived.clone(),
+                batch_size as u64,
+            )
+            .await?
+            .try_for_each(|chunk| {
+                borrowed!(non_git_types);
+                async move {
+                    self.inner
+                        .repo_derived_data()
+                        .manager()
+                        .derive_bulk(ctx, chunk, None, non_git_types)
+                        .await?;
+                    Ok(())
+                }
+            })
+            .await?;
+
         // Upload all bonsai git mappings.
         // This is done instead of deriving git commits. It is not equivalent as roundtrip from
         // git to bonsai and back is not guaranteed.
@@ -320,12 +395,11 @@ where
             target: BonsaiAnnotatedTagTarget::Changeset(target_changeset_id),
             pgp_signature: tag.pgp_signature.take(),
         };
-        let tag_name = format!("tags/{}", tag.name);
         create_annotated_tag(
             ctx,
             &*self.inner,
             Some(tag.oid),
-            tag_name,
+            tag.name,
             tag.author.take(),
             tag.author_date.take().map(|date| date.into()),
             tag.message,

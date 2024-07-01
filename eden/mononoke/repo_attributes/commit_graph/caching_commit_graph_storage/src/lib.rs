@@ -36,7 +36,7 @@ use commit_graph_types::edges::ChangesetEdges;
 use commit_graph_types::storage::CommitGraphStorage;
 use commit_graph_types::storage::FetchedChangesetEdges;
 use commit_graph_types::storage::Prefetch;
-use commit_graph_types::storage::PrefetchEdge;
+use commit_graph_types::storage::PrefetchTarget;
 use context::CoreContext;
 use fbthrift::compact_protocol;
 use maplit::hashset;
@@ -76,6 +76,7 @@ pub struct CachingCommitGraphStorage {
     keygen_single: KeyGen,
     keygen_prefetch_p1_linear: KeyGen,
     keygen_prefetch_skip_tree: KeyGen,
+    keygen_prefetch_skip_tree_exact: KeyGen,
     repo_id: RepositoryId,
 }
 
@@ -260,10 +261,15 @@ impl EntityStore<CachedPrefetchedChangesetEdges> for CacheRequest<'_> {
 
     fn keygen(&self) -> &KeyGen {
         if self.memcache_prefetch {
-            match self.prefetch.target_edge() {
-                Some(PrefetchEdge::FirstParent) => &self.caching_storage.keygen_prefetch_p1_linear,
-                Some(PrefetchEdge::SkipTreeSkewAncestor) => {
+            match self.prefetch.target() {
+                Some(PrefetchTarget::LinearAncestors { .. }) => {
+                    &self.caching_storage.keygen_prefetch_p1_linear
+                }
+                Some(PrefetchTarget::SkipTreeSkewAncestors { .. }) => {
                     &self.caching_storage.keygen_prefetch_skip_tree
+                }
+                Some(PrefetchTarget::ExactSkipTreeAncestors { .. }) => {
+                    &self.caching_storage.keygen_prefetch_skip_tree_exact
                 }
                 None => &self.caching_storage.keygen_single,
             }
@@ -423,6 +429,7 @@ impl CachingCommitGraphStorage {
             keygen_single: Self::keygen("scm.mononoke.commitgraph"),
             keygen_prefetch_p1_linear: Self::keygen("scm.mononoke.commitgraph.p1"),
             keygen_prefetch_skip_tree: Self::keygen("scm.mononoke.commitgraph.sk"),
+            keygen_prefetch_skip_tree_exact: Self::keygen("scm.mononoke.commitgraph.ske"),
         }
     }
 

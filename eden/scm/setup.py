@@ -35,7 +35,6 @@ import struct
 import subprocess
 import tempfile
 import time
-import zipfile
 
 from contrib.pick_python import load_build_env
 
@@ -92,8 +91,6 @@ from distutils.command.install_lib import install_lib
 from distutils.command.install_scripts import install_scripts
 from distutils.core import Command, setup
 from distutils.dir_util import copy_tree
-from distutils.dist import Distribution
-from distutils.errors import CCompilerError, DistutilsExecError
 from distutils.spawn import find_executable, spawn
 from distutils.sysconfig import get_config_var
 from distutils.version import StrictVersion
@@ -381,7 +378,6 @@ def hgtemplate(template, cast=None):
 
 
 def gitversion():
-    hgenv = localhgenv()
     format = "%cd-h%h"
     date_format = "format:%Y%m%d-%H%M%S"
     try:
@@ -400,7 +396,7 @@ def gitversion():
         if retcode or err:
             return None
         return out.decode("utf-8")
-    except EnvironmentError as e:
+    except EnvironmentError:
         return None
 
 
@@ -1100,17 +1096,6 @@ def ordinarypath(p):
     return p and p[0] != "." and p[-1] != "~"
 
 
-# distutils expects version to be str/unicode. Converting it to
-# unicode on Python 2 still works because it won't contain any
-# non-ascii bytes and will be implicitly converted back to bytes
-# when operated on.
-setupversion = sapling_version
-
-if os.name == "nt":
-    # Windows binary file versions for exe/dll files must have the
-    # form W.X.Y.Z, where W,X,Y,Z are numbers in the range 0..65535
-    setupversion = sapling_version.split("+", 1)[0]
-
 if sys.platform == "darwin" and os.path.exists("/usr/bin/xcodebuild"):
     xcode_version = runcmd(["/usr/bin/xcodebuild", "-version"], {})[1].splitlines()
     if xcode_version:
@@ -1241,7 +1226,7 @@ if sys.platform == "cygwin":
 
 setup(
     name="sapling",
-    version=setupversion,
+    version="0.0.1",  # dummy version to make setuptools happy
     author="Olivia Mackall and many others",
     url="https://sapling-scm.com/",
     description=(

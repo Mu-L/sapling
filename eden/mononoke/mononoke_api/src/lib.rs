@@ -72,6 +72,7 @@ pub use crate::repo::BookmarkInfo;
 pub use crate::repo::Repo;
 pub use crate::repo::RepoContext;
 pub use crate::repo::StoreRequest;
+pub use crate::repo::XRepoLookupExactBehaviour;
 pub use crate::repo::XRepoLookupSyncBehaviour;
 pub use crate::specifiers::ChangesetId;
 pub use crate::specifiers::ChangesetIdPrefix;
@@ -122,7 +123,7 @@ impl Mononoke {
         match self.repos.get_by_name(name.as_ref()) {
             None => Ok(None),
             Some(repo) => Ok(Some(
-                RepoContextBuilder::new(ctx, repo, self.repos.as_ref()).await?,
+                RepoContextBuilder::new(ctx, repo, self.repos.clone()).await?,
             )),
         }
     }
@@ -138,7 +139,7 @@ impl Mononoke {
         match self.repos.get_by_id(repo_id.id()) {
             None => Ok(None),
             Some(repo) => Ok(Some(
-                RepoContextBuilder::new(ctx, repo, self.repos.as_ref()).await?,
+                RepoContextBuilder::new(ctx, repo, self.repos.clone()).await?,
             )),
         }
     }

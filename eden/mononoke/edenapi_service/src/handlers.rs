@@ -53,7 +53,7 @@ use time_ext::DurationExt;
 
 use crate::context::ServerContext;
 use crate::middleware::request_dumper::RequestDumper;
-use crate::scuba::EdenApiScubaKey;
+use crate::scuba::SaplingRemoteApiScubaKey;
 use crate::utils::cbor_mime;
 use crate::utils::get_repo;
 use crate::utils::monitor::Monitor;
@@ -65,6 +65,7 @@ mod bookmarks;
 mod capabilities;
 mod clone;
 mod commit;
+mod commit_cloud;
 mod files;
 mod handler;
 mod history;
@@ -72,20 +73,21 @@ mod land;
 mod lookup;
 mod pull;
 mod repos;
+mod suffix_query;
 mod trees;
-
-pub(crate) use handler::EdenApiHandler;
 pub(crate) use handler::HandlerResult;
 pub(crate) use handler::PathExtractorWithRepo;
+pub(crate) use handler::SaplingRemoteApiHandler;
 
-use self::handler::EdenApiContext;
+use self::handler::SaplingRemoteApiContext;
 
 const REPORTING_LOOP_WAIT: u64 = 5;
 
-/// Enum identifying the EdenAPI method that each handler corresponds to.
+/// Enum identifying the SaplingRemoteAPI method that each handler corresponds to.
 /// Used to identify the handler for logging and stats collection.
 #[derive(Copy, Clone)]
-pub enum EdenApiMethod {
+pub enum SaplingRemoteApiMethod {
+    SuffixQuery,
     Blame,
     Capabilities,
     Files2,
@@ -115,11 +117,15 @@ pub enum EdenApiMethod {
     DownloadFile,
     CommitMutations,
     CommitTranslateId,
+    CloudWorkspace,
+    CloudReferences,
+    CloudUpdateReferences,
 }
 
-impl fmt::Display for EdenApiMethod {
+impl fmt::Display for SaplingRemoteApiMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::SuffixQuery => "suffix_query",
             Self::Blame => "blame",
             Self::Capabilities => "capabilities",
             Self::Files2 => "files2",
@@ -149,6 +155,9 @@ impl fmt::Display for EdenApiMethod {
             Self::DownloadFile => "download_file",
             Self::CommitMutations => "commit_mutations",
             Self::CommitTranslateId => "commit_translate_id",
+            Self::CloudWorkspace => "cloud_workspace",
+            Self::CloudReferences => "cloud_references",
+            Self::CloudUpdateReferences => "cloud_update_references",
         };
         write!(f, "{}", name)
     }
@@ -161,11 +170,11 @@ impl fmt::Display for EdenApiMethod {
 #[derive(Default, StateData, Clone)]
 pub struct HandlerInfo {
     pub repo: Option<String>,
-    pub method: Option<EdenApiMethod>,
+    pub method: Option<SaplingRemoteApiMethod>,
 }
 
 impl HandlerInfo {
-    pub fn new(repo: impl ToString, method: EdenApiMethod) -> Self {
+    pub fn new(repo: impl ToString, method: SaplingRemoteApiMethod) -> Self {
         Self {
             repo: Some(repo.to_string()),
             method: Some(method),
@@ -264,11 +273,11 @@ fn health_handler(state: State) -> (State, &'static str) {
     }
 }
 
-async fn handler_wrapper<Handler: EdenApiHandler>(
+async fn handler_wrapper<Handler: SaplingRemoteApiHandler>(
     mut state: State,
 ) -> Result<(State, Response<Body>), (State, GothamHandlerError)>
 where
-    <Handler as EdenApiHandler>::Request: std::fmt::Debug,
+    <Handler as SaplingRemoteApiHandler>::Request: std::fmt::Debug,
 {
     let (future_stats, res) = async {
         let path = Handler::PathExtractor::take_from(&mut state);
@@ -292,7 +301,7 @@ where
             rd.add_request(&request);
         }
 
-        let ectx = EdenApiContext::new(rctx, sctx, repo, path, query);
+        let ectx = SaplingRemoteApiContext::new(rctx, sctx, repo, path, query);
 
         match Handler::handler(ectx, request).await {
             Ok(responses) => Ok(encode_response_stream(
@@ -317,7 +326,7 @@ where
     let ctx = RequestContext::borrow_from(state).ctx.clone();
     let (sender, receiver) = oneshot::channel::<()>();
 
-    // EdenApi doesn't fill these in until the end of the request, so we need
+    // SaplingRemoteApi doesn't fill these in until the end of the request, so we need
     // to add them now.   A future improvement is to put these on the scuba
     // sample builder earlier on so we can clone it.
     let mut base_scuba = ctx.scuba().clone();
@@ -327,8 +336,11 @@ where
     );
 
     if let Some(info) = state.try_borrow::<HandlerInfo>() {
-        base_scuba.add_opt(EdenApiScubaKey::Repo, info.repo.clone());
-        base_scuba.add_opt(EdenApiScubaKey::Method, info.method.map(|m| m.to_string()));
+        base_scuba.add_opt(SaplingRemoteApiScubaKey::Repo, info.repo.clone());
+        base_scuba.add_opt(
+            SaplingRemoteApiScubaKey::Method,
+            info.method.map(|m| m.to_string()),
+        );
     }
 
     if let Some(metadata_state) = MetadataState::try_borrow_from(state) {
@@ -348,7 +360,7 @@ where
             let mut scuba = base_scuba.clone();
             ctx.perf_counters().insert_perf_counters(&mut scuba);
             scuba.log_with_msg(
-                "Long running EdenAPI request",
+                "Long running SaplingRemoteAPI request",
                 format!("{}", start.elapsed().as_micros_unchecked()),
             );
         }
@@ -362,7 +374,7 @@ where
     Monitor::new(stream, sender)
 }
 
-/// Encode a stream of EdenAPI responses into its final on-wire representation.
+/// Encode a stream of SaplingRemoteAPI responses into its final on-wire representation.
 ///
 /// This involves converting each item to its wire format, CBOR serializing them, and then
 /// optionally compressing the resulting byte stream based on the specified Content-Encoding.
@@ -388,9 +400,9 @@ where
     C: gotham::pipeline::PipelineHandleChain<P> + Copy + Send + Sync + 'static,
     P: std::panic::RefUnwindSafe + Send + Sync + 'static,
 {
-    fn setup<Handler: EdenApiHandler>(route: &mut RouterBuilder<C, P>)
+    fn setup<Handler: SaplingRemoteApiHandler>(route: &mut RouterBuilder<C, P>)
     where
-        <Handler as EdenApiHandler>::Request: std::fmt::Debug,
+        <Handler as SaplingRemoteApiHandler>::Request: std::fmt::Debug,
     {
         route
             .request(
@@ -434,6 +446,10 @@ pub fn build_router(ctx: ServerContext) -> Router {
         Handlers::setup::<commit::CommitMutationsHandler>(route);
         Handlers::setup::<commit::CommitTranslateId>(route);
         Handlers::setup::<blame::BlameHandler>(route);
+        Handlers::setup::<commit_cloud::CommitCloudWorkspace>(route);
+        Handlers::setup::<commit_cloud::CommitCloudReferences>(route);
+        Handlers::setup::<commit_cloud::CommitCloudUpdateReferences>(route);
+        Handlers::setup::<suffix_query::SuffixQueryHandler>(route);
         route.get("/:repo/health_check").to(health_handler);
         route
             .get("/:repo/capabilities")

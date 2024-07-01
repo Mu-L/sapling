@@ -10,8 +10,10 @@ import type {ValidatedRepoInfo} from './types';
 import type {ReactNode} from 'react';
 
 import {Delayed} from './Delayed';
+import {Subtle} from './Subtle';
 import {Tooltip} from './Tooltip';
 import {codeReviewProvider} from './codeReview/CodeReviewInfo';
+import {Button} from './components/Button';
 import {T, t} from './i18n';
 import {
   EXIT_CODE_FORGET,
@@ -20,9 +22,9 @@ import {
   useAbortRunningOperation,
 } from './operationsState';
 import {repositoryInfo} from './serverAPIState';
+import {processTerminalLines} from './terminalOutput';
 import {CommandRunner} from './types';
 import {short} from './utils';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {useAtomValue} from 'jotai';
 import {Icon} from 'shared/Icon';
 import './CommandHistoryAndProgress.css';
@@ -67,12 +69,15 @@ function OperationDescription(props: {
                   return arg.path;
                 case 'exact-revset':
                 case 'succeedable-revset':
+                case 'optimistic-revset':
                   return props.long
                     ? arg.revset
                     : // truncate full commit hashes to short representation visually
                     // revset could also be a remote bookmark, so only do this if it looks like a hash
-                    /[a-z0-9]{40}/.test(arg.revset)
+                    /^[a-z0-9]{40}$/.test(arg.revset)
                     ? short(arg.revset)
+                    : arg.revset.length > 80
+                    ? arg.revset.slice(0, 80) + '...'
                     : arg.revset;
               }
             }
@@ -125,8 +130,7 @@ export function CommandHistoryAndProgress() {
     const hideUntil = new Date((progress.startTime?.getTime() || 0) + slowThreshold);
     abort = (
       <Delayed hideUntil={hideUntil}>
-        <VSCodeButton
-          appearance="secondary"
+        <Button
           data-testid="abort-button"
           disabled={progress.aborting}
           onClick={() => {
@@ -134,7 +138,7 @@ export function CommandHistoryAndProgress() {
           }}>
           <Icon slot="start" icon={progress.aborting ? 'loading' : 'stop-circle'} />
           <T>Abort</T>
-        </VSCodeButton>
+        </Button>
       </Delayed>
     );
   } else if (progress.exitCode === 0) {
@@ -158,6 +162,8 @@ export function CommandHistoryAndProgress() {
     showLastLineOfOutput = true;
   }
 
+  const processedLines = processTerminalLines(progress.commandOutput ?? []);
+
   return (
     <div className="progress-container" data-testid="progress-container">
       <Tooltip
@@ -172,7 +178,17 @@ export function CommandHistoryAndProgress() {
                 <br />
                 <b>Command output:</b>
                 <br />
-                <pre>{progress.commandOutput?.join('') || 'No output'}</pre>
+                {processedLines.length === 0 ? (
+                  <Subtle>
+                    <T>No output</T>
+                  </Subtle>
+                ) : (
+                  <pre>
+                    {processedLines.map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </pre>
+                )}
               </>
             )}
           </div>
@@ -202,9 +218,7 @@ export function CommandHistoryAndProgress() {
                   {progress.currentProgress.message}
                 </ProgressLine>
               ) : (
-                progress.commandOutput
-                  ?.slice(-1)
-                  .map((line, i) => <ProgressLine key={i}>{line}</ProgressLine>)
+                processedLines.length > 0 && <ProgressLine>{processedLines.at(-1)}</ProgressLine>
               )}
             </div>
           </div>

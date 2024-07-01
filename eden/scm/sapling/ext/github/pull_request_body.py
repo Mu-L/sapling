@@ -4,7 +4,7 @@
 # GNU General Public License version 2.
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Tuple, Union
 
 from .gh_submit import Repository
 
@@ -13,11 +13,10 @@ _SAPLING_FOOTER_MARKER = "[//]: # (BEGIN SAPLING FOOTER)"
 
 
 def create_pull_request_title_and_body(
-    commit_msg: str,
+    commit_msg_or_title_body: Union[str, Tuple[str, str]],
     pr_numbers_and_num_commits: List[Tuple[int, int]],
     pr_numbers_index: int,
     repository: Repository,
-    title: Optional[str] = None,
     reviewstack: bool = True,
 ) -> Tuple[str, str]:
     r"""Returns (title, body) for the pull request.
@@ -37,8 +36,28 @@ def create_pull_request_title_and_body(
     The original commit message.
     >>> reviewstack_url = "https://reviewstack.dev/facebook/sapling/pull/42"
     >>> print(body.replace(reviewstack_url, "{reviewstack_url}"))
-    The original commit message.
     Second line of message.
+    ---
+    [//]: # (BEGIN SAPLING FOOTER)
+    Stack created with [Sapling](https://sapling-scm.com). Best reviewed with [ReviewStack]({reviewstack_url}).
+    * #1
+    * #2 (2 commits)
+    * __->__ #42
+    * #4
+
+    Add trailing whitespace to commit_msg and ensure it is preserved.
+    >>> commit_msg += '\n\n'
+    >>> title, body = create_pull_request_title_and_body(
+    ...     commit_msg,
+    ...     pr_numbers_and_num_commits,
+    ...     pr_numbers_index,
+    ...     contributor_repo,
+    ... )
+    >>> print(title)
+    The original commit message.
+    >>> print(body.replace(reviewstack_url, "{reviewstack_url}"))
+    Second line of message.
+    <BLANKLINE>
     ---
     [//]: # (BEGIN SAPLING FOOTER)
     Stack created with [Sapling](https://sapling-scm.com). Best reviewed with [ReviewStack]({reviewstack_url}).
@@ -50,9 +69,11 @@ def create_pull_request_title_and_body(
     Disable reviewstack message:
     >>> title, body = create_pull_request_title_and_body(commit_msg, pr_numbers_and_num_commits,
     ...     pr_numbers_index, contributor_repo, reviewstack=False)
-    >>> print(body)
+    >>> print(title)
     The original commit message.
+    >>> print(body)
     Second line of message.
+    <BLANKLINE>
     ---
     [//]: # (BEGIN SAPLING FOOTER)
     * #1
@@ -62,16 +83,25 @@ def create_pull_request_title_and_body(
 
     Single commit stack:
     >>> title, body = create_pull_request_title_and_body("Foo", [(1, 1)], 0, contributor_repo)
-    >>> print(body.replace(reviewstack_url, "{reviewstack_url}"))
+    >>> print(title)
     Foo
+    >>> print(body.replace(reviewstack_url, "{reviewstack_url}"))
+    <BLANKLINE>
+    >>> title, body = create_pull_request_title_and_body(("Foo", "Bar"), [(1, 1)], 0, contributor_repo)
+    >>> print(title)
+    Foo
+    >>> print(body.replace(reviewstack_url, "{reviewstack_url}"))
+    Bar
     """
     owner, name = repository.get_upstream_owner_and_name()
     pr = pr_numbers_and_num_commits[pr_numbers_index][0]
 
-    if title is None:
-        title = firstline(commit_msg)
-        body = commit_msg[len(title) + 1 :]
-    body = _strip_stack_information(commit_msg)
+    try:
+        title, body = commit_msg_or_title_body
+    except ValueError:
+        title, body = title_and_body(commit_msg_or_title_body)
+
+    body = _strip_stack_information(body)
     extra = []
     if len(pr_numbers_and_num_commits) > 1:
         if reviewstack:
@@ -84,7 +114,9 @@ def create_pull_request_title_and_body(
         )
         extra.append(bulleted_list)
     if extra:
-        body = "\n".join([body, _HORIZONTAL_RULE, _SAPLING_FOOTER_MARKER] + extra)
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += "\n".join([_HORIZONTAL_RULE, _SAPLING_FOOTER_MARKER] + extra)
     return title, body
 
 
@@ -223,3 +255,26 @@ def firstline(msg: str) -> str:
     end = match.start() if match else len(msg)
     end = min(end, _MAX_FIRSTLINE_LEN)
     return msg[:end]
+
+
+def title_and_body(msg: str) -> Tuple[str, str]:
+    r"""Returns the title and body of a commit message.
+
+    >>> title_and_body("foobar")
+    ('foobar', '')
+    >>> title_and_body("foo\nbar")
+    ('foo', 'bar')
+    >>> title_and_body("foo\r\nbar")
+    ('foo', 'bar')
+    >>> title_and_body("x" * (_MAX_FIRSTLINE_LEN + 1)) == ("x" * _MAX_FIRSTLINE_LEN, "x")
+    True
+    """
+    title = firstline(msg)
+    rest = msg[len(title) :]
+    if rest.startswith("\n"):
+        body = rest[1:]
+    elif rest.startswith("\r\n"):
+        body = rest[2:]
+    else:
+        body = rest
+    return (title, body)

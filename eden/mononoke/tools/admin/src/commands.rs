@@ -30,6 +30,7 @@ mononoke_app::subcommands! {
     mod blobstore_bulk_unlink;
     mod blobstore_unlink;
     mod bookmarks;
+    mod cas_store;
     mod changelog;
     mod commit;
     mod commit_graph;
@@ -45,6 +46,7 @@ mononoke_app::subcommands! {
     mod hg_sync;
     mod list_repos;
     mod locking;
+    mod megarepo;
     mod mutable_counters;
     mod mutable_renames;
     mod redaction;

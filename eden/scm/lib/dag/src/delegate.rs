@@ -44,7 +44,7 @@ macro_rules! delegate {
                         $crate::Result<Option<$crate::Id>>
                     > + Send + 's>> where Self: 's
             {
-                self.$($t)*.vertex_id_with_max_group(name, $crate::Group::NON_MASTER)
+                self.$($t)*.vertex_id_optional(name)
             }
             fn contains_vertex_id_locally<'a: 's, 'b: 's, 's>(&'a self, ids: &'b [$crate::Id])
                 -> std::pin::Pin<Box<dyn std::future::Future<Output=
@@ -270,6 +270,17 @@ macro_rules! delegate {
                     > + Send + 's>> where Self: 's
             {
                 self.$($t)*.reachable_roots(roots, heads)
+            }
+            fn suggest_bisect<'a: 's, 's>(
+                &'a self,
+                roots: $crate::Set,
+                heads: $crate::Set,
+                skip: $crate::Set,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output=
+                    $crate::Result<(Option<$crate::Vertex>, $crate::Set, $crate::Set)>
+                > + Send + 's>> where Self: 's
+            {
+                self.$($t)*.suggest_bisect(roots, heads, skip)
             }
             fn dirty<'a: 's, 's>(&'a self)
                 -> std::pin::Pin<Box<dyn std::future::Future<Output=

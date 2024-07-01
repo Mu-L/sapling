@@ -9,10 +9,13 @@ import type {ThemeColor} from './theme';
 import type {PreferredSubmitCommand} from './types';
 import type {ReactNode} from 'react';
 
-import {Row} from './ComponentUtils';
+import {splitSuggestionEnabled} from './CommitInfoView/SplitSuggestion';
+import {condenseObsoleteStacks} from './CommitTreeList';
+import {Column, Row} from './ComponentUtils';
 import {confirmShouldSubmitEnabledAtom} from './ConfirmSubmitStack';
 import {DropdownField, DropdownFields} from './DropdownFields';
 import {useShowKeyboardShortcutsHelp} from './ISLShortcuts';
+import {Internal} from './Internal';
 import {Kbd} from './Kbd';
 import {Link} from './Link';
 import {RestackBehaviorSetting} from './RestackBehavior';
@@ -21,12 +24,16 @@ import {Tooltip} from './Tooltip';
 import {codeReviewProvider} from './codeReview/CodeReviewInfo';
 import {showDiffNumberConfig} from './codeReview/DiffBadge';
 import {SubmitAsDraftCheckbox} from './codeReview/DraftCheckbox';
+import {overrideDisabledSubmitModes} from './codeReview/github/branchPrState';
 import {Button} from './components/Button';
 import {Checkbox} from './components/Checkbox';
 import {Dropdown} from './components/Dropdown';
+import GatedComponent from './components/GatedComponent';
 import {debugToolsEnabledState} from './debug/DebugToolsState';
+import {externalMergeToolAtom} from './externalMergeTool';
 import {t, T} from './i18n';
 import {configBackedAtom} from './jotaiUtils';
+import {AutoResolveSettingCheckbox} from './mergeConflicts/state';
 import {SetConfigOperation} from './operations/SetConfigOperation';
 import {useRunOperation} from './operationsState';
 import platform from './platform';
@@ -111,9 +118,16 @@ function SettingsDropdown({
         <ZoomUISetting />
       </Setting>
       <Setting title={<T>Commits</T>}>
-        <RenderCompactSetting />
+        <Column alignStart>
+          <RenderCompactSetting />
+          <CondenseObsoleteSetting />
+          <GatedComponent featureFlag={Internal.featureFlags?.ShowSplitSuggestion}>
+            <SplitSuggestionSetting />
+          </GatedComponent>
+        </Column>
       </Setting>
       <Setting title={<T>Conflicts</T>}>
+        <AutoResolveSettingCheckbox />
         <RestackBehaviorSetting />
       </Setting>
       {/* TODO: enable this setting when there is actually a chocie to be made here. */}
@@ -175,7 +189,10 @@ function SettingsDropdown({
       </Setting>
       {platform.canCustomizeFileOpener && (
         <Setting title={<T>Environment</T>}>
-          <OpenFilesCmdSetting />
+          <Column alignStart>
+            <OpenFilesCmdSetting />
+            <ExternalMergeToolSetting />
+          </Column>
         </Setting>
       )}
       <DebugToolsField />
@@ -226,6 +243,41 @@ function RenderCompactSetting() {
   );
 }
 
+function CondenseObsoleteSetting() {
+  const [value, setValue] = useAtom(condenseObsoleteStacks);
+  return (
+    <Tooltip
+      title={t(
+        'Visually condense a continuous stack of obsolete commits into just the top and bottom commits.',
+      )}>
+      <Checkbox
+        data-testid="condense-obsolete-stacks"
+        checked={value !== false}
+        onChange={checked => {
+          setValue(checked);
+        }}>
+        <T>Condense Obsolete Stacks</T>
+      </Checkbox>
+    </Tooltip>
+  );
+}
+
+function SplitSuggestionSetting() {
+  const [value, setValue] = useAtom(splitSuggestionEnabled);
+  return (
+    <Tooltip title={t('Suggest splitting up large commits with a banner')}>
+      <Checkbox
+        data-testid="split-suggestion-enabled"
+        checked={value}
+        onChange={checked => {
+          setValue(checked);
+        }}>
+        <T>Show Split Suggestion</T>
+      </Checkbox>
+    </Tooltip>
+  );
+}
+
 export const openFileCmdAtom = configBackedAtom<string | null>(
   'isl.open-file-cmd',
   null,
@@ -257,7 +309,50 @@ function OpenFilesCmdSetting() {
         </div>
       )}>
       <Row>
-        <T replace={{$cmd: cmdEl}}>Open files in $cmd</T>
+        <T replace={{$cmd: cmdEl}}>Open files in: $cmd</T>
+        <Subtle>
+          <T>How to configure?</T>
+        </Subtle>
+        <Icon icon="question" />
+      </Row>
+    </Tooltip>
+  );
+}
+
+function ExternalMergeToolSetting() {
+  const mergeTool = useAtomValue(externalMergeToolAtom);
+  const cmdEl = mergeTool == null ? <T>None</T> : <code>{mergeTool}</code>;
+  return (
+    <Tooltip
+      component={() => (
+        <div>
+          <div style={{alignItems: 'flex-start', maxWidth: 400}}>
+            <T
+              replace={{
+                $help: <code>sl help config.merge-tools</code>,
+                $configedit: <code>sl config --edit</code>,
+                $mymergetool: <code>merge-tools.mymergetool</code>,
+                $uimerge: <code>ui.merge = mymergetool</code>,
+                $gui: <code>merge-tools.mymergetool.gui</code>,
+                $local: <code>--local</code>,
+                $br: (
+                  <>
+                    <br />
+                    <br />
+                  </>
+                ),
+              }}>
+              You can configure Sapling and ISL to use a custom external merge tool, which is used
+              when a merge conflict is detected.$br Define your tool with $configedit (or with
+              $local to configure only for the current repository), by setting $mymergetool and
+              $uimerge$brCLI merge tools like vimdiff won't be used from ISL. Ensure $gui is set to
+              True.$br For more information, see: $help
+            </T>
+          </div>
+        </div>
+      )}>
+      <Row>
+        <T replace={{$cmd: cmdEl}}>External Merge Tool: $cmd</T>
         <Subtle>
           <T>How to configure?</T>
         </Subtle>
@@ -326,16 +421,28 @@ function ZoomUISetting() {
 
 function DebugToolsField() {
   const [isDebug, setIsDebug] = useAtom(debugToolsEnabledState);
+  const [overrideDisabledSubmit, setOverrideDisabledSubmit] = useAtom(overrideDisabledSubmitModes);
+  const provider = useAtomValue(codeReviewProvider);
 
   return (
-    <DropdownField title={t('Debug Tools')}>
-      <Checkbox
-        checked={isDebug}
-        onChange={checked => {
-          setIsDebug(checked);
-        }}>
-        <T>Enable Debug Tools</T>
-      </Checkbox>
+    <DropdownField title={t('Debug Tools & Experimental')}>
+      <Column alignStart>
+        <Checkbox
+          checked={isDebug}
+          onChange={checked => {
+            setIsDebug(checked);
+          }}>
+          <T>Enable Debug Tools</T>
+        </Checkbox>
+        {provider?.submitDisabledReason?.() != null && (
+          <Checkbox
+            checked={overrideDisabledSubmit}
+            onChange={setOverrideDisabledSubmit}
+            data-testid="force-enable-github-submit">
+            <T>Force enable `sl pr submit` and `sl ghstack submit`</T>
+          </Checkbox>
+        )}
+      </Column>
     </DropdownField>
   );
 }

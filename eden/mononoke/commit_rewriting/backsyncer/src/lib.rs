@@ -24,9 +24,12 @@
 //!    log id.
 
 use std::collections::HashSet;
+use std::iter::once;
+use std::iter::repeat;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::bail;
@@ -58,6 +61,7 @@ use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
 use cross_repo_sync::CommitSyncOutcome;
 use cross_repo_sync::CommitSyncer;
+use filenodes::Filenodes;
 use filestore::FilestoreConfig;
 use futures::future;
 use futures::stream;
@@ -65,6 +69,7 @@ use futures::Future;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use futures_stats::TimedTryFutureExt;
 use metaconfig_types::RepoConfig;
 use metaconfig_types::RepoConfigRef;
 use mononoke_types::ChangesetId;
@@ -84,6 +89,7 @@ use repo_identity::RepoIdentity;
 use repo_identity::RepoIdentityRef;
 use repo_update_logger::find_draft_ancestors;
 use repo_update_logger::log_new_bonsai_changesets;
+use scuba_ext::MononokeScubaSampleBuilder;
 use slog::debug;
 use slog::error;
 use slog::info;
@@ -114,6 +120,7 @@ pub struct Repo(
     RepoDerivedData,
     RepoIdentity,
     CommitGraph,
+    dyn Filenodes,
 );
 
 #[cfg(test)]
@@ -131,6 +138,65 @@ pub enum BacksyncError {
 pub enum BacksyncLimit {
     NoLimit,
     Limit(u64),
+}
+
+/// Block until a specific bookmark transaction (identified by its log id) is confirmed to be
+/// backsynced.
+///
+/// The backsyncer tw jobs are responsible for backsyncing bookmark transactions.
+/// When they do, they update a mutable counter to the id found in the bookmark update log for this
+/// transaction.
+/// Wait until the mutable counters indicate that backyncing caught up.
+///
+/// Note that we use some form of exponential backoff to avoid causing a thundering herd problem on
+/// reading the mutable counters if the backsync is lagging
+///
+/// We also use a hard-coded timeout to avoid being stuck forever waiting for the backsync if it is
+/// lagging. Not having this timeout has caused SEVs in the past, blocking lands.
+pub async fn ensure_backsynced<M, R>(
+    ctx: CoreContext,
+    commit_syncer: CommitSyncer<M, R>,
+    target_repo_dbs: Arc<TargetRepoDbs>,
+    log_id: BookmarkUpdateLogId,
+) -> Result<(), Error>
+where
+    M: SyncedCommitMapping + Clone + 'static,
+    R: RepoLike + Send + Sync + Clone + 'static,
+{
+    let timeout = Duration::from_secs(
+        justknobs::get_as::<u64>(
+            "scm/mononoke:defer_to_backsyncer_for_backsync_timeout_seconds",
+            None,
+        )
+        .unwrap_or(60),
+    );
+
+    let source_repo_id = commit_syncer.get_source_repo().repo_identity().id();
+    let counter_name = format_counter(&source_repo_id);
+    let start_instant = Instant::now();
+
+    let mut sleep_times = once(1)
+        .chain(once(2))
+        .chain(once(5))
+        .chain(repeat(10))
+        .map(Duration::from_secs);
+    while start_instant.elapsed() < timeout {
+        let counter: BookmarkUpdateLogId = target_repo_dbs
+            .counters
+            .get_counter(&ctx, &counter_name)
+            .await?
+            .unwrap_or(0)
+            .try_into()?;
+        if counter >= log_id {
+            return Ok(());
+        }
+        std::thread::sleep(
+            sleep_times
+                .next()
+                .expect("sleep_times is an unbounded iterator"),
+        )
+    }
+    bail!("Timeout expired while waiting for backsyncing")
 }
 
 pub async fn backsync_latest<M, R>(
@@ -206,7 +272,7 @@ where
 }
 
 async fn sync_entries<M, R>(
-    ctx: CoreContext,
+    mut ctx: CoreContext,
     commit_syncer: &CommitSyncer<M, R>,
     target_repo_dbs: Arc<TargetRepoDbs>,
     entries: Vec<BookmarkUpdateLogEntry>,
@@ -227,162 +293,208 @@ where
             info!(ctx.logger(), "sync stopping due to cancellation request");
             return Ok(commit_only_backsync_future);
         }
-        let entry_id = entry.id;
-        if counter >= entry_id {
-            continue;
-        }
-        debug!(ctx.logger(), "backsyncing {} ...", entry_id);
+        let mut scuba_sample = ctx.scuba().clone();
+        let pc = ctx.fork_perf_counters();
+        let mut scuba_log_tag = "Backsyncing".to_string();
+        let (stats, new_commit_only_backsync_future) = do_sync_entry(
+            ctx.clone(),
+            commit_syncer,
+            &target_repo_dbs,
+            entry,
+            &mut counter,
+            sync_context,
+            disable_lease,
+            commit_only_backsync_future,
+            &mut scuba_sample,
+            &mut scuba_log_tag,
+        )
+        .try_timed()
+        .await?;
+        commit_only_backsync_future = new_commit_only_backsync_future;
+        pc.insert_perf_counters(&mut scuba_sample);
+        scuba_sample
+            .add_future_stats(&stats)
+            .log_with_msg(&scuba_log_tag, None);
+    }
+    Ok(commit_only_backsync_future)
+}
 
-        if commit_syncer.get_bookmark_renamer().await?(&entry.bookmark_name).is_none() {
-            // For the bookmarks that don't remap to small repos we can skip. But it's
-            // still valuable to have commit mapping ready for them. That's why we spawn
-            // a commit backsync future that we don't wait for here. Each of such futures
-            // waits for result of previous commmit-only backsync so we don't duplicate
-            // work unnecesarily.
-            debug!(ctx.logger(), "Renamed bookmark is None. No sync happening.");
+// This function is the inner function for sync_entries and shouldn't be called by other callers.
+// It encapsulates of what we consider as doing a single "backsyncing" for bookmark entry: an
+// activity that we want to time and log.
+async fn do_sync_entry<M, R>(
+    ctx: CoreContext,
+    commit_syncer: &CommitSyncer<M, R>,
+    target_repo_dbs: &Arc<TargetRepoDbs>,
+    entry: BookmarkUpdateLogEntry,
+    counter: &mut BookmarkUpdateLogId,
+    sync_context: CommitSyncContext,
+    disable_lease: bool,
+    mut commit_only_backsync_future: Box<dyn Future<Output = ()> + Send + Unpin>,
+    scuba_sample: &mut MononokeScubaSampleBuilder,
+    scuba_log_tag: &mut String,
+) -> Result<Box<dyn Future<Output = ()> + Send + Unpin>, Error>
+where
+    M: SyncedCommitMapping + Clone + 'static,
+    R: RepoLike + Send + Sync + Clone + 'static,
+{
+    let entry_id = entry.id;
+    if *counter >= entry_id {
+        return Ok(commit_only_backsync_future);
+    }
+    debug!(ctx.logger(), "backsyncing {} ...", entry_id);
+
+    if commit_syncer.get_bookmark_renamer().await?(&entry.bookmark_name).is_none() {
+        // For the bookmarks that don't remap to small repos we can skip. But it's
+        // still valuable to have commit mapping ready for them. That's why we spawn
+        // a commit backsync future that we don't wait for here. Each of such futures
+        // waits for result of previous commmit-only backsync so we don't duplicate
+        // work unnecesarily.
+        debug!(ctx.logger(), "Renamed bookmark is None. No sync happening.");
+        target_repo_dbs
+            .counters
+            .set_counter(
+                &ctx,
+                &format_counter(&commit_syncer.get_source_repo().repo_identity().id()),
+                entry.id.try_into()?,
+                Some((*counter).try_into()?),
+            )
+            .await?;
+        *counter = entry.id;
+        if let Some(to_cs_id) = entry.to_changeset_id {
+            commit_only_backsync_future = Box::new({
+                cloned!(ctx, sync_context, to_cs_id, commit_syncer);
+                tokio::spawn(async move {
+                    commit_only_backsync_future.await;
+                    let res = commit_syncer
+                        .sync_commit(
+                            &ctx,
+                            to_cs_id.clone(),
+                            // Backsyncer is always used in the large-to-small direction,
+                            // therefore there can be at most one remapped candidate,
+                            // so `CandidateSelectionHint::Only` is a safe choice
+                            CandidateSelectionHint::Only,
+                            sync_context,
+                            disable_lease,
+                        )
+                        .await;
+                    if let Err(err) = res {
+                        error!(
+                            ctx.logger(),
+                            "Failed to backsync {} pointing to {}: {}",
+                            entry.bookmark_name,
+                            to_cs_id,
+                            err
+                        );
+                    }
+                })
+                .map(|_| ())
+            });
+        }
+
+        return Ok(commit_only_backsync_future);
+    }
+
+    scuba_sample.add("backsyncer_bookmark_log_entry_id", u64::from(entry.id));
+
+    let start_instant = Instant::now();
+
+    if let Some(to_cs_id) = entry.to_changeset_id {
+        let (_, unsynced_ancestors_versions) =
+            find_toposorted_unsynced_ancestors(&ctx, commit_syncer, to_cs_id, None).await?;
+
+        if !unsynced_ancestors_versions.has_ancestor_with_a_known_outcome() {
+            // Not a single ancestor of to_cs_id was ever synced.
+            // That means that we can't figure out which commit sync mapping version
+            // to use. In that case we just skip this entry and not sync it at all.
+            // This seems the safest option (i.e. we won't rewrite a commit with
+            // an incorrect version) but it also has a downside that the bookmark that points
+            // to this commit is not going to be synced.
+            warn!(
+                ctx.logger(),
+                "skipping {}, entry id {}", entry.bookmark_name, entry.id
+            );
+            *scuba_log_tag = "Skipping entry because there are no synced ancestors".to_string();
             target_repo_dbs
                 .counters
                 .set_counter(
                     &ctx,
                     &format_counter(&commit_syncer.get_source_repo().repo_identity().id()),
                     entry.id.try_into()?,
-                    Some(counter.try_into()?),
+                    Some((*counter).try_into()?),
                 )
                 .await?;
-            counter = entry.id;
-            if let Some(to_cs_id) = entry.to_changeset_id {
-                commit_only_backsync_future = Box::new({
-                    cloned!(ctx, sync_context, to_cs_id, commit_syncer);
-                    tokio::spawn(async move {
-                        commit_only_backsync_future.await;
-                        let res = commit_syncer
-                            .sync_commit(
-                                &ctx,
-                                to_cs_id.clone(),
-                                // Backsyncer is always used in the large-to-small direction,
-                                // therefore there can be at most one remapped candidate,
-                                // so `CandidateSelectionHint::Only` is a safe choice
-                                CandidateSelectionHint::Only,
-                                sync_context,
-                                disable_lease,
-                            )
-                            .await;
-                        if let Err(err) = res {
-                            error!(
-                                ctx.logger(),
-                                "Failed to backsync {} pointing to {}: {}",
-                                entry.bookmark_name,
-                                to_cs_id,
-                                err
-                            );
-                        }
-                    })
-                    .map(|_| ())
-                });
-            }
-
-            continue;
+            *counter = entry.id;
+            return Ok(commit_only_backsync_future);
         }
 
-        let mut scuba_sample = ctx.scuba().clone();
-        scuba_sample.add("backsyncer_bookmark_log_entry_id", u64::from(entry.id));
+        // Backsyncer is always used in the large-to-small direction,
+        // therefore there can be at most one remapped candidate,
+        // so `CandidateSelectionHint::Only` is a safe choice
+        commit_syncer
+            .sync_commit(
+                &ctx,
+                to_cs_id,
+                CandidateSelectionHint::Only,
+                sync_context,
+                disable_lease,
+            )
+            .await?;
+    }
 
-        let start_instant = Instant::now();
+    let new_counter = entry.id;
+    let maybe_log_id = backsync_bookmark(
+        ctx.clone(),
+        commit_syncer,
+        target_repo_dbs.clone(),
+        Some(*counter),
+        &entry,
+    )
+    .await?;
+    scuba_sample.add_opt(
+        "from_csid",
+        entry.from_changeset_id.map(|csid| csid.to_string()),
+    );
+    scuba_sample.add_opt(
+        "to_csid",
+        entry.to_changeset_id.map(|csid| csid.to_string()),
+    );
+    scuba_sample.add(
+        "backsync_duration_ms",
+        u64::try_from(start_instant.elapsed().as_millis()).unwrap_or(u64::max_value()),
+    );
+    scuba_sample.add("backsync_previously_done", maybe_log_id.is_none());
 
-        if let Some(to_cs_id) = entry.to_changeset_id {
-            let (_, unsynced_ancestors_versions) =
-                find_toposorted_unsynced_ancestors(&ctx, commit_syncer, to_cs_id, None).await?;
-
-            if !unsynced_ancestors_versions.has_ancestor_with_a_known_outcome() {
-                // Not a single ancestor of to_cs_id was ever synced.
-                // That means that we can't figure out which commit sync mapping version
-                // to use. In that case we just skip this entry and not sync it at all.
-                // This seems the safest option (i.e. we won't rewrite a commit with
-                // an incorrect version) but it also has a downside that the bookmark that points
-                // to this commit is not going to be synced.
-                warn!(
-                    ctx.logger(),
-                    "skipping {}, entry id {}", entry.bookmark_name, entry.id
-                );
-                scuba_sample.log_with_msg(
-                    "Skipping entry because there are no synced ancestors",
-                    Some(format!("{}", entry.id)),
-                );
-                target_repo_dbs
-                    .counters
-                    .set_counter(
-                        &ctx,
-                        &format_counter(&commit_syncer.get_source_repo().repo_identity().id()),
-                        entry.id.try_into()?,
-                        Some(counter.try_into()?),
-                    )
-                    .await?;
-                counter = entry.id;
-                continue;
-            }
-
-            // Backsyncer is always used in the large-to-small direction,
-            // therefore there can be at most one remapped candidate,
-            // so `CandidateSelectionHint::Only` is a safe choice
-            commit_syncer
-                .sync_commit(
-                    &ctx,
-                    to_cs_id,
-                    CandidateSelectionHint::Only,
-                    sync_context,
-                    disable_lease,
-                )
-                .await?;
-        }
-
-        let new_counter = entry.id;
-        let maybe_log_id = backsync_bookmark(
-            ctx.clone(),
-            commit_syncer,
-            target_repo_dbs.clone(),
-            Some(counter),
-            entry,
-        )
-        .await?;
-
-        scuba_sample.add(
-            "backsync_duration_ms",
-            u64::try_from(start_instant.elapsed().as_millis()).unwrap_or(u64::max_value()),
+    if let Some(_log_id) = maybe_log_id {
+        *counter = new_counter;
+    } else {
+        debug!(
+            ctx.logger(),
+            "failed to backsync {}, most likely another process already synced it ", entry_id
         );
-        scuba_sample.add("backsync_previously_done", maybe_log_id.is_none());
-        scuba_sample.log_with_msg("Backsyncing", None);
+        // Transaction failed, it could be because another process already backsynced it
+        // Verify that counter was moved and continue if that's the case
 
-        if let Some(_log_id) = maybe_log_id {
-            counter = new_counter;
+        let source_repo_id = commit_syncer.get_source_repo().repo_identity().id();
+        let counter_name = format_counter(&source_repo_id);
+        let new_counter = target_repo_dbs
+            .counters
+            .get_counter(&ctx, &counter_name)
+            .await?
+            .unwrap_or(0)
+            .try_into()?;
+        if new_counter <= *counter {
+            return Err(format_err!(
+                "backsync transaction failed, but the counter didn't move forward. Was {}, became {}",
+                *counter,
+                new_counter,
+            ));
         } else {
             debug!(
                 ctx.logger(),
-                "failed to backsync {}, most likely another process already synced it ", entry_id
+                "verified that another process has already synced {}", entry_id
             );
-            // Transaction failed, it could be because another process already backsynced it
-            // Verify that counter was moved and continue if that's the case
-
-            let source_repo_id = commit_syncer.get_source_repo().repo_identity().id();
-            let counter_name = format_counter(&source_repo_id);
-            let new_counter = target_repo_dbs
-                .counters
-                .get_counter(&ctx, &counter_name)
-                .await?
-                .unwrap_or(0)
-                .try_into()?;
-            if new_counter <= counter {
-                return Err(format_err!(
-                    "backsync transaction failed, but the counter didn't move forward. Was {}, became {}",
-                    counter,
-                    new_counter,
-                ));
-            } else {
-                debug!(
-                    ctx.logger(),
-                    "verified that another process has already synced {}", entry_id
-                );
-                counter = new_counter;
-            }
+            *counter = new_counter;
         }
     }
     Ok(commit_only_backsync_future)
@@ -422,7 +534,7 @@ async fn backsync_bookmark<M, R>(
     commit_syncer: &CommitSyncer<M, R>,
     target_repo_dbs: Arc<TargetRepoDbs>,
     prev_counter: Option<BookmarkUpdateLogId>,
-    log_entry: BookmarkUpdateLogEntry,
+    log_entry: &BookmarkUpdateLogEntry,
 ) -> Result<Option<BookmarkUpdateLogId>, Error>
 where
     M: SyncedCommitMapping + Clone + 'static,

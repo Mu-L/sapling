@@ -1,7 +1,5 @@
-#debugruntest-compatible
 
 #require no-eden
-
 
 # Here we create a simple DAG which has just enough of the required
 # topology to test all the bisection status labels:

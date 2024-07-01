@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -187,6 +186,8 @@
       --hidden                consider hidden changesets
       --pager TYPE            when to paginate (boolean, always, auto, or never)
                               (default: auto)
+      --reason VALUE [+]      why this runs, usually set by automation
+                              (ADVANCED)
 
 
 
@@ -228,6 +229,8 @@
       --hidden                consider hidden changesets
       --pager TYPE            when to paginate (boolean, always, auto, or never)
                               (default: auto)
+      --reason VALUE [+]      why this runs, usually set by automation
+                              (ADVANCED)
   
   Subcommands:
   

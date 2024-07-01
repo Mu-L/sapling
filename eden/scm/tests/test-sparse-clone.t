@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -8,7 +7,6 @@
 
 test sparse
 
-  $ configure modernclient
   $ setconfig ui.username="nobody <no.reply@fb.com>"
   $ enable sparse rebase
 

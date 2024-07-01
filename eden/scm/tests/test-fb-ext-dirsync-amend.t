@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -8,6 +7,7 @@
 # GNU General Public License version 2.
 
 
+  $ disable amend
   $ cat >> $HGRCPATH << 'EOF'
   > [extensions]
   > dirsync=

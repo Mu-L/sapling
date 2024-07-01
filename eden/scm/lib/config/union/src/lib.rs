@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use configmodel::config::ContentHash;
 use configmodel::Config;
 use configmodel::Text;
 use configmodel::ValueSource;
@@ -48,6 +49,17 @@ impl UnionConfig {
     /// Push a config as a layer. It overrides other configs.
     pub fn push(&mut self, config: Arc<dyn Config>) {
         self.configs.push(config)
+    }
+
+    /// Return number of contained configs.
+    pub fn len(&self) -> usize {
+        self.configs.len()
+    }
+
+    /// Insert `config` at a specific index. The config will take precedence over configs
+    /// with lower indices.
+    pub fn insert(&mut self, idx: usize, config: Arc<dyn Config>) {
+        self.configs.insert(idx, config);
     }
 }
 
@@ -96,15 +108,15 @@ impl Config for UnionConfig {
         result.into()
     }
 
-    fn files(&self) -> Cow<[PathBuf]> {
-        let mut result: IndexSet<PathBuf> = Default::default();
+    fn files(&self) -> Cow<[(PathBuf, Option<ContentHash>)]> {
+        let mut result: IndexSet<(PathBuf, Option<ContentHash>)> = Default::default();
         // normal order: match order loading configs
         for config in self.configs.iter() {
             for path in config.files().iter().cloned() {
                 result.insert(path);
             }
         }
-        let result: Vec<PathBuf> = result.into_iter().collect();
+        let result: Vec<_> = result.into_iter().collect();
         result.into()
     }
 

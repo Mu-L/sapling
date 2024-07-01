@@ -73,7 +73,6 @@ overrides = "{{}}"
             {
                 "SCRATCH_CONFIG_PATH": str(scratch_config),
                 "INTEGRATION_TEST": "1",
-                "HOME": str(self.test_dir),
                 # Just in case
                 "CHGDISABLE": "1",
             }
@@ -127,18 +126,24 @@ darwin-redirection-type = "symlink"
             raise ex
 
     def generate_eden_cli_wrapper(self, binpath: Path):
-        cmd, env = self.eden.get_edenfsctl_cmd_env("", config_dir=True)
+        cmd, env = self.eden.get_edenfsctl_cmd_env("", config_dir=True, home_dir=False)
+
         edenpath = binpath.parents[1] / "install" / "bin" / "eden"
         # These two are not really necessary and contain symbols that might be
         # annoying to escape, so let's get rid of them
         env.pop("HGTEST_EXCLUDED", None)
         env.pop("HGTEST_INCLUDED", None)
+        # .t tests set the value for $HOME to $TESTTMP, and we don't want to
+        # force every EdenFS command to have the current value of $HOME at this
+        # point (which will likely be different to $TESTTMP). The $HOME in the
+        # generated scripts below will be $TESTTMP at runtime.
+        env.pop("HOME", None)
         if not os.name == "nt":
             with open(edenpath, "w") as f:
                 f.write("#!/usr/bin/env bash\n")
                 for k, v in env.items():
                     f.write(f"export {k}={repr(v)}\n")
-                f.write(" ".join(cmd) + ' "$@"\n')
+                f.write(" ".join(cmd) + '--home-dir "$HOME" "$@"\n')
             os.chmod(edenpath, 0o775)
         else:
             with open(str(edenpath) + ".bat", "w") as f:
@@ -147,5 +152,5 @@ darwin-redirection-type = "symlink"
                     f.write(f"set {k}={v}\n")
                 cmd[0] = f'"{cmd[0]}"'
                 fullpath = (" ".join(cmd)).strip()
-                f.write(f"{fullpath} %*\n")
+                f.write(f"{fullpath} --home-dir %HOME% %*\n")
                 f.write("exit /B %errorlevel%\n")

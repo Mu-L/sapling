@@ -1,5 +1,4 @@
 #require git no-windows no-eden
-#debugruntest-compatible
 
   $ . $TESTDIR/git.sh
   $ setconfig diff.git=true ui.allowemptycommit=true
@@ -25,6 +24,13 @@ Ignore status
   $ sl status
   $ sl status --ignore
   I i
+
+Status when run from a sub-directory:
+
+  $ mkdir foo
+  $ cd foo
+  $ sl status
+  $ cd ..
 
 Status after changing filesystem (modify, create, remove)
 

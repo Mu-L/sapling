@@ -20,6 +20,7 @@ rust_library(
         "//eden/mononoke/bookmarks:bookmarks",
         "//eden/mononoke/changesets:changesets",
         "//eden/mononoke/changesets/changesets_creation:changesets_creation",
+        "//eden/mononoke/commit_cloud:commit_cloud",
         "//eden/mononoke/filenodes:filenodes",
         "//eden/mononoke/filestore:filestore",
         "//eden/mononoke/git_symbolic_refs:git_symbolic_refs",
@@ -168,6 +169,7 @@ rust_library(
         "//eden/mononoke/bonsai_hg_mapping:bonsai_hg_mapping",
         "//eden/mononoke/changesets:changesets",
         "//eden/mononoke/filenodes:filenodes",
+        "//eden/mononoke/repo_attributes/commit_graph/commit_graph:commit_graph",
     ],
 )
 

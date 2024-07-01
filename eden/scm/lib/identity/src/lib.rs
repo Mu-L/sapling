@@ -6,8 +6,10 @@
  */
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::env::VarError;
 use std::fs;
+use std::fs::read_link;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -85,6 +87,9 @@ struct RepoIdentity {
 
     /// Directory used by `sniff_dir`. Reuse `dot_dir` if `None`.
     sniff_dot_dir: Option<&'static str>,
+
+    /// Files under the "sniff dot dir". They must exist to validate the sniff.
+    sniff_dot_dir_required_files: &'static [&'static str],
 
     /// Affects `sniff_root`. Lower number wins.
     /// For example, `a/.sl` with priority 0 and `a/b/.git/sl` with priority 10,
@@ -358,6 +363,7 @@ const HG: Identity = Identity {
         dot_dir: ".hg",
         config_repo_file: "hgrc",
         sniff_dot_dir: None,
+        sniff_dot_dir_required_files: &["requires"],
         sniff_root_priority: 0,
         sniff_initial_cli_names: None,
     },
@@ -384,6 +390,7 @@ const SL: Identity = Identity {
         dot_dir: ".sl",
         config_repo_file: "config",
         sniff_dot_dir: None,
+        sniff_dot_dir_required_files: &["requires"],
         sniff_root_priority: 0,
         sniff_initial_cli_names: None,
     },
@@ -394,6 +401,7 @@ const SL_GIT: Identity = Identity {
     repo: &RepoIdentity {
         dot_dir: if cfg!(windows) { ".git\\sl" } else { ".git/sl" },
         sniff_dot_dir: Some(".git"),
+        sniff_dot_dir_required_files: &[],
         sniff_root_priority: 10, // lowest
         sniff_initial_cli_names: Some("sl"),
         ..*SL.repo
@@ -420,6 +428,7 @@ const TEST: Identity = Identity {
         dot_dir: ".test",
         config_repo_file: "config",
         sniff_dot_dir: None,
+        sniff_dot_dir_required_files: &[],
         sniff_root_priority: 5,
         sniff_initial_cli_names: None,
     },
@@ -452,7 +461,7 @@ pub mod idents {
     }
 }
 
-static EXTRA_SNIFF_IDENTS: &'static [Identity] = &[SL_GIT];
+static EXTRA_SNIFF_IDENTS: &[Identity] = &[SL_GIT];
 
 static DEFAULT: Lazy<RwLock<Identity>> = Lazy::new(|| RwLock::new(compute_default()));
 
@@ -536,9 +545,9 @@ pub fn cli_name() -> &'static str {
 /// "{path}/.sl" directories, yielding the sniffed Identity, if any.
 /// Only permissions errors are propagated.
 pub fn sniff_dir(path: &Path) -> Result<Option<Identity>> {
-    for id in all().iter().chain(EXTRA_SNIFF_IDENTS) {
+    'outer_loop: for id in all().iter().chain(EXTRA_SNIFF_IDENTS) {
         if let Some(cli_names) = id.repo.sniff_initial_cli_names {
-            // Support bypassing the check via PLAINEXCEPT=sniff. This can be useful for ISL.
+            // Support bypassing the CLI name check via PLAINEXCEPT=sniff. This can be useful for ISL.
             let mut bypass_check = false;
             if let Ok(except) = try_env_var("PLAINEXCEPT") {
                 if except.contains("sniff") {
@@ -549,10 +558,29 @@ pub fn sniff_dir(path: &Path) -> Result<Option<Identity>> {
                 continue;
             }
         }
-        let test_path = path.join(id.repo.sniff_dot_dir());
+        let sniff_dot_dir = id.repo.sniff_dot_dir();
+        let test_path = path.join(sniff_dot_dir);
         tracing::trace!(path=%path.display(), "sniffing dir");
         match fs::metadata(&test_path) {
-            Ok(md) if md.is_dir() => {
+            Ok(md)
+                if md.is_dir()
+                    || (md.is_file()
+                        && sniff_dot_dir == ".git"
+                        && fs::read(&test_path)
+                            .unwrap_or_default()
+                            .starts_with(b"gitdir: ")) =>
+            {
+                // Check sniff_dot_dir_required_files.
+                // This does not follow ".git" as a file yet.
+                if md.is_dir() {
+                    for path in id.repo.sniff_dot_dir_required_files {
+                        let path = test_path.join(path);
+                        if matches!(path.try_exists(), Ok(false)) {
+                            // Reject this as a dotdir.
+                            continue 'outer_loop;
+                        }
+                    }
+                }
                 tracing::debug!(id=%id, path=%path.display(), "sniffed repo dir");
 
                 // Combine DEFAULT's user facing attributes w/ id's repo attributes.
@@ -589,24 +617,57 @@ pub fn must_sniff_dir(path: &Path) -> Result<Identity> {
 pub fn sniff_root(path: &Path) -> Result<Option<(PathBuf, Identity)>> {
     tracing::debug!(start=%path.display(), "sniffing for repo root");
 
-    let mut path = Some(path);
-    let mut best_priority = usize::MAX;
-    let mut best = None;
+    let mut path = Some(path.to_path_buf());
+    let mut seen: HashSet<PathBuf> = HashSet::new();
 
-    while let Some(p) = path {
-        if let Some(ident) = sniff_dir(p)? {
-            if ident.repo.sniff_root_priority == 0 {
-                return Ok(Some((p.to_path_buf(), ident)));
-            } else if best_priority > ident.repo.sniff_root_priority {
-                best_priority = ident.repo.sniff_root_priority;
-                best = Some((p, ident));
+    // We first check all of `path` without following symlinks to maintain existing
+    // behavior when operating on symlinks within the repo. We then retry, following the
+    // deepest symlink we encountered in `path`. 0..2 gives two iterations which means we
+    // will follow at most one symlink. We can raise this if needed, but it seemed prudent
+    // to limit the scope to "reasonable" symlink situations.
+    for _ in 0..2 {
+        let mut best_priority = usize::MAX;
+        let mut best = None;
+        let mut final_symlink = None;
+
+        while let Some(p) = &path {
+            if !seen.insert(p.to_path_buf()) {
+                break;
             }
+
+            if let Some(ident) = sniff_dir(p)? {
+                if ident.repo.sniff_root_priority == 0 {
+                    return Ok(Some((p.to_path_buf(), ident)));
+                } else if best_priority > ident.repo.sniff_root_priority {
+                    best_priority = ident.repo.sniff_root_priority;
+                    best = Some((p.to_path_buf(), ident));
+                }
+            }
+
+            if final_symlink.is_none() && p.is_symlink() {
+                final_symlink = Some(p.to_path_buf());
+            }
+
+            path = p.parent().map(|p| p.to_path_buf());
         }
 
-        path = p.parent();
+        if best.is_some() {
+            return Ok(best);
+        }
+
+        // We didn't find a repo - try following the final symlink we saw.
+        if let Some(symlink) = final_symlink {
+            if let Ok(mut target) = read_link(&symlink) {
+                // Resolve relative symlink.
+                if let Some(link_parent) = symlink.parent() {
+                    target = link_parent.join(target);
+                }
+                path = Some(target)
+            }
+        }
     }
 
-    Ok(best.map(|(path, ident)| (path.to_path_buf(), ident)))
+    Ok(None)
 }
 
 pub fn env_var(var_suffix: &str) -> Option<Result<String, VarError>> {
@@ -670,6 +731,7 @@ mod test {
         {
             let root = dir.path().join("default");
             fs::create_dir_all(root.join(default().dot_dir()))?;
+            write_required_files(&root, default());
 
             assert_eq!(sniff_dir(&root)?.unwrap(), default());
         }
@@ -716,7 +778,7 @@ mod test {
 
         let root = dir.path().join("root");
 
-        assert!(sniff_root(&root)?.is_none());
+        assert_eq!(sniff_root(&root)?, None);
 
         let dot_dir = root.join(TEST.dot_dir());
         fs::create_dir_all(dot_dir)?;
@@ -738,6 +800,105 @@ mod test {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_sniff_root_symlink_into_repo() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+
+        let root = dir.path().join("root");
+
+        let dot_dir = root.join(TEST.dot_dir());
+        fs::create_dir_all(dot_dir)?;
+
+        let subdir = root.join("subdir");
+        fs::create_dir_all(&subdir)?;
+
+        let link = dir.path().join("link");
+        symlink(&subdir, &link)?;
+
+        let (sniffed_root, _) = sniff_root(&link)?.unwrap();
+        assert_eq!(sniffed_root, root);
+
+        let relative_link = dir.path().join("relative-link");
+        symlink(Path::new("root/subdir"), &relative_link)?;
+
+        let (sniffed_root, _) = sniff_root(&relative_link)?.unwrap();
+        assert_eq!(sniffed_root, root);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sniff_root_symlink_within_repo() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+
+        let root = dir.path().join("root");
+
+        let dot_dir = root.join(TEST.dot_dir());
+        fs::create_dir_all(dot_dir)?;
+
+        let outside_repo = dir.path().join("not_repo");
+        fs::create_dir_all(&outside_repo)?;
+
+        let link_within_repo = root.join("link");
+        symlink(&outside_repo, &link_within_repo)?;
+
+        let (sniffed_root, _) = sniff_root(&link_within_repo)?.unwrap();
+        assert_eq!(sniffed_root, root);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sniff_root_symlink_within_repo_into_another_repo() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+
+        let repo1 = dir.path().join("repo1");
+        fs::create_dir_all(repo1.join(TEST.dot_dir()))?;
+
+        let repo2 = dir.path().join("repo2");
+        fs::create_dir_all(repo2.join(TEST.dot_dir()))?;
+
+        let repo2_subdir = repo2.join("subdir");
+        fs::create_dir_all(&repo2_subdir)?;
+
+        let link_within_repo = repo1.join("link");
+        symlink(&repo2_subdir, &link_within_repo)?;
+
+        // We have a symlink within repo1 pointing to a subdir in repo2. We should prefer
+        // the "lexical" containing repo indicated by the path.
+        let (sniffed_root, _) = sniff_root(&link_within_repo)?.unwrap();
+        assert_eq!(sniffed_root, repo1);
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_sniff_root_symlink_cycle() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+
+        symlink(b.join("subdir"), &a)?;
+        symlink(a.join("subdir"), &b)?;
+
+        assert!(sniff_root(&a)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_sniff_root_priority() -> Result<()> {
         let dir = tempfile::tempdir()?;
 
@@ -753,6 +914,7 @@ mod test {
 
         fs::create_dir_all(dir.join(TEST.repo.sniff_dot_dir()))?;
         fs::create_dir_all(dir_a.join(SL.repo.sniff_dot_dir()))?;
+        write_required_files(&dir_a, SL);
         fs::create_dir_all(dir_b.join(TEST.repo.sniff_dot_dir()))?;
         fs::create_dir_all(&dir_c)?;
 
@@ -770,6 +932,26 @@ mod test {
     }
 
     #[test]
+    fn test_sniff_required_files() -> Result<()> {
+        // a/.sl: valid (contains "requires")
+        // a/b/.sl: invalid (no "requires")
+        let dir = tempfile::tempdir()?;
+        let dir = dir.path();
+
+        let dir_a = dir.join("a");
+        let dir_a_b = dir_a.join("b");
+        fs::create_dir_all(dir_a_b.join(SL.dot_dir()))?;
+        fs::create_dir_all(dir_a.join(SL.dot_dir()))?;
+        fs::write(dir_a.join(SL.dot_dir()).join("requires"), b"store")?;
+
+        // sniff_root should ignore a/b/.sl (no "requires") and use a/.sl (has "requires").
+        let sniffed_path = sniff_root(&dir_a_b)?.unwrap().0;
+        assert_eq!(sniffed_path, dir_a);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_split_rcpath() {
         let rcpath = [
             "sys=111", "user=222", "sys=333", "user=444", "555", "foo=666",
@@ -778,5 +960,11 @@ mod test {
         let t = |prefix_list| -> Vec<&str> { split_rcpath(&rcpath, prefix_list).collect() };
         assert_eq!(t(&["sys", ""]), ["111", "333", "555", "foo=666"]);
         assert_eq!(t(&["user"]), ["222", "444"]);
+    }
+
+    fn write_required_files(dir: &Path, ident: Identity) {
+        for path in ident.repo.sniff_dot_dir_required_files {
+            fs::write(dir.join(ident.repo.sniff_dot_dir()).join(path), b"x").unwrap();
+        }
     }
 }

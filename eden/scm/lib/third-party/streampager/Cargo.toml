@@ -14,9 +14,9 @@ categories = ["command-line-utilities", "text-processing"]
 bit-set = "0.5"
 dirs = "2.0"
 enum_dispatch = "0.3.5"
-indexmap = { version = "2.1.0", features = ["arbitrary", "rayon", "serde"] }
+indexmap = { version = "2.2.6", features = ["arbitrary", "rayon", "serde"] }
 lazy_static = "1.4"
-lru = "0.11.1"
+lru = "0.12.3"
 memmap2 = "0.5.10"
 regex = "1.9.2"
 scopeguard = "1.0.0"

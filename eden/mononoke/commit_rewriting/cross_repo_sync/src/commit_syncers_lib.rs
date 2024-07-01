@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use anyhow::format_err;
+use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use bookmarks::BookmarkKey;
@@ -44,8 +45,10 @@ use metaconfig_types::CommitSyncConfigVersion;
 use metaconfig_types::CommitSyncDirection;
 use metaconfig_types::CommonCommitSyncConfig;
 use metaconfig_types::GitSubmodulesChangesAction;
+use mononoke_types::hash::GitSha1;
 use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
 use mononoke_types::FileChange;
 use mononoke_types::FileType;
 use mononoke_types::NonRootMPath;
@@ -63,7 +66,12 @@ use crate::commit_sync_outcome::CommitSyncOutcome;
 use crate::commit_sync_outcome::DesiredRelationship;
 use crate::commit_sync_outcome::PluralCommitSyncOutcome;
 use crate::commit_syncer::CommitSyncer;
-use crate::git_submodules::expand_all_git_submodule_file_changes;
+use crate::git_submodules::rewrite_commit_with_submodule_expansion;
+use crate::git_submodules::SubmoduleExpansionData;
+use crate::git_submodules::SubmodulePath;
+use crate::reporting::log_debug;
+use crate::reporting::log_info;
+use crate::reporting::log_warning;
 use crate::sync_config_version_utils::get_mapping_change_version;
 use crate::types::ErrorKind;
 use crate::types::Repo;
@@ -73,6 +81,36 @@ use crate::types::Target;
 use crate::CommitSyncContext;
 
 const LEASE_WARNING_THRESHOLD: Duration = Duration::from_secs(60);
+
+pub type SubmoduleExpansionContentIds = HashMap<SubmodulePath, HashSet<ContentId>>;
+
+pub struct CommitRewriteResult {
+    /// A version of the source repo's bonsai changeset with `Mover` applied to
+    /// all changes and submodules processed according to the
+    /// small repo sync config (e.g. expanded, stripped).
+    ///
+    /// - `None` if the rewrite decided that this commit should
+    ///              not be present in the rewrite target
+    /// - `Some(rewritten)` for a successful rewrite, which should be
+    ///                         present in the rewrite target
+    pub rewritten: Option<BonsaiChangesetMut>,
+    /// Map from submodule dependency repo to all the file changes that have
+    /// to be copied from its blobstore to the large repo's blobstore for the
+    /// submodule expansion in the rewritten commit.
+    pub submodule_expansion_content_ids: SubmoduleExpansionContentIds,
+}
+
+impl CommitRewriteResult {
+    pub fn new(
+        rewritten: Option<BonsaiChangesetMut>,
+        submodule_expansion_content_ids: SubmoduleExpansionContentIds,
+    ) -> Self {
+        Self {
+            rewritten,
+            submodule_expansion_content_ids,
+        }
+    }
+}
 
 /// Create a version of `cs` with `Mover` applied to all changes
 /// The return value can be:
@@ -93,12 +131,10 @@ pub async fn rewrite_commit<'a, R: Repo>(
     remapped_parents: &'a HashMap<ChangesetId, ChangesetId>,
     mover: Mover,
     source_repo: &'a R,
-    // TODO(T174902563): support expansion of git submodules
-    submodule_deps: &'a SubmoduleDeps<R>,
     rewrite_opts: RewriteOpts,
     git_submodules_action: GitSubmodulesChangesAction,
-    x_repo_submodule_metadata_file_prefix: String,
-) -> Result<Option<BonsaiChangesetMut>, Error> {
+    mb_submodule_expansion_data: Option<SubmoduleExpansionData<'a, R>>,
+) -> Result<CommitRewriteResult> {
     // TODO(T169695293): add filter to only keep submodules for implicit deletes?
     let (file_changes_filters, cs): (Vec<FileChangeFilter<'a>>, BonsaiChangesetMut) =
         match git_submodules_action {
@@ -119,26 +155,24 @@ pub async fn rewrite_commit<'a, R: Repo>(
             // Expand submodules -> no filters, but modify the file change
             // file types in the bonsai
             GitSubmodulesChangesAction::Expand => {
-                let submodule_deps_map = match submodule_deps {
-                    SubmoduleDeps::ForSync(sm_deps_map) => Ok(sm_deps_map),
-                    SubmoduleDeps::NotNeeded => Err(anyhow!(
-                        "Submodule dependencies map needed to expand git submodules was not provided"
-                    )),
-                }?;
+                let submodule_expansion_data = mb_submodule_expansion_data.ok_or(
+                    anyhow!("Submodule expansion data not provided when submodules is enabled for small repo")
+                )?;
 
-                let new_cs = expand_all_git_submodule_file_changes(
+                return rewrite_commit_with_submodule_expansion(
                     ctx,
                     cs,
                     source_repo,
-                    submodule_deps_map,
-                    x_repo_submodule_metadata_file_prefix,
+                    submodule_expansion_data,
+                    mover.clone(),
+                    remapped_parents,
+                    rewrite_opts,
                 )
-                .await?;
-                (vec![], new_cs)
+                .await;
             }
         };
 
-    rewrite_commit_with_file_changes_filter(
+    let mb_rewritten = rewrite_commit_with_file_changes_filter(
         ctx,
         cs,
         remapped_parents,
@@ -148,7 +182,9 @@ pub async fn rewrite_commit<'a, R: Repo>(
         rewrite_opts,
         file_changes_filters,
     )
-    .await
+    .await?;
+
+    Ok(CommitRewriteResult::new(mb_rewritten, HashMap::new()))
 }
 
 /// Mover moves a path to at most a single path, while MultiMover can move a
@@ -330,7 +366,8 @@ where
 }
 
 /// Same as `find_toposorted_unsynced_ancestors` but uses the skew binary commit
-/// graph to find the oldest unsynced ancestor quicker.
+/// graph to find the oldest unsynced ancestor quicker and returns the last
+/// synced ancestors.
 /// NOTE: because this is used to run initial imports of small repos into large
 /// repos, this function DOES NOT take into account hardcoded mappings in
 /// hg extra metadata, as `find_toposorted_unsynced_ancestors` does.
@@ -338,7 +375,12 @@ pub async fn find_toposorted_unsynced_ancestors_with_commit_graph<'a, M, R>(
     ctx: &'a CoreContext,
     commit_syncer: &'a CommitSyncer<M, R>,
     start_cs_id: ChangesetId,
-) -> Result<(Vec<ChangesetId>, SyncedAncestorsVersions)>
+) -> Result<(
+    Vec<ChangesetId>,
+    SyncedAncestorsVersions,
+    // Last synced ancestors (if any)
+    Vec<ChangesetId>,
+)>
 where
     M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
@@ -402,6 +444,12 @@ where
         .flatten()
         .collect::<Vec<(ChangesetId, (Option<ChangesetId>, CommitSyncConfigVersion))>>();
 
+    // The last generation of synced ancestors
+    let last_synced_ancestors = synced_ancestors_list
+        .iter()
+        .filter_map(|(_, (target, _))| target.clone())
+        .collect::<Vec<_>>();
+
     let synced_ancestors_versions = synced_ancestors_list
         .iter()
         .map(|(_source, (_target, v))| v.clone())
@@ -428,6 +476,7 @@ where
             versions: synced_ancestors_versions,
             rewritten_ancestors,
         },
+        last_synced_ancestors,
     ))
 }
 
@@ -452,6 +501,14 @@ pub async fn get_version_and_parent_map_for_sync_via_pushrebase<
 where
     R: Repo,
 {
+    log_debug(
+        ctx,
+        format!(
+            "Getting version and parent map for target bookmark {}, parent version {} and synced_ancestors_versions {2:#?}",
+            target_bookmark, &parent_version, synced_ancestors_versions,
+        ),
+    );
+
     // Killswitch to disable this logic alltogether.
     if let Ok(true) = justknobs::eval(
         "scm/mononoke:xrepo_disable_forward_sync_over_mapping_change",
@@ -477,12 +534,26 @@ where
     {
         target_bookmark_version
     } else {
+        log_debug(
+            ctx,
+            format!(
+                "target bookmark version: none, parent version: {}",
+                parent_version,
+            ),
+        );
         // If we don't have a version for the target bookmark, we can't do anything.
         return Ok((parent_version, HashMap::new()));
     };
+    log_debug(
+        ctx,
+        format!(
+            "target bookmark version: {}, parent version: {}",
+            target_bookmark_version, parent_version,
+        ),
+    );
 
     if parent_version == target_bookmark_version {
-        // If the parent version is the same as the target bookmark version we don't neet
+        // If the parent version is the same as the target bookmark version we don't need
         // to be smart: we can just use the parent version.
         return Ok((parent_version, HashMap::new()));
     }
@@ -490,21 +561,37 @@ where
     // Let's first validate that the target bookmark is still working-copy equivalent to what the
     // parent of the commit we'd like to sync
     let backsyncer = commit_syncer.reverse()?;
-    let small_csid_equivalent_to_target_bookmark =
-        if let Some(small_csid_equivalent_to_target_bookmark) = backsyncer
-            .sync_commit(
-                ctx,
-                target_bookmark_csid,
-                CandidateSelectionHint::Only,
-                CommitSyncContext::XRepoSyncJob,
-                false,
-            )
-            .await?
-        {
-            small_csid_equivalent_to_target_bookmark
-        } else {
-            return Ok((parent_version, HashMap::new()));
-        };
+    let mb_small_csid_equivalent_to_target_bookmark = backsyncer
+        .sync_commit(
+            ctx,
+            target_bookmark_csid,
+            CandidateSelectionHint::Only,
+            CommitSyncContext::XRepoSyncJob,
+            false,
+        )
+        .await
+        .context("Failed to backsync commit and to verify wc equivalence")?;
+
+    let small_csid_equivalent_to_target_bookmark = if let Some(
+        small_csid_equivalent_to_target_bookmark,
+    ) =
+        mb_small_csid_equivalent_to_target_bookmark
+    {
+        small_csid_equivalent_to_target_bookmark
+    } else {
+        log_warning(
+            ctx,
+            "target bookmark is not wc-equivalent to synced commit, falling back to parent_version",
+        );
+        return Ok((parent_version, HashMap::new()));
+    };
+
+    log_debug(
+        ctx,
+        format!(
+            "small_csid_equivalent_to_target_bookmark: {small_csid_equivalent_to_target_bookmark}"
+        ),
+    );
 
     let mut parent_mapping = HashMap::new();
     for (source_parent_csid, (target_parent_csid, _version)) in
@@ -521,15 +608,104 @@ where
             parent_mapping.insert(*target_parent_csid, target_bookmark_csid);
         }
     }
+    log_debug(ctx, format!("parent_mapping: {:?}", parent_mapping));
 
     if parent_mapping.is_empty() {
         // None of the parents are ancestors of current position of target_bookmark. Perhaps
         // our view of target bookmark is stale. It's better to avoid changing version.
+        log_debug(
+            ctx,
+            "parent mapping is empty, falling back to parent_version",
+        );
         Ok((parent_version, parent_mapping))
     } else if parent_mapping.len() == 1 {
+        log_debug(
+            ctx,
+            format!(
+                "all validations passed, using target_bookmark_version: {}",
+                target_bookmark_version
+            ),
+        );
         // There's exactly one parent that's ancestor of target_bookmark.
         // let's assume that the target_bookmark is still equivalent to what it represents.
         Ok((target_bookmark_version, parent_mapping))
+    } else {
+        // There are at least two synced parents that are ancestors of target_bookmark. This
+        // practically mean we have a diamond merge at hand.
+        Err(anyhow!(
+            "Diamond merges are not supported for pushrebase sync"
+        ))
+    }
+}
+
+/// Similar to `get_version_and_parent_map_for_sync_via_pushrebase`, but should
+/// be used in **VERY SPECIFIC** situations (e.g. repo merges) where we want
+/// to change the mapping version AND **WE ARE SURE THAT THE TARGET BOOKMARK IS
+/// WORKING COPY EQUIVALENT TO THE COMMIT WE'RE SYNCING**.
+pub async fn unsafe_get_parent_map_for_target_bookmark_rewrite<
+    'a,
+    M: SyncedCommitMapping + Clone + 'static,
+    R,
+>(
+    ctx: &'a CoreContext,
+    commit_syncer: &CommitSyncer<M, R>,
+    target_bookmark: &Target<BookmarkKey>,
+    synced_ancestors_versions: &SyncedAncestorsVersions,
+) -> Result<HashMap<ChangesetId, ChangesetId>, Error>
+where
+    R: Repo,
+{
+    log_warning(
+        ctx,
+        format!(
+            "Building parent override map without working copy validation to sync using synced_ancestors_versions {:#?}",
+            synced_ancestors_versions,
+        ),
+    );
+
+    let target_repo = commit_syncer.get_target_repo();
+    // Value for the target bookmark. This is not a part of transaction and we're ok with the fact
+    // it might be a bit stale.
+    let target_bookmark_csid = target_repo
+        .bookmarks()
+        .get(ctx.clone(), &target_bookmark.0)
+        .await?
+        .ok_or_else(|| anyhow!("Bookmark {} does not exist", target_bookmark.0))?;
+
+    log_debug(ctx, format!("target bookmark csid: {target_bookmark_csid}"));
+
+    let mut parent_mapping = HashMap::new();
+    for (_source_parent_csid, (target_parent_csid, _version)) in
+        synced_ancestors_versions.rewritten_ancestors.iter()
+    {
+        // If the bookmark value is descendant of our parent it should have equivalent working
+        // copy.
+        if target_repo
+            .commit_graph()
+            .is_ancestor(ctx, *target_parent_csid, target_bookmark_csid)
+            .await?
+        {
+            parent_mapping.insert(*target_parent_csid, target_bookmark_csid);
+        }
+    }
+    log_debug(ctx, format!("parent_mapping: {:?}", parent_mapping));
+
+    if parent_mapping.is_empty() {
+        // None of the parents are ancestors of current position of target_bookmark. Perhaps
+        // our view of target bookmark is stale. It's better to avoid changing version.
+        log_warning(ctx, "parent mapping is empty");
+        Ok(parent_mapping)
+    } else if parent_mapping.len() == 1 {
+        log_info(
+            ctx,
+            format!(
+                "all validations passed with parent_mapping {0:#?}",
+                &parent_mapping,
+            ),
+        );
+        // There's exactly one parent that's ancestor of target_bookmark.
+        // let's assume that the target_bookmark is still equivalent to what it represents.
+        Ok(parent_mapping)
     } else {
         // There are at least two synced parents that are ancestors of target_bookmark. This
         // practically mean we have a diamond merge at hand.
@@ -544,6 +720,10 @@ pub enum CommitSyncRepos<R> {
     LargeToSmall {
         large_repo: R,
         small_repo: R,
+        // TODO(T186874619): stop duplicating all these fields. Create new
+        // struct that takes small_repo, large_repo and submodule deps, along
+        // with sync direction.
+        submodule_deps: SubmoduleDeps<R>,
     },
     SmallToLarge {
         small_repo: R,
@@ -562,38 +742,22 @@ impl<R: Repo> CommitSyncRepos<R> {
         submodule_deps: SubmoduleDeps<R>,
         common_commit_sync_config: &CommonCommitSyncConfig,
     ) -> Result<Self, Error> {
-        let small_repo_id = if common_commit_sync_config.large_repo_id
-            == source_repo.repo_identity().id()
-            && common_commit_sync_config
-                .small_repos
-                .contains_key(&target_repo.repo_identity().id())
-        {
-            target_repo.repo_identity().id()
-        } else if common_commit_sync_config.large_repo_id == target_repo.repo_identity().id()
-            && common_commit_sync_config
-                .small_repos
-                .contains_key(&source_repo.repo_identity().id())
-        {
-            source_repo.repo_identity().id()
-        } else {
-            return Err(format_err!(
-                "CommitSyncMapping incompatible with source repo {:?} and target repo {:?}",
-                source_repo.repo_identity().id(),
-                target_repo.repo_identity().id()
-            ));
-        };
-
-        if source_repo.repo_identity().id() == small_repo_id {
-            Ok(CommitSyncRepos::SmallToLarge {
+        let sync_direction = commit_sync_direction_from_config(
+            &source_repo,
+            &target_repo,
+            common_commit_sync_config,
+        )?;
+        match sync_direction {
+            CommitSyncDirection::SmallToLarge => Ok(CommitSyncRepos::SmallToLarge {
                 large_repo: target_repo,
                 small_repo: source_repo,
                 submodule_deps,
-            })
-        } else {
-            Ok(CommitSyncRepos::LargeToSmall {
+            }),
+            CommitSyncDirection::LargeToSmall => Ok(CommitSyncRepos::LargeToSmall {
                 large_repo: source_repo,
                 small_repo: target_repo,
-            })
+                submodule_deps,
+            }),
         }
     }
 
@@ -601,23 +765,30 @@ impl<R: Repo> CommitSyncRepos<R> {
     // Note: doesn't support large-to-small as input right now
     pub fn reverse(&self) -> Result<Self> {
         match self {
-            CommitSyncRepos::LargeToSmall { .. } => Err(anyhow!(
-                "reversing sync direction is only supported for small to large sync (because of submodule dependencies)"
-            )),
+            CommitSyncRepos::LargeToSmall {
+                large_repo,
+                small_repo,
+                submodule_deps,
+            } => Ok(CommitSyncRepos::SmallToLarge {
+                large_repo: large_repo.clone(),
+                small_repo: small_repo.clone(),
+                submodule_deps: submodule_deps.clone(),
+            }),
             CommitSyncRepos::SmallToLarge {
                 large_repo,
                 small_repo,
-                ..
+                submodule_deps,
             } => Ok(CommitSyncRepos::LargeToSmall {
                 large_repo: large_repo.clone(),
                 small_repo: small_repo.clone(),
+                submodule_deps: submodule_deps.clone(),
             }),
         }
     }
 
     pub fn get_submodule_deps(&self) -> &SubmoduleDeps<R> {
         match self {
-            CommitSyncRepos::LargeToSmall { .. } => &SubmoduleDeps::NotNeeded,
+            CommitSyncRepos::LargeToSmall { submodule_deps, .. } => submodule_deps,
             CommitSyncRepos::SmallToLarge { submodule_deps, .. } => submodule_deps,
         }
     }
@@ -636,6 +807,20 @@ impl<R: Repo> CommitSyncRepos<R> {
         }
     }
 
+    pub fn get_small_repo(&self) -> &R {
+        match self {
+            CommitSyncRepos::LargeToSmall { small_repo, .. }
+            | CommitSyncRepos::SmallToLarge { small_repo, .. } => small_repo,
+        }
+    }
+
+    pub fn get_large_repo(&self) -> &R {
+        match self {
+            CommitSyncRepos::LargeToSmall { large_repo, .. }
+            | CommitSyncRepos::SmallToLarge { large_repo, .. } => large_repo,
+        }
+    }
+
     pub(crate) fn get_source_repo_type(&self) -> SyncedCommitSourceRepo {
         match self {
             CommitSyncRepos::LargeToSmall { .. } => SyncedCommitSourceRepo::Large,
@@ -648,6 +833,50 @@ impl<R: Repo> CommitSyncRepos<R> {
             CommitSyncRepos::LargeToSmall { .. } => CommitSyncDirection::LargeToSmall,
             CommitSyncRepos::SmallToLarge { .. } => CommitSyncDirection::SmallToLarge,
         }
+    }
+}
+
+/// Get the direction of the sync based on the common commit sync config.
+/// Forward sync -> SmallToLarge
+/// Backsync -> LargeToSmall
+pub fn commit_sync_direction_from_config<R: Repo>(
+    source_repo: &R,
+    target_repo: &R,
+    common_commit_sync_config: &CommonCommitSyncConfig,
+) -> Result<CommitSyncDirection> {
+    let is_small_repo = |repo: &R| {
+        common_commit_sync_config
+            .small_repos
+            .contains_key(&repo.repo_identity().id())
+    };
+
+    if common_commit_sync_config.large_repo_id == source_repo.repo_identity().id()
+        && is_small_repo(target_repo)
+    {
+        Ok(CommitSyncDirection::LargeToSmall)
+    } else if common_commit_sync_config.large_repo_id == target_repo.repo_identity().id()
+        && is_small_repo(source_repo)
+    {
+        Ok(CommitSyncDirection::SmallToLarge)
+    } else {
+        Err(format_err!(
+            "CommitSyncMapping incompatible with source repo {:?} and target repo {:?}",
+            source_repo.repo_identity().id(),
+            target_repo.repo_identity().id()
+        ))
+    }
+}
+
+pub fn get_small_and_large_repos<'a, R: Repo>(
+    source_repo: &'a R,
+    target_repo: &'a R,
+    common_commit_sync_config: &'a CommonCommitSyncConfig,
+) -> Result<(&'a R, &'a R)> {
+    let sync_direction =
+        commit_sync_direction_from_config(source_repo, target_repo, common_commit_sync_config)?;
+    match sync_direction {
+        CommitSyncDirection::SmallToLarge => Ok((source_repo, target_repo)),
+        CommitSyncDirection::LargeToSmall => Ok((target_repo, source_repo)),
     }
 }
 
@@ -798,15 +1027,11 @@ where
     let small_to_large_commit_sync_repos = CommitSyncRepos::new(
         small_repo.clone(),
         large_repo.clone(),
-        submodule_deps,
+        submodule_deps.clone(),
         &common_config,
     )?;
-    let large_to_small_commit_sync_repos = CommitSyncRepos::new(
-        large_repo,
-        small_repo,
-        SubmoduleDeps::NotNeeded,
-        &common_config,
-    )?;
+    let large_to_small_commit_sync_repos =
+        CommitSyncRepos::new(large_repo, small_repo, submodule_deps, &common_config)?;
 
     let large_to_small_commit_syncer = CommitSyncer::new(
         ctx,
@@ -894,13 +1119,14 @@ where
     Ok(())
 }
 
-/// Get the prefix used to generate the submodule metadata file name from the
-/// small repo sync config.
-pub async fn get_x_repo_submodule_metadata_file_prefx_from_config(
+// TODO(T186874619): rename this function and group data in a struct
+/// Get the prefix used to generate the submodule metadata file name and the list
+/// of known dangling submodule pointers from from a small repo's sync config.
+pub async fn submodule_metadata_file_prefix_and_dangling_pointers(
     small_repo_id: RepositoryId,
     config_version: &CommitSyncConfigVersion,
     live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-) -> Result<String> {
+) -> Result<(String, Vec<GitSha1>)> {
     // Get the full commit sync config for that version name.
     let mut commit_sync_config = live_commit_sync_config
         .get_commit_sync_config_by_version(small_repo_id, config_version)
@@ -918,7 +1144,36 @@ pub async fn get_x_repo_submodule_metadata_file_prefx_from_config(
             )
         )?;
 
-    Ok(small_repo_sync_config
+    let x_repo_submodule_metadata_file_prefx = small_repo_sync_config
         .submodule_config
-        .submodule_metadata_file_prefix)
+        .submodule_metadata_file_prefix;
+
+    let dangling_submodule_pointers = small_repo_sync_config
+        .submodule_config
+        .dangling_submodule_pointers;
+
+    Ok((
+        x_repo_submodule_metadata_file_prefx,
+        dangling_submodule_pointers,
+    ))
+}
+
+/// Helper to generate the map with the submodule repos and the content ids
+/// that need to be copied from it, which is required to save the rewritten
+/// bonsai to the large repo.
+pub fn submodule_repos_with_content_ids<'a, R: Repo>(
+    submodule_deps: &'a SubmoduleDeps<R>,
+    submodule_expansion_content_ids: SubmoduleExpansionContentIds,
+) -> Result<Vec<(Arc<R>, HashSet<ContentId>)>> {
+    let sm_dep_map = submodule_deps.dep_map().cloned().unwrap_or_default();
+
+    submodule_expansion_content_ids
+        .into_iter()
+        .map(|(sm_path, content_ids)| {
+            let repo_arc = sm_dep_map.get(&sm_path.0).ok_or_else(|| {
+                anyhow!("Mononoke repo from submodule {} not available", sm_path.0)
+            })?;
+            Ok((repo_arc.clone(), content_ids))
+        })
+        .collect::<Result<Vec<_>>>()
 }

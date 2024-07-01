@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use edenfs_commands::is_command_enabled;
+use edenfs_commands::is_command_enabled_in_rust;
 #[cfg(fbcode_build)]
 use edenfs_telemetry::cli_usage::CliUsageSample;
 #[cfg(fbcode_build)]
@@ -25,6 +25,14 @@ use edenfs_utils::execute_par;
 use edenfs_utils::strip_unc_prefix;
 use fbinit::FacebookInit;
 use tracing_subscriber::filter::EnvFilter;
+
+#[cfg(not(fbcode_build))]
+// For non-fbcode builds, CliUsageSample is not defined. Let's give it a dummy
+// value so we can pass CliUsageSample through wrapper_main() and fallback().
+struct CliUsageSample;
+
+/// Value used in Python to indicate a command failed to parse
+pub const PYTHON_EDENFSCTL_EX_USAGE: i32 = 64;
 
 fn python_fallback() -> Result<Command> {
     if let Ok(args) = std::env::var("EDENFSCTL_REAL") {
@@ -99,6 +107,7 @@ fn fallback(reason: Option<clap::Error>) -> Result<i32> {
     let status = cmd
         .status()
         .with_context(|| format!("failed to execute: {:?}", cmd))?;
+
     Ok(status.code().unwrap_or(1))
 }
 
@@ -128,10 +137,21 @@ fn rust_main(cmd: edenfs_commands::MainCommand) -> Result<i32> {
 
 /// This function takes care of the fallback logic, hijack supported subcommand
 /// to Rust implementation and forward the rest to Python.
-fn wrapper_main() -> Result<i32> {
+#[allow(unused_variables)]
+fn wrapper_main(telemetry_sample: &mut CliUsageSample) -> Result<i32> {
     if std::env::var("EDENFSCTL_ONLY_RUST").is_ok() {
-        let cmd = edenfs_commands::MainCommand::parse();
-        rust_main(cmd)
+        let cmd = edenfs_commands::MainCommand::try_parse();
+        match cmd {
+            Ok(cmd) => rust_main(cmd),
+            // We failed to parse the command. We should exit with the same
+            // exit code that Python exits with for parse failures.
+            Err(e) if e.kind() == clap::ErrorKind::UnknownArgument => {
+                std::process::exit(PYTHON_EDENFSCTL_EX_USAGE)
+            }
+            // Some other error occurred during parsing. Let's exit like normal
+            // since we can't confirm it was due to an invalid command/arg.
+            Err(e) => e.exit(),
+        }
     } else if std::env::var("EDENFSCTL_SKIP_RUST").is_ok() {
         fallback(None)
     } else {
@@ -142,7 +162,31 @@ fn wrapper_main() -> Result<i32> {
                 if cmd.is_enabled() {
                     rust_main(cmd)
                 } else {
-                    fallback(None)
+                    match fallback(None) {
+                        // If the Python version of edenfsctl exited with a
+                        // parse error, we should see if the Rust version
+                        // exists. This helps prevent cases where rollouts
+                        // are not working correctly.
+                        Ok(PYTHON_EDENFSCTL_EX_USAGE) => {
+                            #[cfg(fbcode_build)]
+                            {
+                                // We expected to use Python but we were forced
+                                // to fall back to Rust. Something is wrong.
+                                telemetry_sample.set_rust_fallback(true);
+                            }
+                            eprintln!(
+                                "Failed to find Python implementation; falling back to Rust."
+                            );
+                            rust_main(cmd)
+                        }
+                        res => {
+                            #[cfg(fbcode_build)]
+                            {
+                                telemetry_sample.set_rust_fallback(false);
+                            }
+                            res
+                        }
+                    }
                 }
             }
             // If the command is defined in Rust, then --help will cause
@@ -156,7 +200,7 @@ fn wrapper_main() -> Result<i32> {
             Err(e) => {
                 if (e.kind() == clap::ErrorKind::DisplayHelp
                     || e.kind() == clap::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand)
-                    && should_use_rust_help(std::env::args(), &None).unwrap_or(false)
+                    && should_use_rust_help(std::env::args(), &None, &None).unwrap_or(false)
                 {
                     e.exit()
                 } else {
@@ -167,7 +211,11 @@ fn wrapper_main() -> Result<i32> {
     }
 }
 
-fn should_use_rust_help<T>(args: T, etc_eden_dir_override: &Option<&Path>) -> Result<bool>
+fn should_use_rust_help<T>(
+    args: T,
+    etc_eden_dir_override: &Option<&Path>,
+    experimental_commands_override: &Option<Vec<&str>>,
+) -> Result<bool>
 where
     T: Iterator<Item = String>,
 {
@@ -180,9 +228,10 @@ where
         .find(|a| !a.starts_with('-'))
         .ok_or(anyhow!("missing subcommand"))?;
 
-    Ok(is_command_enabled(
+    Ok(is_command_enabled_in_rust(
         &subcommand_name,
         &etc_eden_dir_override.map(Path::to_owned),
+        experimental_commands_override,
     ))
 }
 
@@ -193,7 +242,10 @@ fn main(_fb: FacebookInit) -> Result<()> {
     #[cfg(fbcode_build)]
     let mut sample = CliUsageSample::build();
 
-    let code = match wrapper_main() {
+    #[cfg(not(fbcode_build))]
+    let mut sample = CliUsageSample;
+
+    let code = match wrapper_main(&mut sample) {
         Ok(code) => Ok(code),
         Err(e) => {
             #[cfg(fbcode_build)]
@@ -238,30 +290,36 @@ mod tests {
 
     #[test]
     fn test_should_use_rust_help() -> Result<()> {
-        assert!(should_use_rust_help(args!["eden.exe", "minitop"], &None)?);
+        assert!(should_use_rust_help(
+            args!["eden.exe", "minitop"],
+            &None,
+            &None
+        )?);
         {
             let dir = TempDir::new()?;
             assert!(!should_use_rust_help(
-                args!["eden.exe", "redirect"],
-                &Some(dir.path())
+                args!["eden.exe", "debug"],
+                &Some(dir.path()),
+                &Some(vec!["debug"])
             )?,);
             assert!(!should_use_rust_help(
-                args!["eden.exe", "--xyz", "redirect"],
-                &Some(dir.path())
+                args!["eden.exe", "--xyz", "debug"],
+                &Some(dir.path()),
+                &Some(vec!["debug"])
             )?,);
         }
         {
             let dir = TempDir::new()?;
             let rollout_path = dir.path().join("edenfsctl_rollout.json");
             let mut rollout_file = File::create(rollout_path)?;
-            writeln!(rollout_file, r#"{{"redirect": true}}"#)?;
+            writeln!(rollout_file, r#"{{"debug": true}}"#)?;
 
             assert!(should_use_rust_help(
-                args!["eden.exe", "redirect"],
-                &Some(dir.path())
+                args!["eden.exe", "debug"],
+                &Some(dir.path()),
+                &Some(vec!["debug"])
             )?,);
         }
-
         Ok(())
     }
 }

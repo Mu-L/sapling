@@ -91,12 +91,15 @@ export const vscodeWebviewPlatform: Platform = {
   },
   openFile: (path, options) =>
     window.clientToServerAPI?.postMessage({type: 'platform/openFile', path, options}),
+  openFiles: (paths, options) =>
+    window.clientToServerAPI?.postMessage({type: 'platform/openFiles', paths, options}),
   canCustomizeFileOpener: false,
   openDiff: (path: RepoRelativePath, comparison: Comparison) =>
     window.clientToServerAPI?.postMessage({type: 'platform/openDiff', path, comparison}),
   openExternalLink: url => {
     window.clientToServerAPI?.postMessage({type: 'platform/openExternal', url});
   },
+  upsellExternalMergeTool: false,
 
   clipboardCopy: browserPlatformImpl.clipboardCopy,
 
@@ -127,17 +130,14 @@ export const vscodeWebviewPlatform: Platform = {
 
   theme: {
     getTheme,
+    getThemeName: () => document.body.dataset.vscodeThemeId,
     resetCSS: '',
     onDidChangeTheme(callback: (theme: ThemeColor) => unknown) {
-      let lastValue = getTheme();
       // VS Code sets the theme inside the webview by adding a class to `document.body`.
       // Listen for changes to body to possibly update the theme value.
+      // This also covers theme name changes, which might keep light / dark the same.
       const observer = new MutationObserver((_mutationList: Array<MutationRecord>) => {
-        const newValue = getTheme();
-        if (lastValue !== newValue) {
-          callback(newValue);
-          lastValue = newValue;
-        }
+        callback(getTheme());
       });
       observer.observe(document.body, {attributes: true, childList: false, subtree: false});
       return {dispose: () => observer.disconnect()};

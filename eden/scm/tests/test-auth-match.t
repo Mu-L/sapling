@@ -1,10 +1,8 @@
-#debugruntest-compatible
 
 #require no-eden
 
 #inprocess-hg-incompatible
 
-  $ configure modernclient
   $ newclientrepo repo
   $ export EDENSCM_LOG=auth=debug
 

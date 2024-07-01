@@ -21,7 +21,8 @@ from .gh_submit import PullRequestDetails, PullRequestState, Repository
 from .github_repo_util import check_github_repo, GitHubRepo
 from .none_throws import none_throws
 from .pr_parser import get_pull_request_for_context
-from .pull_request_body import create_pull_request_title_and_body, firstline
+from .pull_request_body import create_pull_request_title_and_body, title_and_body
+
 from .pullrequest import PullRequestId
 from .pullrequeststore import PullRequestStore
 from .run_git_command import run_git_command
@@ -287,17 +288,15 @@ async def rewrite_pull_request_body(
 
     title = None
     if ui.configbool("github", "preserve-pull-request-description"):
-        commit_msg = pr.body
-        title = pr.title
+        commit_msg_or_title_body = (pr.title, pr.body)
     else:
-        commit_msg = head_commit_data.get_msg()
+        commit_msg_or_title_body = head_commit_data.get_msg()
 
     title, body = create_pull_request_title_and_body(
-        commit_msg,
+        commit_msg_or_title_body,
         pr_numbers_and_num_commits,
         index,
         repository,
-        title,
         reviewstack=ui.configbool("github", "pull-request-include-reviewstack"),
     )
 
@@ -449,8 +448,8 @@ async def create_pull_requests_serially(
         if workflow == SubmitWorkflow.SINGLE and parent:
             base = none_throws(parent.head_branch_name)
 
-        body = commit.get_msg()
-        title = firstline(body)
+        commit_msg = commit.get_msg()
+        title, body = title_and_body(commit_msg)
         result = await gh_submit.create_pull_request(
             hostname=repository.hostname,
             owner=owner,
@@ -710,7 +709,7 @@ async def get_repo(hostname: str, owner: str, name: str) -> Repository:
 
 async def derive_commit_data(node: bytes, repo, store: PullRequestStore) -> CommitData:
     ctx = repo[node]
-    pr_id = get_pull_request_for_context(store, ctx)
+    pr_id = get_pull_request_for_context(store, repo, ctx)
     pr = await get_pull_request_details_or_throw(pr_id) if pr_id else None
     msg = None
     if pr:

@@ -103,7 +103,7 @@ macro_rules! define_type_enum {
      }) => {
          #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, strum::AsRefStr,
          strum::EnumCount, strum::EnumIter, strum::EnumString,
-         strum::EnumVariantNames, strum::IntoStaticStr)]
+         strum::VariantNames, strum::IntoStaticStr)]
          pub enum $enum_name {
              $($variant),*
          }
@@ -1196,9 +1196,11 @@ mod tests {
             DerivableType::GitTrees,
             DerivableType::GitCommits,
             DerivableType::GitDeltaManifests,
+            DerivableType::GitDeltaManifestsV2,
             DerivableType::TestManifests,
             DerivableType::TestShardedManifests,
             DerivableType::BssmV3,
+            DerivableType::HgAugmentedManifests,
         ]);
         let mut missing = HashSet::new();
         for t in a {

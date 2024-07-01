@@ -6,12 +6,12 @@
  */
 
 import type {Operation} from './operations/Operation';
-import type {CommitInfo, ExactRevset, Hash, SucceedableRevset} from './types';
+import type {CommitInfo, ExactRevset, Hash, OptimisticRevset, SucceedableRevset} from './types';
 
-import {bookmarksDataStorage} from './BookmarksData';
 import {Subtle} from './Subtle';
 import {tracker} from './analytics';
-import {findCurrentPublicBase} from './getCommitTree';
+import {Button} from './components/Button';
+import {findPublicBaseAncestor} from './getCommitTree';
 import {T, t} from './i18n';
 import {atomFamilyWeak, readAtom} from './jotaiUtils';
 import {BulkRebaseOperation} from './operations/BulkRebaseOperation';
@@ -20,9 +20,8 @@ import {RebaseOperation} from './operations/RebaseOperation';
 import {useRunOperation} from './operationsState';
 import {dagWithPreviews} from './previews';
 import {RelativeDate} from './relativeDate';
-import {commitsShownRange, latestCommits, latestDag} from './serverAPIState';
+import {commitsShownRange, latestDag} from './serverAPIState';
 import {succeedableRevset} from './types';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {atom} from 'jotai';
 import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
@@ -67,7 +66,7 @@ export const showSuggestedRebaseForStack = atomFamilyWeak((hash: Hash) =>
 
 export const suggestedRebaseDestinations = atom(get => {
   const dag = get(latestDag);
-  const publicBase = findCurrentPublicBase(get(dagWithPreviews));
+  const publicBase = findPublicBaseAncestor(get(dagWithPreviews));
   const destinations = dag
     .getBatch(dag.public_().toArray())
     .filter(
@@ -102,7 +101,7 @@ export function SuggestedRebaseButton({
   afterRun,
 }:
   | {
-      source: SucceedableRevset | ExactRevset;
+      source: SucceedableRevset | ExactRevset | OptimisticRevset;
       sources?: undefined;
       afterRun?: () => unknown;
     }
@@ -141,7 +140,7 @@ export function SuggestedRebaseButton({
     );
   });
   return (
-    <VSCodeButton appearance={isBulk ? 'secondary' : 'icon'} onClick={showContextMenu}>
+    <Button icon={!isBulk} onClick={showContextMenu}>
       <Icon icon="git-pull-request" slot="start" />
       {isAllDraftCommits ? (
         <T>Rebase all onto&hellip;</T>
@@ -150,7 +149,7 @@ export function SuggestedRebaseButton({
       ) : (
         <T>Rebase onto&hellip;</T>
       )}
-    </VSCodeButton>
+    </Button>
   );
 }
 
@@ -162,7 +161,7 @@ export function SuggestedRebaseButton({
  */
 export function getSuggestedRebaseOperation(
   dest: CommitInfo,
-  source: SucceedableRevset | ExactRevset | Array<SucceedableRevset> | undefined,
+  source: SucceedableRevset | ExactRevset | OptimisticRevset | Array<SucceedableRevset> | undefined,
 ): Operation {
   const destination = dest.remoteBookmarks?.[0] ?? dest.hash;
   const isBulk = source != null && Array.isArray(source);

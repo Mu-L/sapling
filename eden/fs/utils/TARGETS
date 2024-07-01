@@ -32,10 +32,12 @@ cpp_library(
     headers = [
         "WinStackTrace.h",
     ],
-    os_deps = [(
-        "windows",
-        ["fbsource//third-party/toolchains/win:dbghelp.lib"],
-    )],
+    os_deps = [
+        (
+            "windows",
+            ["fbsource//third-party/toolchains/win:dbghelp.lib"],
+        ),
+    ],
     deps = [
         "//eden/common/utils:path",
         "//eden/common/utils:stringconv",
@@ -244,33 +246,6 @@ cpp_library(
     srcs = ["Thread.cpp"],
     external_deps = [
         ("glibc", None, "pthread"),
-    ],
-)
-
-cpp_library(
-    name = "user_info",
-    srcs = ["UserInfo.cpp"],
-    headers = ["UserInfo.h"],
-    os_deps = [
-        (
-            "linux",
-            ["third-party//libselinux:libselinux"],
-        ),
-        (
-            "windows",
-            ["fbsource//third-party/toolchains/win:advapi32.lib"],
-        ),
-    ],
-    deps = [
-        "//eden/common/utils:handle",
-        "//eden/common/utils:win_error",
-        "//folly:exception",
-        "//folly/logging:logging",
-    ],
-    exported_deps = [
-        "fbsource//third-party/googletest:gtest_headers",
-        "//eden/common/utils:path",
-        "//folly/portability:sys_types",
     ],
 )
 

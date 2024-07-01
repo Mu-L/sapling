@@ -26,29 +26,33 @@ use vec1::Vec1;
 
 use crate::edges::ChangesetEdges;
 
-/// Indication of the kind of edge to traverse for prefetch.
+/// Indication of what changesets to prefetch.
 #[derive(Copy, Clone, Debug)]
-pub enum PrefetchEdge {
-    /// Prefetch a linear range of commits by following the first parent
-    FirstParent,
+pub enum PrefetchTarget {
+    /// Prefetch a linear range of changesets by following the first parent
+    LinearAncestors {
+        /// Prefetch as far back as this generation.
+        generation: Generation,
 
+        /// Prefetch up to this many steps.
+        steps: u64,
+    },
     /// Prefetch along the maximum skip tree distance by following the skip
-    /// tree skew ancestor, or first parent if the commit does not have
+    /// tree skew ancestor, or first parent if the changeset does not have
     /// a skip tree skew ancestor
-    SkipTreeSkewAncestor,
-}
+    SkipTreeSkewAncestors {
+        /// Prefetch as far back as this generation.
+        generation: Generation,
 
-/// Where to prefetch to.
-#[derive(Copy, Clone, Debug)]
-pub struct PrefetchTarget {
-    /// Prefetch along this edge.
-    pub edge: PrefetchEdge,
-
-    /// Prefetch as far back as this generation.
-    pub generation: Generation,
-
-    /// Prefetch up to this many steps.
-    pub steps: u64,
+        /// Prefetch up to this many steps.
+        steps: u64,
+    },
+    /// Prefetch along the skip tree following exactly what the skew binary
+    /// algorithm would do to get to the target generation.
+    ExactSkipTreeAncestors {
+        /// Prefetch as far back as this generation.
+        generation: Generation,
+    },
 }
 
 /// Indication for additional changesets to be fetched for subsequent
@@ -77,11 +81,15 @@ impl Prefetch {
         // should typically be O(log(N)) in length, except that for merge
         // commits without a common ancestor we follow the p1 parent, so limit
         // to 32 steps so that we don't follow the p1 ancestry too far.
-        Prefetch::Hint(PrefetchTarget {
-            edge: PrefetchEdge::SkipTreeSkewAncestor,
+        Prefetch::Hint(PrefetchTarget::SkipTreeSkewAncestors {
             generation,
             steps: 32,
         })
+    }
+
+    /// Prepare prefetching for skew-binary traversal over the skip tree.
+    pub fn for_exact_skip_tree_traversal(generation: Generation) -> Self {
+        Prefetch::Hint(PrefetchTarget::ExactSkipTreeAncestors { generation })
     }
 
     /// Prepare prefetching for linear traversal of the p1 history.
@@ -89,8 +97,7 @@ impl Prefetch {
         // Prefetch linear ranges of 128 commits.  This is arbitrary, but is a
         // balance between not overfetching for the cache and reducing the
         // number of sequential steps.
-        Prefetch::Hint(PrefetchTarget {
-            edge: PrefetchEdge::FirstParent,
+        Prefetch::Hint(PrefetchTarget::LinearAncestors {
             generation: FIRST_GENERATION,
             steps: 128,
         })
@@ -124,17 +131,6 @@ impl Prefetch {
         match self {
             Prefetch::None | Prefetch::Hint(..) => None,
             Prefetch::Include(target) => Some(target),
-        }
-    }
-
-    /// Target edge type that is being prefetched, if prefetching should included.
-    ///
-    /// If prefetching is merely hinted, this won't return the target edge
-    /// type, as prefetching should not be performed.
-    pub fn target_edge(self) -> Option<PrefetchEdge> {
-        match self {
-            Prefetch::None | Prefetch::Hint(..) => None,
-            Prefetch::Include(target) => Some(target.edge),
         }
     }
 }

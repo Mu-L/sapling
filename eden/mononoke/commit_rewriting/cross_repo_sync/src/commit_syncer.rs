@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,10 +36,12 @@ use metaconfig_types::PushrebaseFlags;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::ChangesetId;
+use mononoke_types::ContentId;
 use mononoke_types::RepositoryId;
 use movers::Mover;
 use pushrebase::do_pushrebase_bonsai;
 use pushrebase_hooks::get_pushrebase_hooks;
+use repo_blobstore::RepoBlobstoreRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use slog::debug;
 use synced_commit_mapping::EquivalentWorkingCopyEntry;
@@ -49,9 +52,9 @@ use synced_commit_mapping_pushrebase_hook::ForwardSyncedCommitInfo;
 use crate::commit_in_memory_syncer::CommitInMemorySyncer;
 use crate::commit_sync_config_utils::get_bookmark_renamer;
 use crate::commit_sync_config_utils::get_common_pushrebase_bookmarks;
+use crate::commit_sync_config_utils::get_git_submodule_action_by_version;
 use crate::commit_sync_config_utils::get_reverse_bookmark_renamer;
 use crate::commit_sync_config_utils::get_reverse_mover;
-use crate::commit_sync_config_utils::get_strip_git_submodules_by_version;
 use crate::commit_sync_config_utils::version_exists;
 use crate::commit_sync_outcome::commit_sync_outcome_exists;
 use crate::commit_sync_outcome::get_commit_sync_outcome;
@@ -62,19 +65,24 @@ use crate::commit_sync_outcome::CommitSyncOutcome;
 use crate::commit_sync_outcome::PluralCommitSyncOutcome;
 use crate::commit_syncers_lib::find_toposorted_unsynced_ancestors;
 use crate::commit_syncers_lib::get_mover_by_version;
-use crate::commit_syncers_lib::get_x_repo_submodule_metadata_file_prefx_from_config;
 use crate::commit_syncers_lib::remap_parents;
 use crate::commit_syncers_lib::rewrite_commit;
 use crate::commit_syncers_lib::run_with_lease;
+use crate::commit_syncers_lib::submodule_metadata_file_prefix_and_dangling_pointers;
+use crate::commit_syncers_lib::submodule_repos_with_content_ids;
 use crate::commit_syncers_lib::update_mapping_with_version;
 use crate::commit_syncers_lib::CommitSyncRepos;
 use crate::commit_syncers_lib::SyncedAncestorsVersions;
+use crate::git_submodules::InMemoryRepo;
+use crate::git_submodules::SubmoduleExpansionData;
 use crate::reporting;
 use crate::reporting::log_rewrite;
+use crate::reporting::set_scuba_logger_fields;
 use crate::reporting::CommitSyncContext;
 use crate::sync_config_version_utils::get_version;
 use crate::sync_config_version_utils::set_mapping_change_version;
 use crate::types::ErrorKind;
+use crate::types::Large;
 use crate::types::PushrebaseRewriteDates;
 use crate::types::Repo;
 use crate::types::Source;
@@ -551,18 +559,26 @@ where
     }
 
     // Rewrites a commit and uploads it
-    pub(crate) async fn upload_rewritten_and_update_mapping<'a>(
+    pub(crate) async fn upload_rewritten_and_update_mapping<'a, RB: RepoBlobstoreRef>(
         &'a self,
         ctx: &'a CoreContext,
         source_cs_id: ChangesetId,
         rewritten: BonsaiChangesetMut,
+        submodule_content_ids: Vec<(Arc<RB>, HashSet<ContentId>)>,
         version: CommitSyncConfigVersion,
     ) -> Result<ChangesetId, Error> {
         let (source_repo, target_repo) = self.get_source_target();
 
         let frozen = rewritten.freeze()?;
         let target_cs_id = frozen.get_changeset_id();
-        upload_commits(ctx, vec![frozen], &source_repo, &target_repo).await?;
+        upload_commits(
+            ctx,
+            vec![frozen],
+            &source_repo,
+            &target_repo,
+            submodule_content_ids,
+        )
+        .await?;
 
         // update_mapping also updates working copy equivalence, so no need
         // to do it separately
@@ -716,7 +732,7 @@ where
                     .commit_graph()
                     .changeset_parents(ctx, ancestor)
                     .await?;
-                if parents.is_empty() {
+                let expected_version = if parents.is_empty() {
                     let version = self
                         .get_version_for_syncing_commit_with_no_parent(
                             ctx,
@@ -728,24 +744,19 @@ where
                             format_err!("failed to sync ancestor {} of {}", ancestor, source_cs_id)
                         })?;
 
-                    self.unsafe_sync_commit_impl(
-                        ctx,
-                        ancestor,
-                        ancestor_selection_hint.clone(),
-                        commit_sync_context,
-                        Some(version),
-                    )
-                    .await?;
+                    Some(version)
                 } else {
-                    self.unsafe_sync_commit_impl(
-                        ctx,
-                        ancestor,
-                        ancestor_selection_hint.clone(),
-                        commit_sync_context,
-                        None,
-                    )
-                    .await?;
-                }
+                    None
+                };
+
+                self.unsafe_sync_commit_impl(
+                    ctx,
+                    ancestor,
+                    ancestor_selection_hint.clone(),
+                    commit_sync_context,
+                    expected_version,
+                )
+                .await?;
                 Ok(())
             };
             let xrepo_disable_commit_sync_lease =
@@ -778,6 +789,8 @@ where
         commit_sync_context: CommitSyncContext,
         expected_version: Option<CommitSyncConfigVersion>,
     ) -> Result<Option<ChangesetId>, Error> {
+        let ctx =
+            &set_scuba_logger_fields(ctx, [("sync_context", commit_sync_context.to_string())]);
         debug!(
             ctx.logger(),
             "{:?}: unsafe_sync_commit called for {}, with hint: {:?}",
@@ -806,6 +819,12 @@ where
         .await?;
 
         let submodule_deps = self.get_submodule_deps();
+        let fallback_repos = vec![Arc::new(source_repo.clone())]
+            .into_iter()
+            .chain(submodule_deps.repos())
+            .collect::<Vec<_>>();
+        let target_repo = self.get_target_repo();
+        let large_in_memory_repo = InMemoryRepo::from_repo(target_repo, fallback_repos)?;
 
         CommitInMemorySyncer {
             ctx,
@@ -815,6 +834,7 @@ where
             live_commit_sync_config: Arc::clone(&self.live_commit_sync_config),
             small_to_large: matches!(self.repos, CommitSyncRepos::SmallToLarge { .. }),
             submodule_deps,
+            large_repo: large_in_memory_repo,
         }
         .unsafe_sync_commit_in_memory(cs, commit_sync_context, expected_version)
         .await?
@@ -834,10 +854,12 @@ where
         let submodule_deps = self.get_submodule_deps();
         let mover = self.get_mover_by_version(sync_config_version).await?;
 
-        let git_submodules_action = get_strip_git_submodules_by_version(
+        let git_submodules_action = get_git_submodule_action_by_version(
+            ctx,
             Arc::clone(&self.live_commit_sync_config),
             sync_config_version,
             self.repos.get_source_repo().repo_identity().id(),
+            self.repos.get_target_repo().repo_identity().id(),
         )
         .await?;
         let source_cs = source_cs_id.load(ctx, source_repo.repo_blobstore()).await?;
@@ -849,26 +871,44 @@ where
         };
 
         let small_repo = self.get_small_repo();
-        let x_repo_submodule_metadata_file_prefix =
-            get_x_repo_submodule_metadata_file_prefx_from_config(
+        let (x_repo_submodule_metadata_file_prefix, dangling_submodule_pointers) =
+            submodule_metadata_file_prefix_and_dangling_pointers(
                 small_repo.repo_identity().id(),
                 sync_config_version,
                 self.live_commit_sync_config.clone(),
             )
             .await?;
-        let rewritten_commit = rewrite_commit(
+        let large_repo = self.get_large_repo();
+        let large_repo_id = Large(large_repo.repo_identity().id());
+        let fallback_repos = vec![Arc::new(source_repo.clone())]
+            .into_iter()
+            .chain(submodule_deps.repos())
+            .collect::<Vec<_>>();
+        let large_in_memory_repo = InMemoryRepo::from_repo(&target_repo, fallback_repos)?;
+        let submodule_expansion_data = match submodule_deps {
+            SubmoduleDeps::ForSync(deps) => Some(SubmoduleExpansionData {
+                submodule_deps: deps,
+                large_repo: large_in_memory_repo,
+                x_repo_submodule_metadata_file_prefix: x_repo_submodule_metadata_file_prefix
+                    .as_str(),
+                large_repo_id,
+                dangling_submodule_pointers,
+            }),
+            SubmoduleDeps::NotNeeded | SubmoduleDeps::NotAvailable => None,
+        };
+
+        let rewrite_res = rewrite_commit(
             ctx,
             source_cs,
             &remapped_parents,
             mover,
             &source_repo,
-            submodule_deps,
             Default::default(),
             git_submodules_action,
-            x_repo_submodule_metadata_file_prefix,
+            submodule_expansion_data,
         )
         .await?;
-        match rewritten_commit {
+        match rewrite_res.rewritten {
             None => {
                 self.set_no_sync_candidate(ctx, source_cs_id, sync_config_version.clone())
                     .await?;
@@ -878,7 +918,18 @@ where
                 // Sync commit
                 let frozen = rewritten.freeze()?;
                 let frozen_cs_id = frozen.get_changeset_id();
-                upload_commits(ctx, vec![frozen], &source_repo, &target_repo).await?;
+                let submodule_content_ids = submodule_repos_with_content_ids(
+                    self.get_submodule_deps(),
+                    rewrite_res.submodule_expansion_content_ids,
+                )?;
+                upload_commits(
+                    ctx,
+                    vec![frozen],
+                    &source_repo,
+                    &target_repo,
+                    submodule_content_ids,
+                )
+                .await?;
 
                 update_mapping_with_version(
                     ctx,
@@ -930,10 +981,12 @@ where
 
         let mover = self.get_mover_by_version(&version).await?;
 
-        let git_submodules_action = get_strip_git_submodules_by_version(
+        let git_submodules_action = get_git_submodule_action_by_version(
+            ctx,
             Arc::clone(&self.live_commit_sync_config),
             &version,
             self.repos.get_source_repo().repo_identity().id(),
+            self.repos.get_target_repo().repo_identity().id(),
         )
         .await?;
         let mut source_cs_mut = source_cs.clone().into_mut();
@@ -955,27 +1008,47 @@ where
             .collect();
 
         let small_repo = self.get_small_repo();
-        let x_repo_submodule_metadata_file_prefix =
-            get_x_repo_submodule_metadata_file_prefx_from_config(
+        let (x_repo_submodule_metadata_file_prefix, dangling_submodule_pointers) =
+            submodule_metadata_file_prefix_and_dangling_pointers(
                 small_repo.repo_identity().id(),
                 &version,
                 self.live_commit_sync_config.clone(),
             )
             .await?;
-        let rewritten = rewrite_commit(
+
+        let large_repo = self.get_large_repo();
+        let large_repo_id = Large(large_repo.repo_identity().id());
+        let fallback_repos = vec![Arc::new(source_repo.clone())]
+            .into_iter()
+            .chain(source_repo_deps.repos())
+            .collect::<Vec<_>>();
+        let large_in_memory_repo = InMemoryRepo::from_repo(&target_repo, fallback_repos)?;
+
+        let submodule_expansion_data = match &source_repo_deps {
+            SubmoduleDeps::ForSync(deps) => Some(SubmoduleExpansionData {
+                submodule_deps: deps,
+                large_repo: large_in_memory_repo,
+                x_repo_submodule_metadata_file_prefix: x_repo_submodule_metadata_file_prefix
+                    .as_str(),
+                large_repo_id,
+                dangling_submodule_pointers,
+            }),
+            SubmoduleDeps::NotNeeded | SubmoduleDeps::NotAvailable => None,
+        };
+
+        let rewrite_res = rewrite_commit(
             ctx,
             source_cs_mut,
             &remapped_parents,
             mover,
             &source_repo,
-            source_repo_deps,
             Default::default(),
             git_submodules_action,
-            x_repo_submodule_metadata_file_prefix,
+            submodule_expansion_data,
         )
         .await?;
 
-        match rewritten {
+        match rewrite_res.rewritten {
             None => {
                 if remapped_parents_outcome.is_empty() {
                     self.set_no_sync_candidate(ctx, hash, version).await?;
@@ -1011,11 +1084,16 @@ where
                 // Sync commit
                 let frozen = rewritten.freeze()?;
                 let rewritten_list = hashset![frozen];
+                let submodule_content_ids = submodule_repos_with_content_ids(
+                    self.get_submodule_deps(),
+                    rewrite_res.submodule_expansion_content_ids,
+                )?;
                 upload_commits(
                     ctx,
                     rewritten_list.clone().into_iter().collect(),
                     &source_repo,
                     &target_repo,
+                    submodule_content_ids,
                 )
                 .await?;
 
@@ -1043,6 +1121,7 @@ where
                     }),
                 )?;
 
+                debug!(ctx.logger(), "Starting pushrebase...");
                 let pushrebase_res = do_pushrebase_bonsai(
                     ctx,
                     &target_repo,
@@ -1054,6 +1133,12 @@ where
                 .await;
                 let pushrebase_res =
                     pushrebase_res.map_err(|e| Error::from(ErrorKind::PushrebaseFailure(e)))?;
+                debug!(
+                    ctx.logger(),
+                    "Pushrebase complete: distance: {}, retry_num: {}",
+                    pushrebase_res.pushrebase_distance.0,
+                    pushrebase_res.retry_num.0
+                );
                 let pushrebased_changeset = pushrebase_res.head;
                 Ok(Some(pushrebased_changeset))
             }

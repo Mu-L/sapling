@@ -17,9 +17,8 @@ import {
   openCommitInfoSidebar,
 } from '../../testUtils';
 import {CommandRunner} from '../../types';
-import {fireEvent, render, screen, waitFor, within} from '@testing-library/react';
+import {fireEvent, render, screen, waitFor, within, act} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import {act} from 'react-dom/test-utils';
 import * as utils from 'shared/utils';
 
 describe('CommitOperation', () => {
@@ -50,9 +49,19 @@ describe('CommitOperation', () => {
     });
   });
 
-  const clickQuickCommit = () => {
-    const quickCommitButton = screen.queryByTestId('quick-commit-button');
-    fireEvent.click(quickCommitButton as Element);
+  const clickQuickCommit = async () => {
+    const quickCommitButton = screen.getByTestId('quick-commit-button');
+    act(() => {
+      fireEvent.click(quickCommitButton);
+    });
+    await waitFor(() =>
+      expectMessageSentToServer({
+        type: 'runOperation',
+        operation: expect.objectContaining({
+          args: expect.arrayContaining(['commit']),
+        }),
+      }),
+    );
   };
 
   const clickCheckboxForFile = (inside: HTMLElement, fileName: string) => {
@@ -65,8 +74,8 @@ describe('CommitOperation', () => {
     });
   };
 
-  it('runs commit', () => {
-    clickQuickCommit();
+  it('runs commit', async () => {
+    await clickQuickCommit();
 
     expectMessageSentToServer({
       type: 'runOperation',
@@ -84,11 +93,11 @@ describe('CommitOperation', () => {
     });
   });
 
-  it('runs commit with subset of files selected', () => {
+  it('runs commit with subset of files selected', async () => {
     const commitTree = screen.getByTestId('commit-tree-root');
     clickCheckboxForFile(commitTree, 'file2.txt');
 
-    clickQuickCommit();
+    await clickQuickCommit();
 
     expectMessageSentToServer({
       type: 'runOperation',
@@ -108,7 +117,7 @@ describe('CommitOperation', () => {
     });
   });
 
-  it('changed files are shown in commit info view', () => {
+  it('changed files are shown in commit info view', async () => {
     const commitTree = screen.getByTestId('commit-tree-root');
     clickCheckboxForFile(commitTree, 'file2.txt');
 
@@ -118,7 +127,7 @@ describe('CommitOperation', () => {
       userEvent.type(quickInput, 'My Commit');
     });
 
-    clickQuickCommit();
+    await clickQuickCommit();
 
     expect(
       within(screen.getByTestId('changes-to-amend')).queryByText(/file1.txt/),
@@ -152,7 +161,7 @@ describe('CommitOperation', () => {
       });
     });
 
-    clickQuickCommit();
+    await clickQuickCommit();
 
     expectMessageSentToServer({
       type: 'runOperation',
@@ -165,7 +174,7 @@ describe('CommitOperation', () => {
     });
   });
 
-  it('clears quick commit title after committing', () => {
+  it('clears quick commit title after committing', async () => {
     const commitTree = screen.getByTestId('commit-tree-root');
     clickCheckboxForFile(commitTree, 'file2.txt'); // partial commit, so the quick input box isn't unmounted
 
@@ -174,12 +183,12 @@ describe('CommitOperation', () => {
       userEvent.type(quickInput, 'My Commit');
     });
 
-    clickQuickCommit();
+    await clickQuickCommit();
 
     expect(quickInput).toHaveValue('');
   });
 
-  it('on error, restores edited commit message to try again', () => {
+  it('on error, restores edited commit message to try again', async () => {
     act(() => openCommitInfoSidebar());
     act(() => CommitInfoTestUtils.clickCommitMode());
 
@@ -191,9 +200,7 @@ describe('CommitOperation', () => {
     });
 
     jest.spyOn(utils, 'randomId').mockImplementationOnce(() => '1111');
-    act(() => {
-      CommitInfoTestUtils.clickCommitButton();
-    });
+    await CommitInfoTestUtils.clickCommitButton();
 
     CommitInfoTestUtils.expectIsNOTEditingTitle();
 
@@ -207,17 +214,17 @@ describe('CommitOperation', () => {
       });
     });
 
-    waitFor(() => {
+    await waitFor(() => {
       CommitInfoTestUtils.expectIsEditingTitle();
       const title = CommitInfoTestUtils.getTitleEditor();
       expect(title).toHaveValue('My Commit');
       CommitInfoTestUtils.expectIsEditingDescription();
       const desc = CommitInfoTestUtils.getDescriptionEditor();
-      expect(desc).toHaveValue('My description');
+      expect(desc.value).toContain('My description');
     });
   });
 
-  it('on error, merges messages when restoring edited commit message to try again', () => {
+  it('on error, merges messages when restoring edited commit message to try again', async () => {
     act(() => openCommitInfoSidebar());
     act(() => CommitInfoTestUtils.clickCommitMode());
 
@@ -229,9 +236,7 @@ describe('CommitOperation', () => {
     });
 
     jest.spyOn(utils, 'randomId').mockImplementationOnce(() => '2222');
-    act(() => {
-      CommitInfoTestUtils.clickCommitButton();
-    });
+    await CommitInfoTestUtils.clickCommitButton();
     CommitInfoTestUtils.expectIsNOTEditingTitle();
 
     act(() => {
@@ -255,13 +260,14 @@ describe('CommitOperation', () => {
       });
     });
 
-    waitFor(() => {
+    await waitFor(() => {
       CommitInfoTestUtils.expectIsEditingTitle();
       const title = CommitInfoTestUtils.getTitleEditor();
       expect(title).toHaveValue('other title, My Commit');
       CommitInfoTestUtils.expectIsEditingDescription();
       const desc = CommitInfoTestUtils.getDescriptionEditor();
-      expect(desc).toHaveValue('other description, My description');
+      expect(desc.value).toContain('other description');
+      expect(desc.value).toContain('My description');
     });
   });
 });

@@ -1,4 +1,4 @@
-#debugruntest-compatible
+#modern-config-incompatible
 #inprocess-hg-incompatible
   $ setconfig experimental.allowfilepeer=True
 

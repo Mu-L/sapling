@@ -185,6 +185,7 @@ rust_library(
     autocargo = {"cargo_toml_dir": "bookmarks_movement"},
     test_deps = [
         "fbsource//third-party/rust:maplit",
+        "//common/rust/shed/borrowed:borrowed",
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/fbinit:fbinit-tokio",
         "//common/rust/shed/sql:sql",

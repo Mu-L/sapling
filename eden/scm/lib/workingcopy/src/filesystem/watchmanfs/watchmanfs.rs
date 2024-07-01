@@ -6,7 +6,6 @@
  */
 
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -528,7 +527,7 @@ pub(crate) fn detect_changes(
 
     // NB: ts_need_check is filtered by the matcher, so it does not
     // necessarily contain all NEED_CHECK entries in the treestate.
-    let ts_need_check: HashSet<_> = ts_need_check.into_iter().collect();
+    let ts_need_check: HashMap<_, _> = ts_need_check.into_iter().collect();
 
     let mut pending_changes: Vec<Result<PendingChange>> =
         ts_errors.into_iter().map(|e| Err(anyhow!(e))).collect();
@@ -545,7 +544,7 @@ pub(crate) fn detect_changes(
     let total_needs_check = ts_need_check.len()
         + wm_need_check
             .iter()
-            .filter(|(p, _)| !ts_need_check.contains(*p))
+            .filter(|(p, _)| !ts_need_check.contains_key(*p))
             .count();
 
     // This is to set "total" for progress bar.
@@ -555,7 +554,7 @@ pub(crate) fn detect_changes(
 
     let _span = tracing::info_span!("submit ts_need_check").entered();
 
-    for ts_needs_check in ts_need_check.iter() {
+    for (ts_needs_check, state) in ts_need_check.iter() {
         // Prefer to kick off file check using watchman data since that already
         // includes disk metadata.
         if wm_need_check.contains_key(ts_needs_check) {
@@ -565,8 +564,13 @@ pub(crate) fn detect_changes(
         // This check is important when we are tracking ignored files.
         // We won't do a fresh watchman query, so we must get the list
         // of ignored files from the treestate.
-        if include_ignored && ignore_matcher.matches_file(ts_needs_check)? {
-            pending_changes.push(Ok(PendingChange::Ignored(ts_needs_check.clone())));
+        if !state.is_tracked() && ignore_matcher.matches_file(ts_needs_check)? {
+            if include_ignored {
+                pending_changes.push(Ok(PendingChange::Ignored(ts_needs_check.clone())));
+            } else if !track_ignored {
+                // We have an ignored file in treestate - clear it out.
+                needs_clear.push((ts_needs_check.clone(), None));
+            }
             continue;
         }
 
@@ -627,12 +631,10 @@ pub(crate) fn detect_changes(
     for (_, wm_needs_check) in wm_need_check {
         // is_tracked is used to short circuit invocations of the ignore
         // matcher, which can be expensive.
-        let is_tracked = match &wm_needs_check.ts_state {
-            Some(state) => state
-                .state
-                .intersects(StateFlags::EXIST_P1 | StateFlags::EXIST_P2 | StateFlags::EXIST_NEXT),
-            None => false,
-        };
+        let is_tracked = wm_needs_check
+            .ts_state
+            .as_ref()
+            .map_or(false, |state| state.state.is_tracked());
 
         if !is_tracked {
             if let Some(Some(fs_meta)) = &wm_needs_check.fs_meta {
@@ -641,11 +643,19 @@ pub(crate) fn detect_changes(
                 }
             }
 
-            let ignored = ignore_matcher.matches_file(&wm_needs_check.path)?;
-            if include_ignored && ignored {
-                pending_changes.push(Ok(PendingChange::Ignored(wm_needs_check.path.clone())));
-            }
-            if !track_ignored && ignored {
+            if ignore_matcher.matches_file(&wm_needs_check.path)? {
+                if include_ignored {
+                    pending_changes.push(Ok(PendingChange::Ignored(wm_needs_check.path.clone())));
+                }
+
+                // Based on track_ignore, make sure ignored file is or isn't in treestate.
+                match (track_ignored, wm_needs_check.ts_state.is_some()) {
+                    (true, false) => needs_mark.push(wm_needs_check.path),
+                    (true, true) => {}
+                    (false, true) => needs_clear.push((wm_needs_check.path, None)),
+                    (false, false) => {}
+                }
+
                 continue;
             }
         }
@@ -664,7 +674,7 @@ pub(crate) fn detect_changes(
                 if let PendingChange::Deleted(path) = change {
                     deletes.push(path);
                 } else {
-                    if !ts_need_check.contains(path) {
+                    if !ts_need_check.contains_key(path) {
                         needs_mark.push(path.clone());
                     }
                     pending_changes.push(Ok(change));
@@ -674,7 +684,7 @@ pub(crate) fn detect_changes(
                 // File is clean. Update treestate entry if it was marked
                 // NEED_CHECK, or if we have fs_meta which implies treestate
                 // metadata (e.g. mtime, size, etc.) is out of date.
-                if ts_need_check.contains(&path) || fs_meta.is_some() {
+                if ts_need_check.contains_key(&path) || fs_meta.is_some() {
                     needs_clear.push((path, fs_meta));
                 }
             }
@@ -685,7 +695,7 @@ pub(crate) fn detect_changes(
     drop(_span);
 
     for d in deletes {
-        if !ts_need_check.contains(&d) {
+        if !ts_need_check.contains_key(&d) {
             needs_mark.push(d.clone());
         }
         pending_changes.push(Ok(PendingChange::Deleted(d)));

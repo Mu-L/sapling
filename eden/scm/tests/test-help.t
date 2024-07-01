@@ -1,5 +1,6 @@
 #chg-compatible
 #require no-fsmonitor
+#debugruntest-incompatible
 
 Short help:
 
@@ -470,6 +471,8 @@ Verbose help for add
       --hidden                consider hidden changesets
       --pager TYPE            when to paginate (boolean, always, auto, or never)
                               (default: auto)
+      --reason VALUE [+]      why this runs, usually set by automation
+                              (ADVANCED)
 
 Test the textwidth config option
 
@@ -893,7 +896,7 @@ Test list of internal help commands
 
   $ hg help debug | grep -E 'Debug|debugshell|debugapi'
   Debug commands (internal and unsupported):
-   debugapi      send an EdenAPI request and print its output
+   debugapi      send an SaplingRemoteAPI request and print its output
    debugshell    (no help text available)
 
 Test list of commands with command with no help text

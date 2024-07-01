@@ -18,6 +18,7 @@ use types::Key;
 
 use crate::indexedlogdatastore::Entry;
 use crate::scmstore::file::FileAuxData;
+use crate::scmstore::tree::TreeAuxData;
 use crate::Metadata;
 
 /// A minimal tree enum that simply wraps the possible underlying tree types,
@@ -30,8 +31,13 @@ pub(crate) enum LazyTree {
     /// An entry from a local IndexedLog. The contained Key's path might not match the requested Key's path.
     IndexedLog(Entry),
 
-    /// An EdenApi TreeEntry.
-    EdenApi(TreeEntry),
+    /// An SaplingRemoteApi TreeEntry.
+    SaplingRemoteApi(TreeEntry),
+}
+
+pub enum AuxData {
+    File(FileAuxData),
+    Tree(TreeAuxData),
 }
 
 impl LazyTree {
@@ -41,7 +47,7 @@ impl LazyTree {
         match self {
             ContentStore(_, _) => None,
             IndexedLog(ref entry) => Some(entry.key().hgid),
-            EdenApi(ref entry) => Some(entry.key().hgid),
+            SaplingRemoteApi(ref entry) => Some(entry.key().hgid),
         }
     }
 
@@ -51,7 +57,7 @@ impl LazyTree {
         Ok(match self {
             IndexedLog(ref entry) => entry.content()?,
             ContentStore(ref blob, _) => blob.clone(),
-            EdenApi(ref entry) => entry.data()?.into(),
+            SaplingRemoteApi(ref entry) => entry.data()?.into(),
         })
     }
 
@@ -60,7 +66,9 @@ impl LazyTree {
         use LazyTree::*;
         Ok(match self {
             IndexedLog(ref entry) => Some(entry.clone().with_key(key)),
-            EdenApi(ref entry) => Some(Entry::new(key, entry.data()?.into(), Metadata::default())),
+            SaplingRemoteApi(ref entry) => {
+                Some(Entry::new(key, entry.data()?.into(), Metadata::default()))
+            }
             // ContentStore handles caching internally
             ContentStore(_, _) => None,
         })
@@ -73,47 +81,42 @@ impl LazyTree {
         Ok(ManifestTreeEntry(self.hg_content()?, format))
     }
 
-    pub fn aux_data(&self) -> HashMap<HgId, FileAuxData> {
+    pub fn aux_data(&self) -> HashMap<HgId, AuxData> {
         use LazyTree::*;
         match self {
-            EdenApi(entry) => entry
-                .children
-                .as_ref()
-                .map_or_else(HashMap::new, |childrens| {
-                    childrens
-                        .iter()
-                        .filter_map(|entry| {
-                            let child_entry = match entry {
-                                Err(err) => {
-                                    tracing::warn!("Error fetching child entry: {:?}", err);
-                                    return None;
+            SaplingRemoteApi(entry) => {
+                entry
+                    .children
+                    .as_ref()
+                    .map_or_else(HashMap::new, |childrens| {
+                        childrens
+                            .iter()
+                            .filter_map(|entry| {
+                                let child_entry = entry
+                                    .as_ref()
+                                    .inspect_err(|err| {
+                                        tracing::warn!("Error fetching child entry: {:?}", err);
+                                    })
+                                    .ok()?;
+                                match child_entry {
+                                    TreeChildEntry::File(file_entry) => {
+                                        file_entry.file_metadata.clone().map(|file_metadata| {
+                                            (
+                                                file_entry.key.hgid,
+                                                AuxData::File(file_metadata.into()),
+                                            )
+                                        })
+                                    }
+                                    TreeChildEntry::Directory(dir_entry) => {
+                                        dir_entry.directory_metadata.map(|dir_metadata| {
+                                            (dir_entry.key.hgid, AuxData::Tree(dir_metadata.into()))
+                                        })
+                                    }
                                 }
-                                Ok(file_entry) => file_entry,
-                            };
-                            // TODO: Also return directory aux data.
-                            if let TreeChildEntry::File(file_entry) = child_entry {
-                                file_entry.file_metadata.map(|file_metadata| {
-                                    (
-                                        file_entry.key.hgid,
-                                        FileAuxData {
-                                            total_size: file_metadata.size.unwrap(),
-                                            content_id: file_metadata.content_id.unwrap(),
-                                            sha1: file_metadata.content_sha1.unwrap(),
-                                            sha256: file_metadata
-                                                .content_sha256
-                                                .unwrap()
-                                                .into_byte_array()
-                                                .into(),
-                                            seeded_blake3: file_metadata.content_seeded_blake3,
-                                        },
-                                    )
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<HashMap<_, _>>()
-                }),
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
+            }
             _ => HashMap::new(),
         }
     }

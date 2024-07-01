@@ -1,9 +1,4 @@
-#debugruntest-compatible
 
-#require no-eden
-
-
-  $ configure modernclient
   $ setconfig checkout.use-rust=true
   $ setconfig experimental.nativecheckout=true
 
@@ -12,6 +7,15 @@
   > A   # A/foo = foo
   >     # A/bar = bar
   > EOS
+
+#if eden
+
+Quick check for making sure this test is capable of using EdenFS
+  $ ls -a $TESTTMP/.eden-backing-repos
+  repo1
+
+#endif
+
 
 Unknown file w/ different content - conflict:
   $ echo nope > foo
@@ -73,7 +77,8 @@ Can continue interrupted checkout:
 
   $ hg go -q null
   $ FAILPOINTS=checkout-post-progress=return hg go $A
-  abort: checkout error: Error set by checkout-post-progress FAILPOINTS
+  abort: checkout errors:
+   Error set by checkout-post-progress FAILPOINTS
   [255]
 
   $ hg whereami
@@ -84,7 +89,8 @@ Can continue interrupted checkout:
   [255]
 
   $ LOG=checkout=debug hg go -q --continue 2>&1 | grep skipped_count
-  DEBUG checkout:apply_store: checkout: skipped files based on progress skipped_count=3
+  DEBUG checkout:apply_store: checkout: skipped files based on progress skipped_count=3 (no-eden !)
+  DEBUG checkout:apply_store: checkout: skipped files based on progress skipped_count=0 (eden !)
   $ hg st
   $ tglog
   @  a19fc4bcafed 'A'
@@ -110,7 +116,7 @@ Don't fail with open files that can't be deleted:
     with open("unlink_fail/foo"), open("unlink_fail/bar"):
 
       $ hg go $B
-      update failed to remove foo: Can't remove file "*foo": The process cannot access the file because it is being used by another process. (os error 32)! (glob) (windows !)
+      update failed to remove foo: can't remove file "*foo": The process cannot access the file because it is being used by another process. (os error 32)! (glob) (windows !) (no-eden !)
       2 files updated, 0 files merged, 1 files removed, 0 files unresolved
 
 
@@ -334,10 +340,12 @@ Bail on dir/path conflict with added file:
   $ hg go -q $A
   $ touch dir
   $ hg add dir
+TODO(sggutier): In this case EdenFS and non-EdenFS behavior differ, fix this later
   $ hg go $B
-  abort: 1 conflicting file changes:
-   dir
-  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)
+  abort: 1 conflicting file changes: (no-eden !)
+   dir (no-eden !)
+  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them) (no-eden !)
+  abort: file metadata for dir not found at source commit (eden !)
   [255]
 
 Bail on untracked file conflict only if contents differ:
@@ -366,21 +374,27 @@ Bail on untracked file path conflict:
   > EOS
   $ hg go -q $A
   $ echo foo > foo
+TODO(sggutier): In this case EdenFS and non-EdenFS behavior differ, fix this later
   $ hg go $B
-  abort: 1 conflicting file changes:
-   foo
-  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)
+  abort: 1 conflicting file changes: (no-eden !)
+   foo (no-eden !)
+  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them) (no-eden !)
+  abort: file metadata for foo not found at source commit (eden !)
   [255]
   $ rm foo
   $ mkdir -p foo/bar
   $ echo foo > foo/bar/baz
+TODO(sggutier): In this case EdenFS and non-EdenFS behavior differ, fix this later
   $ hg go $B
-  abort: 1 conflicting file changes:
-   foo/bar/baz
-  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)
-  [255]
+  abort: 1 conflicting file changes: (no-eden !)
+   foo/bar/baz (no-eden !)
+  (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them) (no-eden !)
+  [255] (no-eden !)
+  update complete (eden !)
   $ hg go -q $B --config experimental.checkout.rust-path-conflicts=false
   $ hg st
+  ! foo/bar (eden !)
+  ? foo/bar/baz (eden !)
 
 Deleted file replaced by untracked directory:
   $ newclientrepo
@@ -411,10 +425,14 @@ Deleted file replaced by untracked directory:
    foo
   (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)
   [255]
+TODO(sggutier): This is yet another case of differing behavior between Eden and non-Eden
   $ hg go -qC $B
   $ hg st
+  ! foo (eden !)
+  ? foo/bar (eden !)
 
-Don't output too many conflicts:
+#if no-eden
+Don't output too many conflicts. This behavior only occurs on non-EdenFS (no need to fix):
   $ newclientrepo
   $ drawdag <<'EOS'
   > B  # B/foo=bar\n
@@ -436,6 +454,7 @@ Don't output too many conflicts:
    ...and 95 more
   (commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)
   [255]
+#endif
 
 Test update_distance logging:
   $ newclientrepo
@@ -458,3 +477,46 @@ Test update_distance logging:
    INFO update_size: update_distance=1
   $ LOG=update_size=trace hg go -q null
    INFO update_size: update_distance=2
+
+#if unix-permissions no-eden
+# Test output when there are lots of filesystem errors:
+
+  $ newclientrepo
+  $ mkdir dir
+  $ for i in `seq 10`; do touch dir/file_$i; done
+  $ hg commit -Aqm foo
+  $ hg go -q null
+  $ mkdir dir
+  $ chmod 444 dir
+  $ hg go tip
+  abort: error writing files:
+   dir/file_1: can't clear conflicts after handling error "Permission denied (os error 13)": can't lstat "$TESTTMP/*/dir/file_1": Permission denied (os error 13) (glob)
+   dir/file_10: can't clear conflicts after handling error "Permission denied (os error 13)": can't lstat "$TESTTMP/*/dir/file_10": Permission denied (os error 13) (glob)
+   dir/file_2: can't clear conflicts after handling error "Permission denied (os error 13)": can't lstat "$TESTTMP/*/dir/file_2": Permission denied (os error 13) (glob)
+   dir/file_3: can't clear conflicts after handling error "Permission denied (os error 13)": can't lstat "$TESTTMP/*/dir/file_3": Permission denied (os error 13) (glob)
+   dir/file_4: can't clear conflicts after handling error "Permission denied (os error 13)": can't lstat "$TESTTMP/*/dir/file_4": Permission denied (os error 13) (glob)
+   ...and 5 more
+  [255]
+#endif
+
+# Test output when there are lots of edenapi errors:
+#if no-eden
+
+  $ newclientrepo broken_client test:broken_server
+  $ cd ~/broken_server
+  $ for i in `seq 10`; do touch file_$i; done
+  $ hg commit -Aqm foo
+  $ hg book master
+  $ cd ~/broken_client
+  $ hg pull -q
+  $ FAILPOINTS=eagerepo::api::files_attrs=return hg go master
+  abort: error fetching files:
+   b80de5d138758541c5f05265ad144ab9fa86d1db file_1: Network Error: server responded 500 Internal Server Error for eager://$TESTTMP/broken_server/files_attrs: failpoint. Headers: {}
+   b80de5d138758541c5f05265ad144ab9fa86d1db file_10: Network Error: server responded 500 Internal Server Error for eager://$TESTTMP/broken_server/files_attrs: failpoint. Headers: {}
+   b80de5d138758541c5f05265ad144ab9fa86d1db file_2: Network Error: server responded 500 Internal Server Error for eager://$TESTTMP/broken_server/files_attrs: failpoint. Headers: {}
+   b80de5d138758541c5f05265ad144ab9fa86d1db file_3: Network Error: server responded 500 Internal Server Error for eager://$TESTTMP/broken_server/files_attrs: failpoint. Headers: {}
+   b80de5d138758541c5f05265ad144ab9fa86d1db file_4: Network Error: server responded 500 Internal Server Error for eager://$TESTTMP/broken_server/files_attrs: failpoint. Headers: {}
+   ...and 5 more
+  [255]
+
+#endif

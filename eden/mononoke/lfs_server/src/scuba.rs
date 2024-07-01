@@ -12,10 +12,10 @@ use clientinfo::CLIENT_INFO_HEADER;
 use gotham::state::State;
 use gotham_ext::middleware::PostResponseInfo;
 use gotham_ext::middleware::ScubaHandler;
+use gotham_ext::util::read_header_value_ignore_err;
 use scuba_ext::MononokeScubaSampleBuilder;
 
 use crate::middleware::RequestContext;
-use crate::util::read_header_value_ignore_err;
 
 struct ClientInfoHeader(ClientInfo);
 
@@ -132,7 +132,7 @@ impl ScubaHandler for LfsScubaHandler {
         }
     }
 
-    fn populate_scuba(self, info: &PostResponseInfo, scuba: &mut MononokeScubaSampleBuilder) {
+    fn log_processed(self, info: &PostResponseInfo, mut scuba: MononokeScubaSampleBuilder) {
         scuba.add_opt(LfsScubaKey::ClientAttempt, self.client_attempt);
         scuba.add_opt(LfsScubaKey::ClientAttemptsLeft, self.client_attempts_left);
         scuba.add_opt(
@@ -155,7 +155,7 @@ impl ScubaHandler for LfsScubaHandler {
 
             scuba.add(LfsScubaKey::ErrorCount, info.error_count());
 
-            ctx.ctx.perf_counters().insert_perf_counters(scuba);
+            ctx.ctx.perf_counters().insert_perf_counters(&mut scuba);
         }
 
         if let Some(client_info) = self.client_info {
@@ -178,5 +178,7 @@ impl ScubaHandler for LfsScubaHandler {
 
             scuba.add_opt(LfsScubaKey::ClientTwTask, client_info.fb.tw_task());
         }
+
+        scuba.log();
     }
 }

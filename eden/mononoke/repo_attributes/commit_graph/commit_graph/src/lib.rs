@@ -20,6 +20,7 @@ use anyhow::Result;
 use borrowed::borrowed;
 use commit_graph_types::edges::ChangesetNode;
 pub use commit_graph_types::edges::ChangesetParents;
+use commit_graph_types::frontier::AncestorsWithinDistance;
 use commit_graph_types::frontier::ChangesetFrontierWithinDistance;
 use commit_graph_types::segments::BoundaryChangesets;
 use commit_graph_types::segments::ChangesetSegment;
@@ -27,7 +28,6 @@ use commit_graph_types::segments::SegmentDescription;
 use commit_graph_types::segments::SegmentedSliceDescription;
 use commit_graph_types::storage::CommitGraphStorage;
 use commit_graph_types::storage::Prefetch;
-use commit_graph_types::storage::PrefetchEdge;
 use commit_graph_types::storage::PrefetchTarget;
 use context::CoreContext;
 use futures::stream;
@@ -39,6 +39,7 @@ use futures::StreamExt;
 use futures::TryFutureExt;
 use futures::TryStreamExt;
 use itertools::Itertools;
+use memwrites_commit_graph_storage::MemWritesCommitGraphStorage;
 use mononoke_types::ChangesetId;
 use mononoke_types::ChangesetIdPrefix;
 use mononoke_types::ChangesetIdsResolvedFromPrefix;
@@ -47,12 +48,20 @@ use mononoke_types::FIRST_GENERATION;
 use smallvec::smallvec;
 
 pub use crate::ancestors_stream::AncestorsStreamBuilder;
+pub use crate::compat::ParentsFetcher;
+pub use crate::writer::ArcCommitGraphWriter;
+pub use crate::writer::BaseCommitGraphWriter;
+pub use crate::writer::CommitGraphWriter;
+pub use crate::writer::CommitGraphWriterArc;
+pub use crate::writer::CommitGraphWriterRef;
+pub use crate::writer::LoggingCommitGraphWriter;
 
 mod ancestors_stream;
 mod compat;
 mod core;
 mod frontier;
 mod segments;
+mod writer;
 
 /// Commit Graph.
 ///
@@ -68,15 +77,30 @@ pub struct CommitGraph {
 }
 
 impl CommitGraph {
-    pub fn new(storage: Arc<dyn CommitGraphStorage>) -> CommitGraph {
-        CommitGraph { storage }
+    pub fn new(storage: Arc<dyn CommitGraphStorage>) -> Self {
+        Self { storage }
+    }
+
+    pub fn clone_with_replaced_storage(
+        &self,
+        replace_fn: impl FnOnce(Arc<dyn CommitGraphStorage>) -> Arc<dyn CommitGraphStorage>,
+    ) -> Self {
+        Self {
+            storage: replace_fn(self.storage.clone()),
+        }
+    }
+
+    pub fn with_memwrites_storage(self) -> Self {
+        Self {
+            storage: Arc::new(MemWritesCommitGraphStorage::new(self.storage)),
+        }
     }
 
     /// Add a new changeset to the commit graph.
     ///
     /// Returns true if a new changeset was inserted, or false if the
     /// changeset already existed.
-    pub async fn add(
+    pub(crate) async fn add(
         &self,
         ctx: &CoreContext,
         cs_id: ChangesetId,
@@ -251,15 +275,48 @@ impl CommitGraph {
             .await
     }
 
-    /// Returns all ancestors of any changeset in `heads` that's reachable
-    /// by taking no more than `distance` edges from some changeset in `heads`.
+    /// Returns all ancestors of any changeset in `heads` that are reachable
+    /// by taking no more than `max_distance` edges from some changeset in `heads`,
+    /// as well as the boundary changesets which are the changesets for which
+    /// the shortest distance to them is exactly `max_distance`.
+    /// NOTE: The ancestors property of AncestorsWithinDistance represents the ancestors
+    /// which are inside the boundary. The boundary ancestors are represented via the
+    /// boundaries field.
     pub async fn ancestors_within_distance(
         &self,
         ctx: &CoreContext,
         heads: Vec<ChangesetId>,
-        distance: u64,
-    ) -> Result<BoxStream<'static, Result<ChangesetId>>> {
-        let frontier = self.frontier_within_distance(ctx, heads, distance).await?;
+        max_distance: u64,
+    ) -> Result<AncestorsWithinDistance> {
+        let cs_id_and_distance = self
+            .ancestors_within_distance_stream(ctx, heads, max_distance)
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let (boundary, ancestors): (Vec<_>, Vec<_>) = cs_id_and_distance
+            .iter()
+            .partition(|(_, distance)| *distance == max_distance);
+
+        Ok(AncestorsWithinDistance {
+            ancestors: ancestors.into_iter().map(|(cs_id, _)| cs_id).collect(),
+            boundaries: boundary.into_iter().map(|(cs_id, _)| cs_id).collect(),
+        })
+    }
+
+    /// Returns a stream of all ancestors of any changeset in `heads` that are
+    /// reachable by taking no more than `max_distance` edges from some changeset
+    /// in `heads`. For each changeset we returns its changeset id alongside
+    /// the minimum distance it takes to reach the changeset.
+    pub async fn ancestors_within_distance_stream(
+        &self,
+        ctx: &CoreContext,
+        heads: Vec<ChangesetId>,
+        max_distance: u64,
+    ) -> Result<BoxStream<'static, Result<(ChangesetId, u64)>>> {
+        let frontier = self
+            .frontier_within_distance(ctx, heads, max_distance)
+            .await?;
 
         struct AncestorsWithinDistanceState {
             commit_graph: CommitGraph,
@@ -282,8 +339,8 @@ impl CommitGraph {
 
                 if let Some((_generation, cs_ids_and_remaining_distance)) = frontier.pop_last() {
                     let output_cs_ids = cs_ids_and_remaining_distance
-                        .keys()
-                        .copied()
+                        .iter()
+                        .map(|(cs_id, remaining_distance)| (*cs_id, max_distance - *remaining_distance))
                         .collect::<Vec<_>>();
 
                     let max_remaining_distance = cs_ids_and_remaining_distance.values().copied()
@@ -301,8 +358,7 @@ impl CommitGraph {
                         .fetch_many_edges(
                             ctx,
                             &cs_ids_to_lower,
-                            Prefetch::Hint(PrefetchTarget {
-                                edge: PrefetchEdge::FirstParent,
+                            Prefetch::Hint(PrefetchTarget::LinearAncestors {
                                 generation: FIRST_GENERATION,
                                 steps: max_remaining_distance + 1,
                             }),

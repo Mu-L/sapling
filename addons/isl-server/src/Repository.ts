@@ -38,6 +38,7 @@ import type {
   RepoRelativePath,
   SettableConfigName,
   StableInfo,
+  CwdInfo,
 } from 'isl/src/types';
 import type {Comparison} from 'shared/Comparison';
 
@@ -72,7 +73,12 @@ import {
   parseCommitInfoOutput,
   parseShelvedCommitsOutput,
 } from './templates';
-import {handleAbortSignalOnProcess, isExecaError, serializeAsyncCall} from './utils';
+import {
+  findPublicAncestor,
+  handleAbortSignalOnProcess,
+  isExecaError,
+  serializeAsyncCall,
+} from './utils';
 import execa from 'execa';
 import {
   settableConfigNames,
@@ -80,7 +86,8 @@ import {
   CommitCloudBackupStatus,
   CommandRunner,
 } from 'isl/src/types';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import {revsetArgsForComparison} from 'shared/Comparison';
 import {LRU} from 'shared/LRU';
 import {RateLimiter} from 'shared/RateLimiter';
@@ -229,7 +236,7 @@ export class Repository {
         operation: RunnableOperation,
         handleCommandProgress,
         signal: AbortSignal,
-      ): Promise<void> => {
+      ): Promise<unknown> => {
         const {cwd} = ctx;
         if (operation.runner === CommandRunner.Sapling) {
           return this.runOperation(ctx, operation, handleCommandProgress, signal);
@@ -251,14 +258,10 @@ export class Repository {
           );
         } else if (operation.runner === CommandRunner.InternalArcanist) {
           const normalizedArgs = this.normalizeOperationArgs(cwd, operation.args);
-          return (
-            void Internal.runArcanistCommand?.(
-              cwd,
-              normalizedArgs,
-              handleCommandProgress,
-              signal,
-            ) ?? Promise.resolve()
-          );
+          if (Internal.runArcanistCommand == null) {
+            return Promise.reject(Error('InternalArcanist runner is not supported'));
+          }
+          return Internal.runArcanistCommand(cwd, normalizedArgs, handleCommandProgress, signal);
         }
         return Promise.resolve();
       },
@@ -294,6 +297,19 @@ export class Repository {
     this.disposables.push(() => subscription.dispose());
 
     this.applyConfigInBackground(ctx);
+
+    const headTracker = this.subscribeToHeadCommit(head => {
+      const allCommits = this.getSmartlogCommits();
+      const ancestor = findPublicAncestor(allCommits?.commits.value, head);
+      this.initialConnectionContext.tracker.track('HeadCommitChanged', {
+        extras: {
+          hash: head.hash,
+          public: ancestor?.hash,
+          bookmarks: ancestor?.remoteBookmarks,
+        },
+      });
+    });
+    this.disposables.push(headTracker.dispose);
   }
 
   public nextVisibleCommitRangeInDays(): number | undefined {
@@ -301,6 +317,10 @@ export class Repository {
       this.currentVisibleCommitRangeIndex++;
     }
     return this.visibleCommitRanges[this.currentVisibleCommitRangeIndex];
+  }
+
+  public isPathInsideRepo(p: AbsolutePath): boolean {
+    return path.normalize(p).startsWith(this.info.repoRoot);
   }
 
   /**
@@ -400,6 +420,43 @@ export class Repository {
     return this.mergeConflicts;
   }
 
+  public async getMergeTool(ctx: RepositoryContext): Promise<string | null> {
+    // treat undefined as "not cached", and null as "not configured"/invalid
+    if (ctx.cachedMergeTool !== undefined) {
+      return ctx.cachedMergeTool;
+    }
+    const tool = ctx.knownConfigs?.get('ui.merge') ?? 'internal:merge';
+    let usesCustomMerge = tool !== 'internal:merge';
+
+    if (usesCustomMerge) {
+      // TODO: we could also check merge-tools.${tool}.disabled here
+      const customToolUsesGui =
+        (
+          await this.forceGetConfig(ctx, `merge-tools.${tool}.gui`).catch(() => undefined)
+        )?.toLowerCase() === 'true';
+      if (!customToolUsesGui) {
+        ctx.logger.warn(
+          `configured custom merge tool '${tool}' is not a GUI tool, using :merge3 instead`,
+        );
+        usesCustomMerge = false;
+      } else {
+        ctx.logger.info(`using configured custom GUI merge tool ${tool}`);
+      }
+      ctx.tracker.track('UsingExternalMergeTool', {
+        extras: {
+          tool,
+          isValid: usesCustomMerge,
+        },
+      });
+    } else {
+      ctx.logger.info(`using default :merge3 merge tool`);
+    }
+
+    const mergeTool = usesCustomMerge ? tool : null;
+    ctx.cachedMergeTool = mergeTool;
+    return mergeTool;
+  }
+
   /**
    * Determine basic repo info including the root and important config values.
    * Resulting RepoInfo may have null fields if cwd is not a valid repo root.
@@ -419,7 +476,6 @@ export class Repository {
       ]),
     ]);
     const pathsDefault = configs.get('paths.default') ?? '';
-    const pullRequestDomain = configs.get('github.pull_request_domain');
     const preferredSubmitCommand = configs.get('github.preferred_submit_command');
 
     if (repoRoot instanceof Error) {
@@ -440,6 +496,7 @@ export class Repository {
     }
 
     let codeReviewSystem: CodeReviewSystem;
+    let pullRequestDomain;
     if (Internal.isMononokePath?.(pathsDefault)) {
       // TODO: where should we be getting this from? arcconfig instead? do we need this?
       const repo = pathsDefault.slice(pathsDefault.lastIndexOf('/') + 1);
@@ -462,6 +519,7 @@ export class Repository {
       } else {
         codeReviewSystem = {type: 'unknown', path: pathsDefault};
       }
+      pullRequestDomain = configs.get('github.pull_request_domain');
     }
 
     const result: RepoInfo = {
@@ -475,6 +533,31 @@ export class Repository {
     };
     logger.info('repo info: ', result);
     return result;
+  }
+
+  /**
+   * Determine basic information about a cwd, without fetching the full RepositoryInfo.
+   * Useful to determine if a cwd is valid and find the repo root without constructing a Repository.
+   */
+  static async getCwdInfo(ctx: RepositoryContext): Promise<CwdInfo> {
+    const root = await findRoot(ctx).catch((err: Error) => err);
+
+    if (root instanceof Error || root == null) {
+      return {cwd: ctx.cwd};
+    }
+
+    const [realCwd, realRoot] = await Promise.all([
+      fs.promises.realpath(ctx.cwd),
+      fs.promises.realpath(root),
+    ]);
+    // Since we found `root` for this particular `cwd`, we expect realpath(root) is a prefix of realpath(cwd).
+    // That is, the relative path does not contain any ".." components.
+    const repoRelativeCwd = path.relative(realRoot, realCwd);
+    return {
+      cwd: ctx.cwd,
+      repoRoot: realRoot,
+      repoRelativeCwdLabel: path.normalize(path.join(path.basename(realRoot), repoRelativeCwd)),
+    };
   }
 
   /**
@@ -530,6 +613,8 @@ export class Repository {
             return [arg.revset];
           case 'succeedable-revset':
             return [`max(successors(${arg.revset}))`];
+          case 'optimistic-revset':
+            return [`max(successors(${arg.revset}))`];
         }
       }
       if (illegalArgs.has(arg)) {
@@ -551,12 +636,16 @@ export class Repository {
     const {cwd} = ctx;
     const cwdRelativeArgs = this.normalizeOperationArgs(cwd, operation.args);
     const {stdin} = operation;
+
     const {command, args, options} = getExecParams(
       this.info.command,
       cwdRelativeArgs,
       cwd,
       stdin ? {input: stdin} : undefined,
-      Internal.additionalEnvForCommand?.(operation),
+      {
+        ...Internal.additionalEnvForCommand?.(operation),
+        ...(await this.getMergeToolEnvVars(ctx)),
+      },
     );
 
     ctx.logger.log('run operation: ', command, cwdRelativeArgs.join(' '));
@@ -587,9 +676,41 @@ export class Repository {
     await execution;
   }
 
+  /**
+   * Get environment variables to set up which merge tool to use during an operation.
+   * If you're using the default merge tool, use :merge3 instead for slightly better merge information.
+   * If you've configured a custom merge tool, make sure we don't overwrite it...
+   * ...unless the custom merge tool is *not* a GUI tool, like vimdiff, which would not be interactable in ISL.
+   */
+  async getMergeToolEnvVars(ctx: RepositoryContext): Promise<Record<string, string> | undefined> {
+    const tool = await this.getMergeTool(ctx);
+    return tool != null
+      ? // allow sl to use the already configured merge tool
+        {}
+      : // otherwise, use 3-way merge
+        {
+          HGMERGE: ':merge3',
+          SL_MERGE: ':merge3',
+        };
+  }
+
   setPageFocus(page: string, state: PageVisibility) {
     this.pageFocusTracker.setState(page, state);
     this.initialConnectionContext.tracker.track('FocusChanged', {extras: {state}});
+  }
+
+  private refcount = 0;
+  ref() {
+    this.refcount++;
+    if (this.refcount === 1) {
+      this.watchForChanges.setupWatchmanSubscriptions();
+    }
+  }
+  unref() {
+    this.refcount--;
+    if (this.refcount === 0) {
+      this.watchForChanges.disposeWatchmanSubscriptions();
+    }
   }
 
   /** Return the latest fetched value for UncommittedChanges. */
@@ -634,7 +755,7 @@ export class Repository {
       if (isExecaError(err)) {
         if (err.stderr.includes('checkout is currently in progress')) {
           this.initialConnectionContext.logger.info(
-            'Ignoring `hg status` error caused by in-progress checkout',
+            'Ignoring `sl status` error caused by in-progress checkout',
           );
           return;
         }
@@ -961,6 +1082,94 @@ export class Repository {
     }
 
     return result;
+  }
+
+  public async fetchSignificantLinesOfCode(
+    ctx: RepositoryContext,
+    hash: Hash,
+    excludedFiles: string[],
+  ): Promise<number> {
+    const exclusions = excludedFiles.flatMap(file => [
+      '-X',
+      absolutePathForFileInRepo(file, this) ?? file,
+    ]);
+
+    const output = (
+      await this.runCommand(
+        ['diff', '--stat', '-B', '-X', '**__generated__**', ...exclusions, '-c', hash],
+        'SlocCommand',
+        ctx,
+      )
+    ).stdout;
+
+    const sloc = this.parseSlocFrom(output);
+
+    ctx.logger.info('Fetched SLOC for commit:', hash, output, `SLOC: ${sloc}`);
+    return sloc;
+  }
+  public async fetchPendingAmendSignificantLinesOfCode(
+    ctx: RepositoryContext,
+    hash: Hash,
+    includedFiles: string[],
+  ): Promise<number> {
+    if (includedFiles.length === 0) {
+      return 0; // don't bother running sl diff if there are no files to include
+    }
+    const inclusions = includedFiles.flatMap(file => [
+      '-I',
+      absolutePathForFileInRepo(file, this) ?? file,
+    ]);
+
+    const output = (
+      await this.runCommand(
+        ['diff', '--stat', '-B', '-X', '**__generated__**', ...inclusions, '-r', '.^'],
+        'PendingSlocCommand',
+        ctx,
+      )
+    ).stdout;
+
+    if (output.trim() === '') {
+      return 0;
+    }
+    const sloc = this.parseSlocFrom(output);
+
+    ctx.logger.info('Fetched Pending AMEND SLOC for commit:', hash, output, `SLOC: ${sloc}`);
+    return sloc;
+  }
+  public async fetchPendingSignificantLinesOfCode(
+    ctx: RepositoryContext,
+    hash: Hash,
+    includedFiles: string[],
+  ): Promise<number> {
+    if (includedFiles.length === 0) {
+      return 0; // don't bother running sl diff if there are no files to include
+    }
+    const inclusions = includedFiles.flatMap(file => [
+      '-I',
+      absolutePathForFileInRepo(file, this) ?? file,
+    ]);
+
+    const output = (
+      await this.runCommand(
+        ['diff', '--stat', '-B', '-X', '**__generated__**', ...inclusions],
+        'PendingSlocCommand',
+        ctx,
+      )
+    ).stdout;
+    const sloc = this.parseSlocFrom(output);
+
+    ctx.logger.info('Fetched Pending SLOC for commit:', hash, output, `SLOC: ${sloc}`);
+    return sloc;
+  }
+  private parseSlocFrom(output: string) {
+    const lines = output.trim().split('\n');
+    const changes = lines[lines.length - 1];
+    const diffStatRe = /\d+ files changed, (\d+) insertions\(\+\), (\d+) deletions\(-\)/;
+    const diffStatMatch = changes.match(diffStatRe);
+    const insertions = parseInt(diffStatMatch?.[1] ?? '0', 10);
+    const deletions = parseInt(diffStatMatch?.[2] ?? '0', 10);
+    const sloc = insertions + deletions;
+    return sloc;
   }
 
   public async getAllChangedFiles(ctx: RepositoryContext, hash: Hash): Promise<Array<ChangedFile>> {

@@ -19,8 +19,7 @@ import {
   expectMessageNOTSentToServer,
 } from '../testUtils';
 import {leftPad} from '../utils';
-import {fireEvent, render, screen, waitFor} from '@testing-library/react';
-import {act} from 'react-dom/test-utils';
+import {fireEvent, render, screen, waitFor, act} from '@testing-library/react';
 
 function makeFiles(n: number): Array<ChangedFile> {
   return new Array(n)
@@ -71,18 +70,18 @@ describe('ChangedFilesWithFetching', () => {
   it("Does not fetch files if they're already all fetched", () => {
     CommitInfoTestUtils.clickToSelectCommit('a');
 
-    expectMessageNOTSentToServer({type: 'fetchAllCommitChangedFiles', hash: expect.anything()});
+    expectMessageNOTSentToServer({type: 'fetchCommitChangedFiles', hash: expect.anything()});
   });
 
   it('Fetches files and shows additional pages', async () => {
     CommitInfoTestUtils.clickToSelectCommit('b');
 
-    expectMessageSentToServer({type: 'fetchAllCommitChangedFiles', hash: 'b'});
+    expectMessageSentToServer({type: 'fetchCommitChangedFiles', hash: 'b', limit: 1000});
     act(() => {
       simulateMessageFromServer({
-        type: 'fetchedAllCommitChangedFiles',
+        type: 'fetchedCommitChangedFiles',
         hash: 'b',
-        result: {value: makeFiles(510)},
+        result: {value: {filesSample: makeFiles(510), totalFileCount: 510}},
       });
     });
 
@@ -103,6 +102,6 @@ describe('ChangedFilesWithFetching', () => {
     resetTestMessages();
 
     CommitInfoTestUtils.clickToSelectCommit('c');
-    expectMessageNOTSentToServer({type: 'fetchAllCommitChangedFiles', hash: expect.anything()});
+    expectMessageNOTSentToServer({type: 'fetchCommitChangedFiles', hash: expect.anything()});
   });
 });

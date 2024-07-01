@@ -43,7 +43,7 @@ py_class!(pub class config |py| {
     data cfg: RefCell<ConfigSet>;
 
     def __new__(_cls) -> PyResult<config> {
-        config::create_instance(py, RefCell::new(ConfigSet::new()))
+        config::create_instance(py, RefCell::new(ConfigSet::new().named("pyconfig")))
     }
 
     def clone(&self) -> PyResult<config> {
@@ -97,9 +97,7 @@ py_class!(pub class config |py| {
         for source in sources.as_ref().iter() {
             let value = source.value().as_ref().map(|v| PyUnicode::new(py, v));
             let file = source.location().map(|(path, range)| {
-                // Calculate the line number - count "\n" till range.start
-                let file = source.file_content().unwrap();
-                let line = 1 + file.slice(0..range.start).chars().filter(|ch| *ch == '\n').count();
+                let line = source.line_number().unwrap_or_default();
 
                 let pypath = if path.as_os_str().is_empty() {
                     PyPathBuf::from(String::from("<builtin>"))
@@ -143,7 +141,7 @@ py_class!(pub class config |py| {
     def load(repopath: Option<PyPathBuf>) -> PyResult<Self> {
         let info = path_to_info(py, repopath)?;
         let mut cfg = ConfigSet::new();
-        cfg.load(info.as_ref()).map_pyerr(py)?;
+        cfg.load(info.as_ref(), Default::default()).map_pyerr(py)?;
         Self::create_instance(py, RefCell::new(cfg))
     }
 
@@ -153,12 +151,12 @@ py_class!(pub class config |py| {
     ) -> PyResult<PyNone> {
         let info = path_to_info(py, repopath)?;
         let mut cfg = self.cfg(py).borrow_mut();
-        cfg.load(info.as_ref()).map_pyerr(py)?;
+        cfg.load(info.as_ref(), Default::default()).map_pyerr(py)?;
         Ok(PyNone)
     }
 
     def files(&self) -> PyResult<Vec<PyPathBuf>> {
-        self.cfg(py).borrow().files().iter().map(|p| p.as_path().try_into()).collect::<Result<Vec<PyPathBuf>>>().map_pyerr(py)
+        self.cfg(py).borrow().files().iter().map(|(p, _)| p.as_path().try_into()).collect::<Result<Vec<PyPathBuf>>>().map_pyerr(py)
     }
 });
 

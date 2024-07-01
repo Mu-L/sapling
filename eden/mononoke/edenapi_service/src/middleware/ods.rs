@@ -17,8 +17,8 @@ use hyper::StatusCode;
 use permission_checker::MononokeIdentitySetExt;
 use stats::prelude::*;
 
-use crate::handlers::EdenApiMethod;
 use crate::handlers::HandlerInfo;
+use crate::handlers::SaplingRemoteApiMethod;
 
 define_stats! {
     prefix = "mononoke.edenapi.request";
@@ -28,6 +28,7 @@ define_stats! {
     failure_4xx: dynamic_timeseries("{}.failure_4xx", (method: String); Rate, Sum),
     failure_5xx: dynamic_timeseries("{}.failure_5xx", (method: String); Rate, Sum),
     response_bytes_sent: dynamic_histogram("{}.response_bytes_sent", (method: String); 1_500_000, 0, 150_000_000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    suffix_query_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     blame_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     capabilities_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     files2_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
@@ -58,6 +59,9 @@ define_stats! {
     download_file_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     commit_mutations_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     commit_translate_id_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_workspace_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_references_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_update_references_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 95; P 99),
 }
 
 fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
@@ -81,8 +85,14 @@ fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
         if let Some(duration) = info.duration {
             let dur_ms = duration.as_millis() as i64;
 
-            use EdenApiMethod::*;
+            use SaplingRemoteApiMethod::*;
             match method {
+                CloudUpdateReferences => {
+                    STATS::cloud_update_references_duration_ms.add_value(dur_ms)
+                }
+                CloudReferences => STATS::cloud_references_duration_ms.add_value(dur_ms),
+                CloudWorkspace => STATS::cloud_workspace_duration_ms.add_value(dur_ms),
+                SuffixQuery => STATS::suffix_query_duration_ms.add_value(dur_ms),
                 Blame => STATS::blame_duration_ms.add_value(dur_ms),
                 Capabilities => STATS::capabilities_duration_ms.add_value(dur_ms),
                 Files2 => STATS::files2_duration_ms.add_value(dur_ms),

@@ -38,9 +38,6 @@ selectivepull=true
 names=main,master
 repos=remote/
 
-[experimental]
-copytrace=off
-
 [tweakdefaults]
 defaultdest=
 
@@ -61,4 +58,7 @@ rename.default=origin
 
 [smartlog]
 repos=origin/
+
+[extensions]
+sparse=!
 "#);

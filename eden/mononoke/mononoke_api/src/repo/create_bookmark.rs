@@ -7,10 +7,13 @@
 
 use std::collections::HashMap;
 
+use anyhow::format_err;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateReason;
 use bookmarks_movement::CreateBookmarkOp;
 use bytes::Bytes;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncContext;
 use hook_manager::manager::HookManagerRef;
 use mononoke_types::ChangesetId;
 
@@ -24,6 +27,7 @@ impl RepoContext {
         bookmark: &BookmarkKey,
         target: ChangesetId,
         pushvars: Option<&HashMap<String, Bytes>>,
+        affected_changesets_limit: Option<usize>,
     ) -> Result<(), MononokeError> {
         self.start_write()?;
 
@@ -31,9 +35,15 @@ impl RepoContext {
             bookmark: &'a BookmarkKey,
             target: ChangesetId,
             pushvars: Option<&'a HashMap<String, Bytes>>,
+            affected_changesets_limit: Option<usize>,
         ) -> CreateBookmarkOp<'a> {
-            let op = CreateBookmarkOp::new(bookmark, target, BookmarkUpdateReason::ApiRequest)
-                .with_pushvars(pushvars);
+            let op = CreateBookmarkOp::new(
+                bookmark,
+                target,
+                BookmarkUpdateReason::ApiRequest,
+                affected_changesets_limit,
+            )
+            .with_pushvars(pushvars);
             op.log_new_public_commits_to_scribe()
         }
         if let Some(redirector) = self.push_redirector.as_ref() {
@@ -46,20 +56,34 @@ impl RepoContext {
             }
             let ctx = self.ctx();
             let target = redirector
-                .get_small_to_large_commit_equivalent(ctx, target)
-                .await?;
-            make_create_op(&large_bookmark, target, pushvars)
-                .run(
-                    self.ctx(),
-                    self.authorization_context(),
-                    redirector.repo.inner_repo(),
-                    redirector.repo.hook_manager(),
+                .small_to_large_commit_syncer
+                .sync_commit(
+                    ctx,
+                    target,
+                    CandidateSelectionHint::Only,
+                    CommitSyncContext::PushRedirector,
+                    false,
                 )
-                .await?;
+                .await?
+                .ok_or_else(|| {
+                    format_err!(
+                        "Error in create_bookmark absence of corresponding commit in target repo for {}",
+                        target,
+                    )
+                })?;
+            let log_id =
+                make_create_op(&large_bookmark, target, pushvars, affected_changesets_limit)
+                    .run(
+                        self.ctx(),
+                        self.authorization_context(),
+                        redirector.repo.inner_repo(),
+                        redirector.repo.hook_manager(),
+                    )
+                    .await?;
             // Wait for bookmark to catch up on small repo
-            redirector.backsync_latest(ctx).await?;
+            redirector.ensure_backsynced(ctx, log_id).await?;
         } else {
-            make_create_op(bookmark, target, pushvars)
+            make_create_op(bookmark, target, pushvars, affected_changesets_limit)
                 .run(
                     self.ctx(),
                     self.authorization_context(),

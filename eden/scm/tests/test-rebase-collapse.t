@@ -1,9 +1,8 @@
-#debugruntest-compatible
+#modern-config-incompatible
 
 #require no-eden
 
   $ setconfig experimental.allowfilepeer=True
-  $ setconfig experimental.copytrace=on
 
   $ configure mutation
   $ enable rebase strip

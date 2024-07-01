@@ -46,12 +46,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use anyhow::format_err;
 use anyhow::Error;
 use anyhow::Result;
 use backsyncer::format_counter as format_backsyncer_counter;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateLogRef;
+use bookmarks::BookmarksRef;
 use bookmarks::Freshness;
 use cached_config::ConfigStore;
 use clientinfo::ClientEntryPoint;
@@ -59,6 +61,8 @@ use clientinfo::ClientInfo;
 use cmdlib::helpers;
 use cmdlib_cross_repo::create_commit_syncers_from_app_unredacted;
 use context::CoreContext;
+use cross_repo_sync::CandidateSelectionHint;
+use cross_repo_sync::CommitSyncContext;
 use cross_repo_sync::CommitSyncer;
 use cross_repo_sync::ConcreteRepo as CrossRepo;
 use cross_repo_sync::PushrebaseRewriteDates;
@@ -121,6 +125,7 @@ async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static>(
     common_bookmarks: HashSet<BookmarkKey>,
     pushrebase_rewrite_dates: PushrebaseRewriteDates,
     new_version: Option<CommitSyncConfigVersion>,
+    unsafe_force_rewrite_parent_to_target_bookmark: bool,
 ) -> Result<(), Error> {
     info!(
         ctx.logger(),
@@ -148,6 +153,7 @@ async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static>(
         pushrebase_rewrite_dates,
         None,
         &new_version,
+        unsafe_force_rewrite_parent_to_target_bookmark,
     )
     .await;
 
@@ -164,6 +170,8 @@ async fn run_in_initial_import_mode_for_single_head<M: SyncedCommitMapping + Clo
     config_version: CommitSyncConfigVersion,
     scuba_sample: MononokeScubaSampleBuilder,
     disable_progress_bar: bool,
+    no_automatic_derivation: bool,
+    derivation_batch_size: usize,
 ) -> Result<()> {
     info!(
         ctx.logger(),
@@ -186,6 +194,8 @@ async fn run_in_initial_import_mode_for_single_head<M: SyncedCommitMapping + Clo
         bcs,
         config_version,
         disable_progress_bar,
+        no_automatic_derivation,
+        derivation_batch_size,
     )
     .await?;
     info!(ctx.logger(), "successful sync of head {}", bcs);
@@ -202,6 +212,8 @@ async fn run_in_initial_import_mode<M: SyncedCommitMapping + Clone + 'static>(
     config_version: CommitSyncConfigVersion,
     scuba_sample: MononokeScubaSampleBuilder,
     disable_progress_bar: bool,
+    no_automatic_derivation: bool,
+    derivation_batch_size: usize,
 ) -> Result<()> {
     for bcs_id in bcs_ids {
         run_in_initial_import_mode_for_single_head(
@@ -211,6 +223,8 @@ async fn run_in_initial_import_mode<M: SyncedCommitMapping + Clone + 'static>(
             config_version.clone(),
             scuba_sample.clone(),
             disable_progress_bar,
+            no_automatic_derivation,
+            derivation_batch_size,
         )
         .await?;
     }
@@ -286,6 +300,31 @@ async fn run_in_tailing_mode<M: SyncedCommitMapping + Clone + 'static>(
 
                 if !synced_something {
                     log_noop_iteration(scuba_sample);
+                    // Maintain the working copy equivalence mapping so we don't build up a backlog
+                    for target_bookmark in common_pushrebase_bookmarks.iter() {
+                        let target_bookmark_value = commit_syncer
+                            .get_large_repo()
+                            .bookmarks()
+                            .get(ctx.clone(), target_bookmark)
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Bookmark {} does not exist in the large repo",
+                                    target_bookmark
+                                )
+                            })?;
+                        commit_syncer
+                            .reverse()?
+                            .sync_commit(
+                                ctx,
+                                target_bookmark_value,
+                                CandidateSelectionHint::Only,
+                                CommitSyncContext::XRepoSyncJob,
+                                false,
+                            )
+                            .await?;
+                    }
+
                     tokio::time::sleep(sleep_duration).await;
                 }
             }
@@ -307,8 +346,8 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
     maybe_bookmark_regex: &Option<Regex>,
     pushrebase_rewrite_dates: PushrebaseRewriteDates,
 ) -> Result<bool, Error> {
-    let source_repo = commit_syncer.get_source_repo();
-    let bookmark_update_log = source_repo.bookmark_update_log();
+    let small_repo = commit_syncer.get_source_repo();
+    let bookmark_update_log = small_repo.bookmark_update_log();
     let counter = format_counter(commit_syncer);
 
     let maybe_start_id = target_mutable_counters.get_counter(ctx, &counter).await?;
@@ -406,11 +445,11 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
 async fn maybe_apply_backpressure(
     ctx: &CoreContext,
     backpressure_params: &BackpressureParams,
-    target_repo: &Repo,
+    large_repo: &Repo,
     scuba_sample: MononokeScubaSampleBuilder,
     sleep_duration: Duration,
 ) -> Result<(), Error> {
-    let target_repo_id = target_repo.repo_identity().id();
+    let large_repo_id = large_repo.repo_identity().id();
     let limit = 10;
     loop {
         let max_further_entries = stream::iter(&backpressure_params.backsync_repos)
@@ -418,7 +457,7 @@ async fn maybe_apply_backpressure(
             .map_ok(|repo| {
                 async move {
                     let repo_id = repo.repo_identity().id();
-                    let backsyncer_counter = format_backsyncer_counter(&target_repo_id);
+                    let backsyncer_counter = format_backsyncer_counter(&large_repo_id);
                     let maybe_counter = repo
                         .mutable_counters()
                         .get_counter(ctx, &backsyncer_counter)
@@ -461,7 +500,7 @@ async fn maybe_apply_backpressure(
     }
 
     if backpressure_params.wait_for_target_repo_hg_sync {
-        wait_for_latest_log_id_to_be_synced(ctx, target_repo, sleep_duration).await?;
+        wait_for_latest_log_id_to_be_synced(ctx, large_repo, sleep_duration).await?;
     }
     Ok(())
 }
@@ -483,9 +522,9 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
     let args: ForwardSyncerArgs = app.args()?;
 
     let logger = ctx.logger();
-    let source_repo: Arc<Repo> = app.open_repo(&args.repo_args.source_repo).await?;
+    let small_repo: Arc<Repo> = app.open_repo(&args.repo_args.source_repo).await?;
 
-    let target_repo: Arc<Repo> = app.open_repo(&args.repo_args.target_repo).await?;
+    let large_repo: Arc<Repo> = app.open_repo(&args.repo_args.target_repo).await?;
 
     // RFC: use unredacted or standard `create_commit_syncers_from_app`?
     let syncers = create_commit_syncers_from_app_unredacted(&ctx, &app, &args.repo_args).await?;
@@ -493,7 +532,7 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
 
     let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new(logger, &config_store)?);
     let common_commit_sync_config =
-        live_commit_sync_config.get_common_config(source_repo.blob_repo().repo_identity().id())?;
+        live_commit_sync_config.get_common_config(small_repo.blob_repo().repo_identity().id())?;
 
     let common_bookmarks: HashSet<_> = common_commit_sync_config
         .common_pushrebase_bookmarks
@@ -501,7 +540,7 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
         .into_iter()
         .collect();
 
-    let target_mutable_counters = target_repo.mutable_counters_arc();
+    let target_mutable_counters = large_repo.mutable_counters_arc();
 
     let pushrebase_rewrite_dates = if args.pushrebase_rewrite_dates {
         PushrebaseRewriteDates::Yes
@@ -516,7 +555,7 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
             let config_version = CommitSyncConfigVersion(sync_config_version_name);
             let resolved_csids = initial_import_args
                 .changeset_args
-                .resolve_changesets(&ctx, &source_repo)
+                .resolve_changesets(&ctx, &small_repo)
                 .await?;
 
             run_in_initial_import_mode(
@@ -526,6 +565,8 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
                 config_version,
                 scuba_sample,
                 initial_import_args.no_progress_bar,
+                initial_import_args.no_automatic_derivation,
+                initial_import_args.derivation_batch_size,
             )
             .await
         }
@@ -535,12 +576,9 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
                 .clone()
                 .map(BookmarkKey::new)
                 .transpose()?;
-            let bcs = helpers::csid_resolve(
-                &ctx,
-                source_repo.blob_repo(),
-                &once_cmd_args.commit.as_str(),
-            )
-            .await?;
+            let bcs =
+                helpers::csid_resolve(&ctx, small_repo.blob_repo(), &once_cmd_args.commit.as_str())
+                    .await?;
             let new_version = once_cmd_args.new_version.map(CommitSyncConfigVersion);
 
             run_in_single_commit_mode(
@@ -552,6 +590,7 @@ async fn async_main<'a>(app: MononokeApp, ctx: CoreContext) -> Result<(), Error>
                 common_bookmarks,
                 pushrebase_rewrite_dates,
                 new_version,
+                once_cmd_args.unsafe_force_rewrite_parent_to_target_bookmark,
             )
             .await
         }

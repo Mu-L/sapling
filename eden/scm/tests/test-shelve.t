@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -8,9 +7,7 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2 or any later version.
 
-  $ configure modernclient
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.copytrace=on
   $ setconfig checkout.use-rust=true
 
   $ cat >> $HGRCPATH << 'EOF'

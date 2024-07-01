@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Union
 
 from sapling import (
     commands,
+    context as contextmod,
     error,
     extensions,
     merge as mergemod,
@@ -120,6 +121,14 @@ def _findconflictcommand(repo) -> Union[None, Dict[str, str], str]:
     return None
 
 
+def _findconflicthashes(mergestate) -> Dict[str, str]:
+    ms = mergestate._rust_ms
+    return {
+        "local": ms.local().hex() if ms.local() else None,
+        "other": ms.other().hex() if ms.other() else None,
+    }
+
+
 # To become a block in commands.py/resolve().
 def _resolve(orig, ui, repo, *pats, **opts):
     # This block is duplicated from commands.py to maintain behavior.
@@ -167,6 +176,7 @@ def _resolve(orig, ui, repo, *pats, **opts):
             formatter.write("command_details", "%s\n", cmd)
         else:
             formatter.write("command", "%s\n", None)  # For BC
+        formatter.write("hashes", "%s\n", _findconflicthashes(mergestate))
         formatter.end()
         return 0
 
@@ -232,7 +242,9 @@ def _summarize(repo, workingfilectx, otherctx, basectx) -> Dict[str, Any]:
     )
 
     def flags(context):
-        if isinstance(context, absentfilectx):
+        if isinstance(context, absentfilectx) or (
+            isinstance(context, contextmod.workingfilectx) and not context.lexists()
+        ):
             return {
                 "contents": None,
                 "exists": False,

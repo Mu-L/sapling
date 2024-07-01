@@ -91,6 +91,13 @@ def _savegraft(ctx, extra) -> None:
         extra["intermediate-source"] = s
 
 
+def _reproduciblecommits(ctx, extra) -> None:
+    # If we want reproducible commits, we need stable dates. The mutation date in
+    # extras is always "now", which affects the commit hash. Nothing uses this
+    # extra, so should be okay to skip.
+    extra.pop("mutdate", None)
+
+
 def _savebranch(ctx, extra) -> None:
     extra["branch"] = ctx.branch()
 
@@ -251,6 +258,10 @@ class rebaseruntime:
 
         e = opts.get("extrafn")  # internal, used by e.g. hgsubversion
         self.extrafns = [_savegraft]
+
+        if repo.ui.configbool("rebase", "reproducible-commits"):
+            self.extrafns.append(_reproduciblecommits)
+
         if e:
             self.extrafns = [e]
 
@@ -403,7 +414,7 @@ class rebaseruntime:
         if not mutation.enabled(self.repo):
             _checkobsrebase(self.repo, self.ui, obsoleteset, skippedset)
 
-    def _prepareabortorcontinue(self, isabort):
+    def _prepareabortcontinueorquit(self, isabort, isquit):
         try:
             self.restorestatus()
             if self.collapsef:
@@ -431,6 +442,8 @@ class rebaseruntime:
                 self.state,
                 activebookmark=self.activebookmark,
             )
+        if isquit:
+            return quit_rebase(self.repo, activebookmark=self.activebookmark)
 
     def _preparenewrebase(self, destmap):
         if not destmap:
@@ -1064,6 +1077,14 @@ def _simplemerge(ui, basectx, ctx, p1ctx, manifestbuilder):
         ("a", "abort", False, _("abort an interrupted rebase")),
         (
             "",
+            "quit",
+            False,
+            _(
+                "quit an interrupted rebase and keep the already rebased commits (EXPERIMENTAL)"
+            ),
+        ),
+        (
+            "",
             "noconflict",
             False,
             _("cancel the rebase if there are conflicts (EXPERIMENTAL)"),
@@ -1194,6 +1215,39 @@ def rebase(ui, repo, templ=None, **opts):
     unresolved conflicts.
 
     """
+
+    if not opts.get("date"):
+        opts["date"] = _defaultdate(ui)
+
+    if not (
+        opts.get("continue")
+        or opts.get("abort")
+        or opts.get("restack")
+        or opts.get("quit")
+    ):
+        # 'hg rebase' w/o args should do nothing
+        if not opts.get("dest"):
+            raise error.Abort("you must specify a destination (-d) for the rebase")
+
+        # 'hg rebase' can fast-forward bookmark
+        prev = repo["."]
+
+        # Only fast-forward the bookmark if no source nodes were explicitly
+        # specified.
+        if not (opts.get("base") or opts.get("source") or opts.get("rev")):
+            dests = opts.get("dest")
+            if dests and len(dests) == 1 and dests[0] != prev:
+                dest = scmutil.revsingle(repo, dests[0])
+                common = dest.ancestor(prev)
+                if prev == common and dest != prev:
+                    activebookmark = repo._activebookmark
+                    result = hg.updatetotally(ui, repo, dest.node(), activebookmark)
+                    if activebookmark:
+                        with repo.wlock():
+                            bookmarks.update(repo, [prev.node()], dest.node())
+                    ui.status(_("nothing to rebase - fast-forwarded to %s\n") % dest)
+                    return result
+
     inmemory = ui.configbool("rebase", "experimental.inmemory")
 
     # Check for conditions that disable in-memory merge if it was requested.
@@ -1201,8 +1255,8 @@ def rebase(ui, repo, templ=None, **opts):
         whynotimm = None
 
         # in-memory rebase is not compatible with resuming rebases.
-        if opts.get("continue") or opts.get("abort"):
-            whynotimm = "--continue or --abort passed"
+        if opts.get("continue") or opts.get("abort") or opts.get("quit"):
+            whynotimm = "--continue, --abort or --quit passed"
 
         # in-memory rebase cannot currently run within a parent transaction,
         # since the restarting logic will fail the entire transaction.
@@ -1243,6 +1297,24 @@ def rebase(ui, repo, templ=None, **opts):
         return _origrebase(ui, repo, rbsrt, **opts)
 
 
+def _defaultdate(ui):
+    if ui.configbool("tweakdefaults", "rebasekeepdate"):
+        # We want to "keep" the source commit's date. We don't actually enable this
+        # anywhere since things like ISL use commit date to infer "liveness", so we want
+        # to bump it on rebase.
+        return None
+
+    if ui.configbool("rebase", "reproducible-commits"):
+        # We want rebase to create reproducible commits, which in practice means dates
+        # must be stable (so we want to maintain the commit's date).
+        return None
+
+    if stub := ui.config("devel", "default-date"):
+        return stub
+
+    return "%d %d" % util.makedate()
+
+
 @perftrace.tracefunc("Rebase")
 def _origrebase(ui, repo, rbsrt, **opts):
     with repo.wlock(), repo.lock(), simplemerge.managed_merge_resource(ui, repo.name):
@@ -1260,8 +1332,9 @@ def _origrebase(ui, repo, rbsrt, **opts):
         # search default destination in this space
         # used in the 'hg pull --rebase' case, see issue 5214.
         destspace = opts.get("_destspace")
-        contf = opts.get("continue")
-        abortf = opts.get("abort")
+        contf = opts.get("continue", False)
+        abortf = opts.get("abort", False)
+        quitf = opts.get("quit", False)
         if opts.get("interactive"):
             try:
                 if extensions.find("histedit"):
@@ -1281,22 +1354,24 @@ def _origrebase(ui, repo, rbsrt, **opts):
         if rbsrt.collapsemsg and not rbsrt.collapsef:
             raise error.Abort(_("message can only be specified with collapse"))
 
-        if contf or abortf:
-            if contf and abortf:
-                raise error.Abort(_("cannot use both abort and continue"))
+        if contf or abortf or quitf:
+            if (contf + abortf + quitf) > 1:
+                raise error.Abort(
+                    _("can only use one of the following: abort, continue or quit")
+                )
             if rbsrt.collapsef:
-                raise error.Abort(_("cannot use collapse with continue or abort"))
+                raise error.Abort(_("cannot use collapse with continue, abort or quit"))
             if srcf or basef or dests:
                 raise error.Abort(
-                    _("abort and continue do not allow specifying revisions")
+                    _("abort, continue and quit do not allow specifying revisions")
                 )
-            if abortf and opts.get("tool", False):
+            if (abortf or quitf) and opts.get("tool", False):
                 ui.warn(_("tool option will be ignored\n"))
             if contf:
                 ms = mergemod.mergestate.read(repo)
                 mergeutil.checkunresolved(ms)
 
-            retcode = rbsrt._prepareabortorcontinue(abortf)
+            retcode = rbsrt._prepareabortcontinueorquit(abortf, quitf)
             if retcode is not None:
                 return retcode
         else:
@@ -1656,6 +1731,7 @@ def concludenode(
             mutinfo = mutation.record(repo, extra, preds, mutop)
         if extrafn:
             extrafn(ctx, extra)
+
         loginfo = {"predecessors": ctx.hex(), "mutation": "rebase"}
 
         destphase = max(ctx.phase(), phases.draft)
@@ -2167,6 +2243,19 @@ def abort(repo, originalwd, destmap, state, activebookmark=None) -> int:
         clearstatus(repo)
         clearcollapsemsg(repo)
         repo.ui.warn(_("rebase aborted\n"))
+    return 0
+
+
+def quit_rebase(repo, activebookmark=None) -> int:
+    """Quit an interrupted rebase and keep the already rebased commits."""
+    try:
+        mergemod.goto(repo, repo["."].rev(), force=True)
+        if activebookmark and activebookmark in repo._bookmarks:
+            bookmarks.activate(repo, activebookmark)
+    finally:
+        clearstatus(repo)
+        clearcollapsemsg(repo)
+        repo.ui.warn(_("rebase quited\n"))
     return 0
 
 

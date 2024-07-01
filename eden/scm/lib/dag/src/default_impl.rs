@@ -19,6 +19,8 @@ use crate::ops::DagAddHeads;
 use crate::ops::IdConvert;
 use crate::ops::IdDagAlgorithm;
 use crate::ops::Parents;
+use crate::ops::ToIdSet;
+use crate::ops::ToSet;
 use crate::utils;
 use crate::DagAlgorithm;
 use crate::Group;
@@ -143,7 +145,7 @@ pub(crate) async fn subdag(
     // resulting subdag might preserve the same order with the original dag.
     let heads: Vec<VertexName> = heads.iter_rev().await?.try_collect().await?;
     // MASTER group enables the ONLY_HEAD segment flag. It improves graph query performance.
-    let heads = VertexListWithOptions::from(heads).with_highest_group(Group::MASTER);
+    let heads = VertexListWithOptions::from(heads).with_desired_group(Group::MASTER);
     dag.add_heads(&parents, &heads).await?;
     Ok(dag)
 }
@@ -249,7 +251,7 @@ pub(crate) async fn first_ancestors(
     set: NameSet,
 ) -> Result<NameSet> {
     let mut to_visit: Vec<VertexName> = {
-        let mut list = Vec::with_capacity(set.count().await?);
+        let mut list = Vec::with_capacity(set.count_slow().await?.try_into()?);
         let mut iter = set.iter().await?;
         while let Some(next) = iter.next().await {
             let vertex = next?;
@@ -351,7 +353,7 @@ pub(crate) async fn common_ancestors(
     this: &(impl DagAlgorithm + ?Sized),
     set: NameSet,
 ) -> Result<NameSet> {
-    let result = match set.count().await? {
+    let result = match set.count_slow().await? {
         0 => set,
         1 => this.ancestors(set).await?,
         _ => {
@@ -391,6 +393,31 @@ pub(crate) async fn is_ancestor(
     Ok(false)
 }
 
+/// Implementation of `suggest_bisect`.
+///
+/// This is not the default trait implementation because the extra trait bounds
+/// (ToIdSet, ToSet).
+pub async fn suggest_bisect(
+    this: &(impl DagAlgorithm + ToIdSet + ToSet + IdConvert + ?Sized),
+    roots: NameSet,
+    heads: NameSet,
+    skip: NameSet,
+) -> Result<(Option<VertexName>, NameSet, NameSet)> {
+    let roots = this.to_id_set(&roots).await?;
+    let heads = this.to_id_set(&heads).await?;
+    let skip = this.to_id_set(&skip).await?;
+    let (maybe_id, untested, heads) = this
+        .id_dag_snapshot()?
+        .suggest_bisect(&roots, &heads, &skip)?;
+    let maybe_vertex = match maybe_id {
+        Some(id) => Some(this.vertex_name(id).await?),
+        None => None,
+    };
+    let untested = this.to_set(&untested)?;
+    let heads = this.to_set(&heads)?;
+    Ok((maybe_vertex, untested, heads))
+}
+
 // `scope` is usually the "dirty" set that might need to be inserted, or might
 // already exist in the existing dag, obtained by `dag.dirty()`. It is okay for
 // `scope` to be empty, which might lead to more network round-trips. See also
@@ -401,7 +428,7 @@ pub(crate) async fn hint_subdag_for_insertion(
     scope: &NameSet,
     heads: &[VertexName],
 ) -> Result<MemNameDag> {
-    let count = scope.count().await?;
+    let count = scope.count_slow().await?;
     tracing::trace!("hint_subdag_for_insertion: pending vertexes: {}", count);
 
     // ScopedParents only contains parents within "scope".

@@ -39,6 +39,7 @@ use mononoke_app::args::McrouterAppExtension;
 use mononoke_app::args::ReadonlyArgs;
 use mononoke_app::args::RepoFilterAppExtension;
 use mononoke_app::args::ShutdownTimeoutArgs;
+use mononoke_app::args::TLSArgs;
 use mononoke_app::args::WarmBookmarksCacheExtension;
 use mononoke_app::fb303::Fb303AppExtension;
 use mononoke_app::fb303::ReadyFlagService;
@@ -75,18 +76,9 @@ struct MononokeServerArgs {
     /// If provided the thrift server will start on this port
     #[clap(long, short = 'p')]
     thrift_port: Option<String>,
-    /// Path to a file with server certificate
-    #[clap(long)]
-    cert: String,
-    /// Path to a file with server private key
-    #[clap(long)]
-    private_key: String,
-    /// Path to a file with CA certificate
-    #[clap(long)]
-    ca_pem: String,
-    /// Path to a file with encryption keys for SSL tickets
-    #[clap(long)]
-    ssl_ticket_seeds: Option<String>,
+    /// TLS parameters for this service
+    #[clap(flatten)]
+    tls_args: TLSArgs,
     /// Top level Mononoke tier where CSLB publishes routing table
     #[clap(long)]
     cslb_config: Option<String>,
@@ -202,7 +194,7 @@ impl MononokeServerProcessExecutor {
         // sharded repos need to be present on each host.
         let is_deep_sharded = config
             .deep_sharding_config
-            .and_then(|c| c.status.get(&ShardedService::EdenApi).copied())
+            .and_then(|c| c.status.get(&ShardedService::SaplingRemoteApi).copied())
             .unwrap_or(false);
         if is_deep_sharded {
             self.repos_mgr.remove_repo(repo_name);
@@ -267,7 +259,7 @@ fn main(fb: FacebookInit) -> Result<()> {
         pushrebase_client::land_service_override_certificate_paths(
             land_service_cert_path,
             land_service_key_path,
-            &args.ca_pem,
+            &args.tls_args.tls_ca,
         );
     }
 
@@ -275,10 +267,10 @@ fn main(fb: FacebookInit) -> Result<()> {
 
     let acceptor = {
         let mut builder = secure_utils::SslConfig::new(
-            args.ca_pem,
-            args.cert,
-            args.private_key,
-            args.ssl_ticket_seeds,
+            &args.tls_args.tls_ca,
+            &args.tls_args.tls_certificate,
+            &args.tls_args.tls_private_key,
+            args.tls_args.tls_ticket_seeds,
         )
         .tls_acceptor_builder(root_log.clone())
         .context("Failed to instantiate TLS Acceptor builder")?;
@@ -310,7 +302,7 @@ fn main(fb: FacebookInit) -> Result<()> {
         .sharded_executor_args
         .sharded_service_name
         .as_ref()
-        .map(|_| ShardedService::EdenApi);
+        .map(|_| ShardedService::SaplingRemoteApi);
     app.start_monitoring("mononoke_server", service.clone())?;
     app.start_stats_aggregation()?;
 

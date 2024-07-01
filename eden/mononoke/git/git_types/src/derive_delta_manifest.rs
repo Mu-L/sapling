@@ -59,6 +59,7 @@ use crate::fetch_git_object_bytes;
 use crate::mode;
 use crate::store::store_delta_instructions;
 use crate::store::store_raw_delta;
+use crate::store::GitIdentifier;
 use crate::store::HeaderState;
 use crate::DeltaInstructions;
 use crate::DeltaObjectKind;
@@ -174,14 +175,14 @@ async fn metadata_to_manifest_entry(
                 let actual_object = fetch_git_object_bytes(
                     &ctx,
                     blobstore.clone(),
-                    metadata.actual.oid(),
+                    &GitIdentifier::Rich(*metadata.actual.oid()),
                     HeaderState::Excluded,
                 )
                 .await?;
                 let base_object = fetch_git_object_bytes(
                     &ctx,
                     blobstore.clone(),
-                    delta_metadata.object.oid(),
+                    &GitIdentifier::Rich(*delta_metadata.object.oid()),
                     HeaderState::Excluded,
                 )
                 .await?;
@@ -410,8 +411,12 @@ async fn derive_git_delta_manifest(
                         manifest::Diff::Changed(path, old_entry, new_entry) => {
                             let actual = TreeMember::from(new_entry);
                             let base = TreeMember::from(old_entry);
-                            // If the entry corresponds to a submodules (and shows up as a commit), then we ignore it
                             if actual.filemode() == mode::GIT_FILEMODE_COMMIT {
+                                // If the entry corresponds to a submodules (and shows up as a commit), then we ignore it
+                                None
+                            } else if actual.oid() == base.oid() {
+                                // If the base and actual object are same, then we don't need to include them at all since no
+                                // new content has been introduced. This can happen when just the filemode of a blob is changed
                                 None
                             } else if actual.oid().size() > DELTA_THRESHOLD
                                 || base.oid().size() > DELTA_THRESHOLD
@@ -651,7 +656,7 @@ impl BonsaiDerivable for RootGitDeltaManifestId {
 impl_bonsai_derived_via_manager!(RootGitDeltaManifestId);
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::collections::HashSet;
     use std::str::FromStr;
 
@@ -662,13 +667,15 @@ mod test {
     use bonsai_hg_mapping::BonsaiHgMappingArc;
     use bookmarks::BookmarkKey;
     use bookmarks::BookmarksRef;
-    use changesets::ChangesetsRef;
+    use commit_graph::CommitGraphRef;
     use derived_data::BonsaiDerived;
     use fbinit::FacebookInit;
     use fixtures::TestRepoFixture;
     use futures::future;
-    use futures_util::stream::TryStreamExt;
+    use futures::StreamExt;
+    use futures::TryStreamExt;
     use mercurial_types::HgChangesetId;
+    use mononoke_types::ChangesetIdPrefix;
     use repo_blobstore::RepoBlobstoreArc;
     use repo_derived_data::RepoDerivedDataRef;
     use repo_identity::RepoIdentityRef;
@@ -685,7 +692,7 @@ mod test {
         + RepoBlobstoreArc
         + RepoDerivedDataRef
         + RepoIdentityRef
-        + ChangesetsRef
+        + CommitGraphRef
         + Send
         + Sync,
         ctx: CoreContext,
@@ -698,10 +705,13 @@ mod test {
         // Validate that the derivation of the Git Delta Manifest for the head commit succeeds
         let root_mf_id = RootGitDeltaManifestId::derive(&ctx, &repo, bcs_id).await?;
         // Validate the derivation of all the commits in this repo succeeds
-        let result = repo
-            .changesets()
-            .list_enumeration_range(&ctx, 0, u64::MAX, None, false)
-            .map_ok(|(bcs_id, _)| {
+        let all_changesets = repo
+            .commit_graph()
+            .find_by_prefix(&ctx, ChangesetIdPrefix::from_bytes("").unwrap(), 100000)
+            .await?
+            .to_vec();
+        let result = stream::iter(all_changesets)
+            .map(|bcs_id| {
                 let repo = &repo;
                 let ctx: &CoreContext = &ctx;
                 async move {
@@ -709,7 +719,7 @@ mod test {
                     Ok(mf_id)
                 }
             })
-            .try_buffer_unordered(100)
+            .buffer_unordered(100)
             .try_collect::<Vec<_>>()
             .await;
         assert!(
@@ -732,7 +742,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -757,7 +767,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -801,7 +811,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -836,7 +846,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -872,7 +882,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -900,7 +910,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -925,7 +935,7 @@ mod test {
             .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;
@@ -961,7 +971,7 @@ mod test {
         .collect::<HashSet<_>>();
         let matched_entries = delta_manifest
             .clone()
-            .into_subentries(&ctx, &blobstore)
+            .into_entries(&ctx, &blobstore)
             .try_filter(|(path, _)| future::ready(expected_paths.contains(path)))
             .try_collect::<HashMap<_, _>>()
             .await?;

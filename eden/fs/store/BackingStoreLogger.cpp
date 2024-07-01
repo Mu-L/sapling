@@ -70,6 +70,15 @@ void BackingStoreLogger::logImport(
     case ObjectFetchContext::ObjectType::Tree:
       typeString = "Tree";
       break;
+    case ObjectFetchContext::RootTree:
+      typeString = "Root Tree";
+      break;
+    case ObjectFetchContext::ManifestForRoot:
+      typeString = "Manifest For Root";
+      break;
+    case ObjectFetchContext::PrefetchBlob:
+      typeString = "Prefetch Blob";
+      break;
     case ObjectFetchContext::ObjectType::kObjectTypeEnumMax:
       // invalid string prolly good here
       break;

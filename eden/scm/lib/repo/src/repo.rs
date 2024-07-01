@@ -21,8 +21,8 @@ use configmodel::ConfigExt;
 use eagerepo::EagerRepo;
 use eagerepo::EagerRepoStore;
 use edenapi::Builder;
-use edenapi::EdenApi;
-use edenapi::EdenApiError;
+use edenapi::SaplingRemoteApi;
+use edenapi::SaplingRemoteApiError;
 use manifest_tree::ReadTreeManifest;
 use metalog::MetaLog;
 use once_cell::sync::OnceCell;
@@ -37,8 +37,8 @@ use revisionstore::scmstore;
 use revisionstore::scmstore::FileStoreBuilder;
 use revisionstore::scmstore::TreeStoreBuilder;
 use revisionstore::trait_impls::ArcFileStore;
-use revisionstore::EdenApiFileStore;
-use revisionstore::EdenApiTreeStore;
+use revisionstore::SaplingRemoteApiFileStore;
+use revisionstore::SaplingRemoteApiTreeStore;
 use revsets::errors::RevsetLookupError;
 use revsets::utils as revset_utils;
 use storemodel::FileStore;
@@ -69,7 +69,7 @@ pub struct Repo {
     pub store_requirements: Requirements,
     repo_name: Option<String>,
     metalog: OnceCell<Arc<RwLock<MetaLog>>>,
-    eden_api: OnceCell<Arc<dyn EdenApi>>,
+    eden_api: OnceCell<Arc<dyn SaplingRemoteApi>>,
     dag_commits: OnceCell<Arc<RwLock<Box<dyn DagCommits + Send + 'static>>>>,
     file_store: OnceCell<Arc<dyn FileStore>>,
     file_scm_store: OnceCell<Arc<scmstore::FileStore>>,
@@ -278,37 +278,39 @@ impl Repo {
         self.store_path.join("metalog")
     }
 
-    /// Constructs the EdenAPI client. Errors out if the EdenAPI should not be
+    /// Constructs the SaplingRemoteAPI client. Errors out if the SaplingRemoteAPI should not be
     /// constructed.
     ///
-    /// Use `optional_eden_api` if `EdenAPI` is optional.
-    pub fn eden_api(&self) -> Result<Arc<dyn EdenApi>, EdenApiError> {
+    /// Use `optional_eden_api` if `SaplingRemoteAPI` is optional.
+    pub fn eden_api(&self) -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
         match self.optional_eden_api()? {
             Some(v) => Ok(v),
-            None => Err(EdenApiError::Other(anyhow!(
-                "EdenAPI is requested but not available for this repo"
+            None => Err(SaplingRemoteApiError::Other(anyhow!(
+                "SaplingRemoteAPI is requested but not available for this repo"
             ))),
         }
     }
 
     /// Private API used by `optional_eden_api` that bypasses checks about whether
-    /// EdenAPI should be used or not.
-    fn force_construct_eden_api(&self) -> Result<Arc<dyn EdenApi>, EdenApiError> {
-        let eden_api =
-            self.eden_api
-                .get_or_try_init(|| -> Result<Arc<dyn EdenApi>, EdenApiError> {
-                    tracing::trace!(target: "repo::eden_api", "creating edenapi");
-                    let eden_api = Builder::from_config(&self.config)?.build()?;
-                    tracing::info!(url=eden_api.url(), path=?self.path, "EdenApi built");
-                    Ok(eden_api)
-                })?;
+    /// SaplingRemoteAPI should be used or not.
+    fn force_construct_eden_api(&self) -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
+        let eden_api = self.eden_api.get_or_try_init(
+            || -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
+                tracing::trace!(target: "repo::eden_api", "creating edenapi");
+                let eden_api = Builder::from_config(&self.config)?.build()?;
+                tracing::info!(url=eden_api.url(), path=?self.path, "SaplingRemoteApi built");
+                Ok(eden_api)
+            },
+        )?;
         Ok(eden_api.clone())
     }
 
-    /// Constructs EdenAPI client if it should be constructed.
+    /// Constructs SaplingRemoteAPI client if it should be constructed.
     ///
-    /// Returns `None` if EdenAPI should not be used.
-    pub fn optional_eden_api(&self) -> Result<Option<Arc<dyn EdenApi>>, EdenApiError> {
+    /// Returns `None` if SaplingRemoteAPI should not be used.
+    pub fn optional_eden_api(
+        &self,
+    ) -> Result<Option<Arc<dyn SaplingRemoteApi>>, SaplingRemoteApiError> {
         if self.store_requirements.contains("git") {
             tracing::trace!(target: "repo::eden_api", "disabled because of git");
             return Ok(None);
@@ -332,7 +334,7 @@ impl Repo {
                     tracing::trace!(target: "repo::eden_api", "using EagerRepo at {}", &path);
                     return Ok(Some(self.force_construct_eden_api()?));
                 }
-                // Legacy tests are incompatible with EdenAPI.
+                // Legacy tests are incompatible with SaplingRemoteAPI.
                 // They use None or file or ssh scheme with dummyssh.
                 if path.starts_with("file:") {
                     tracing::trace!(target: "repo::eden_api", "disabled because paths.default is not set");
@@ -345,9 +347,9 @@ impl Repo {
                         }
                     }
                 }
-                // Explicitly set EdenAPI URLs.
+                // Explicitly set SaplingRemoteAPI URLs.
                 // Ideally we can make paths.default derive the edenapi URLs. But "push" is not on
-                // EdenAPI yet. So we have to wait.
+                // SaplingRemoteAPI yet. So we have to wait.
                 if self.config.get_nonempty("edenapi", "url").is_none()
                     || self
                         .config
@@ -454,7 +456,7 @@ impl Repo {
 
         if let Some(eden_api) = eden_api {
             tracing::trace!(target: "repo::file_store", "enabling edenapi");
-            file_builder = file_builder.edenapi(EdenApiFileStore::new(eden_api));
+            file_builder = file_builder.edenapi(SaplingRemoteApiFileStore::new(eden_api));
         } else {
             tracing::trace!(target: "repo::file_store", "disabling edenapi");
             file_builder = file_builder.override_edenapi(false);
@@ -495,7 +497,7 @@ impl Repo {
 
         if let Some(eden_api) = eden_api {
             tracing::trace!(target: "repo::tree_store", "enabling edenapi");
-            tree_builder = tree_builder.edenapi(EdenApiTreeStore::new(eden_api));
+            tree_builder = tree_builder.edenapi(SaplingRemoteApiTreeStore::new(eden_api));
         } else {
             tracing::trace!(target: "repo::tree_store", "disabling edenapi");
             tree_builder = tree_builder.override_edenapi(false);

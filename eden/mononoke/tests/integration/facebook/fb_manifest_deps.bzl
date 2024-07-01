@@ -38,7 +38,9 @@ MONONOKE_TARGETS_TO_ENV = {
     "//eden/mononoke/scs_server:scs_server": "SCS_SERVER",
     "//eden/mononoke/streaming_clone:new_streaming_clone": "MONONOKE_STREAMING_CLONE",
     "//eden/mononoke/tools/admin:newadmin": "MONONOKE_NEWADMIN",
+    "//eden/mononoke/tools/example:example": "MONONOKE_EXAMPLE",
     "//eden/mononoke/tools/facebook/backfill_bonsai_blob_mapping:backfill_bonsai_blob_mapping": "MONONOKE_BACKFILL_BONSAI_BLOB_MAPPING",
+    "//eden/mononoke/tools/facebook/repo_metadata_logger:repo_metadata_logger": "REPO_METADATA_LOGGER",
     "//eden/mononoke/tools/import:import": "MONONOKE_IMPORT",
     "//eden/mononoke/tools/testtool:testtool": "MONONOKE_TESTTOOL",
     "//eden/mononoke/walker:walker": "MONONOKE_WALKER",
@@ -253,6 +255,8 @@ def _dott_test(name, dott_files, deps, use_mysql = False, disable_all_network_ac
             "scm/mononoke/mysql/xdb.mononoke_mutation",
             "--mysql-schema",
             "scm/mononoke/mysql/xdb.mononoke_blobstore_wal_queue",
+            "--mysql-schema",
+            "scm/commitcloud/xdb.commit_cloud_legacy_tests",
         ])
 
     env = {

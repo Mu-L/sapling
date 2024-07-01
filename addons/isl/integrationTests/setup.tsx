@@ -7,41 +7,29 @@
 
 import type {MessageBusStatus} from '../src/MessageBus';
 import type {Disposable, RepoRelativePath} from '../src/types';
-import type {ExecaChildProcess, Options as ExecaOptions} from 'execa';
+import type {Options as ExecaOptions} from 'execa';
+import type {Logger} from 'isl-server/src/logger';
+import type {ServerPlatform} from 'isl-server/src/serverPlatform';
+import type {RepositoryContext} from 'isl-server/src/serverTypes';
 import type {TypedEventEmitter} from 'shared/TypedEventEmitter';
 
 import {onClientConnection} from '../../isl-server/src/index';
-import App from '../src/App';
 import mockedClientMessagebus from '../src/MessageBus';
-import * as internalLogger from '../src/logger';
-import {render} from '@testing-library/react';
-import fs from 'fs';
+import {fireEvent, render, screen} from '@testing-library/react';
+import {makeServerSideTracker} from 'isl-server/src/analytics/serverSideTracker';
 import {runCommand} from 'isl-server/src/commands';
-import os from 'os';
-import path from 'path';
-import React from 'react';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const mockLogger = internalLogger.logger;
-const {log} = mockLogger;
-jest.mock('../src/logger', () => {
-  const log =
-    process.argv.includes('--verbose') || process.argv.includes('-V')
-      ? (...args: Parameters<typeof console.log>) => {
-          // eslint-disable-next-line no-console
-          console.log(...args);
-        }
-      : (() => {
-          return () => undefined;
-        })();
-  return {
-    logger: {
-      log,
-      info: log,
-      warn: log,
-      error: log,
-    },
-  };
-});
+const IS_CI = !!process.env.SANDCASTLE || !!process.env.GITHUB_ACTIONS;
+
+const mockTracker = makeServerSideTracker(
+  console,
+  {platformName: 'test'} as ServerPlatform,
+  '0.1',
+  jest.fn(),
+);
 
 // fake client message bus that connects to server in the same process
 jest.mock('../src/MessageBus', () => {
@@ -50,11 +38,13 @@ jest.mock('../src/MessageBus', () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires,@typescript-eslint/consistent-type-imports
     require('shared/TypedEventEmitter') as typeof import('shared/TypedEventEmitter');
 
+  const {log} = console;
+
   class IntegrationTestMessageBus {
     disposables: Array<() => void> = [];
     onMessage(handler: (event: MessageEvent<string>) => void | Promise<void>): Disposable {
       const cb = (message: string) => {
-        log('<--', message);
+        log('[c <- s]', message);
         handler({data: message} as MessageEvent<string>);
       };
 
@@ -67,7 +57,7 @@ jest.mock('../src/MessageBus', () => {
     }
 
     postMessage(message: string | ArrayBuffer) {
-      log('-->', message);
+      log('[c -> s]', message);
       this.clientToServer.emit('data', message as string);
     }
 
@@ -104,30 +94,75 @@ type MockedClientMessageBus = {
   dispose(): void;
 };
 
+beforeAll(() => {
+  global.ResizeObserver = class ResizeObserver {
+    observe() {
+      /* noop */
+    }
+    unobserve() {
+      /* noop */
+    }
+    disconnect() {
+      /* noop */
+    }
+  };
+});
+
+const wrapLogger = (logger: Logger, label: string): Logger => ({
+  log: (...args: Array<unknown>) => {
+    logger.log(label, ...args);
+  },
+  info: (...args: Array<unknown>) => {
+    logger.info(label, ...args);
+  },
+  warn: (...args: Array<unknown>) => {
+    logger.info(label, ...args);
+  },
+  error: (...args: Array<unknown>) => {
+    logger.info(label, ...args);
+  },
+});
+
 /**
  * Creates an sl repository in a temp dir on disk,
  * creates a single initial commit,
  * then performs an initial render, running both server and client in the same process.
  */
-export async function initRepo(): Promise<{
-  repoDir: string;
-  sl: (args: Array<string>) => ExecaChildProcess;
-  cleanup: () => Promise<void>;
-  writeFileInRepo: (path: RepoRelativePath, content: string) => Promise<void>;
-  drawdag: (dag: string) => Promise<void>;
-}> {
+export async function initRepo() {
   const repoDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'isl-integration-test-repo-'));
-  log('temp repo: ', repoDir);
+  const testLogger = wrapLogger(console, '[ test ]');
 
-  function sl(args: Array<string>, options?: ExecaOptions) {
-    return runCommand('sl', args, mockLogger, repoDir, {
+  let cmd = 'sl';
+  if (process.env.SANDCASTLE) {
+    // On internal CI, it's easiest to run 'hg' instead of 'sl'.
+    cmd = 'hg';
+    process.env.PATH += ':/bin/hg';
+  }
+
+  testLogger.info('sl cmd: ', cmd);
+
+  testLogger.log('temp repo: ', repoDir);
+  process.chdir(repoDir);
+
+  const ctx: RepositoryContext = {
+    cmd,
+    cwd: repoDir,
+    logger: testLogger,
+    tracker: mockTracker,
+  };
+
+  async function sl(args: Array<string>, options?: ExecaOptions) {
+    testLogger.log(ctx.cmd, ...args);
+    const result = await runCommand(ctx, args, {
       ...options,
       env: {
+        ...process.env,
         ...(options?.env ?? {}),
         FB_SCM_DIAGS_NO_SCUBA: '1',
       } as Record<string, string> as NodeJS.ProcessEnv,
       extendEnv: true,
     });
+    return result;
   }
 
   async function writeFileInRepo(filePath: RepoRelativePath, content: string): Promise<void> {
@@ -152,12 +187,22 @@ commit(date='now')
     await sl(['debugdrawdag'], {input});
   }
 
+  await sl(['version'])
+    .catch(e => {
+      testLogger.log('err in version', e);
+      return e;
+    })
+    .then(s => {
+      testLogger.log('sl version: ', s.stdout, s.stderr, s.exitCode);
+    });
+
   // set up empty repo
   await sl(['init', '--config=format.use-eager-repo=True', '--config=init.prefer-git=False', '.']);
   await writeFileInRepo('.watchmanconfig', '{}');
+  const dotdir = fs.existsSync(path.join(repoDir, '.sl')) ? '.sl' : '.hg';
   // write to repo config
   await writeFileInRepo(
-    '.sl/config',
+    `${dotdir}/config`,
     ([['paths', [`default=eager:${repoDir}`]]] as [string, string[]][])
       .map(([section, configs]) => `[${section}]\n${configs.join('\n')}`)
       .join('\n'),
@@ -171,12 +216,14 @@ commit(date='now')
     dispose: disposeClientConnection,
   } = mockedClientMessagebus as unknown as MockedClientMessageBus;
 
+  const serverLogger = wrapLogger(console, '[server]');
+
   // start "server" in the same process, connected to fake client message bus via eventEmitters
   const disposeServer = onClientConnection({
     cwd: repoDir,
     version: 'integration-test',
-    command: 'sl',
-    logger: mockLogger,
+    command: cmd,
+    logger: serverLogger,
 
     postMessage(message: string): Promise<boolean> {
       serverToClient.emit('data', message);
@@ -199,20 +246,36 @@ commit(date='now')
     },
   });
 
-  // render the entire app, which automatically starts the connection to the server
+  const refresh = () => {
+    testLogger.log('refreshing');
+    fireEvent.click(screen.getByTestId('refresh-button'));
+  };
+
+  // Dynamically import App so our test setup happens before App globals like jotai state are run.
+  const App = (await import('../src/App')).default;
+  // Render the entire app, which automatically starts the connection to the server
   render(<App />);
 
   return {
     repoDir,
     sl,
     cleanup: async () => {
+      testLogger.log(' -------- cleaning up -------- ');
       disposeServer();
       disposeClientConnection();
-      // rm -rf the temp dir with the repo in it
-      await retry(() => fs.promises.rm(repoDir, {recursive: true, force: true}));
+      if (!IS_CI) {
+        testLogger.log('removing repo dir');
+        // rm -rf the temp dir with the repo in it
+        // skip on CI because it can cause flakiness, and the job will get cleaned up anyway
+        await retry(() => fs.promises.rm(repoDir, {recursive: true, force: true})).catch(() => {
+          testLogger.log('failed to clean up temp dir: ', repoDir);
+        });
+      }
     },
     writeFileInRepo,
     drawdag,
+    testLogger,
+    refresh,
   };
 }
 

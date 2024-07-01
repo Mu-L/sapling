@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrieMap<V> {
     pub value: Option<Box<V>>,
     pub edges: BTreeMap<u8, Self>,
@@ -21,12 +21,6 @@ impl<V> Default for TrieMap<V> {
             value: Default::default(),
             edges: Default::default(),
         }
-    }
-}
-
-impl<V: PartialEq> PartialEq for TrieMap<V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value && self.edges == other.edges
     }
 }
 
@@ -84,6 +78,17 @@ impl<V> TrieMap<V> {
             value: self.value.as_ref().map(|value| value.as_ref()),
             stack: vec![self.edges.iter()],
         }
+    }
+
+    pub fn extract_prefix(self, prefix: &[u8]) -> Option<Self> {
+        let mut node = self;
+        for next_byte in prefix {
+            match node.edges.remove(next_byte) {
+                Some(child) => node = child,
+                None => return None,
+            }
+        }
+        Some(node)
     }
 
     /// Returns a tuple of the longest common prefix of all entries in the TrieMap,

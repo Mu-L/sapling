@@ -9,6 +9,7 @@ import App from '../App';
 import {genereatedFileCache} from '../GeneratedFile';
 import {__TEST__} from '../UncommittedChanges';
 import {readAtom, writeAtom} from '../jotaiUtils';
+import foundPlatform from '../platform';
 import {ignoreRTL} from '../testQueries';
 import {
   expectMessageSentToServer,
@@ -19,10 +20,10 @@ import {
   simulateRepoConnected,
   resetTestMessages,
   simulateMessageFromServer,
+  openCommitInfoSidebar,
 } from '../testUtils';
 import {GeneratedStatus} from '../types';
-import {fireEvent, render, screen, waitFor} from '@testing-library/react';
-import {act} from 'react-dom/test-utils';
+import {fireEvent, render, screen, waitFor, act} from '@testing-library/react';
 
 /** Generated `num` files, in the repeating pattern: genereated, partially generated, manual */
 async function simulateGeneratedFiles(num: number) {
@@ -178,5 +179,117 @@ describe('Generated Files', () => {
     fireEvent.click(screen.getByText('Generated Files'));
 
     expect(readAtom(__TEST__.generatedFilesInitiallyExpanded)).toEqual(true);
+  });
+
+  it('clears generated files cache on refresh click', async () => {
+    act(() => {
+      simulateUncommittedChangedFiles({
+        value: [
+          {
+            path: 'file.txt',
+            status: 'M',
+          },
+        ],
+      });
+    });
+    await waitFor(() => {
+      expectMessageSentToServer({
+        type: 'fetchGeneratedStatuses',
+        paths: ['file.txt'],
+      });
+    });
+    act(() => {
+      simulateMessageFromServer({
+        type: 'fetchedGeneratedStatuses',
+        results: Object.fromEntries([['file.txt', GeneratedStatus.Manual]]),
+      });
+    });
+
+    expect(screen.queryByText('Generated Files')).not.toBeInTheDocument();
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('refresh-button'));
+    });
+    await waitFor(() => {
+      expectMessageSentToServer({
+        type: 'fetchGeneratedStatuses',
+        paths: ['file.txt'],
+      });
+    });
+    act(() => {
+      simulateMessageFromServer({
+        type: 'fetchedGeneratedStatuses',
+        results: Object.fromEntries([['file.txt', GeneratedStatus.Generated]]),
+      });
+    });
+
+    expect(screen.getByText('Generated Files')).toBeInTheDocument();
+  });
+
+  describe('Open All Files', () => {
+    beforeEach(() => act(() => openCommitInfoSidebar()));
+    async function simulateCommitWithFiles(files: Record<string, GeneratedStatus>) {
+      act(() => {
+        simulateCommits({
+          value: [
+            COMMIT('1', 'some public base', '0', {phase: 'public'}),
+            COMMIT('a', 'Commit A', '1', {
+              isDot: true,
+              totalFileCount: 3,
+              filesSample: Object.keys(files).map(file => ({path: file, status: 'M'})),
+            }),
+          ],
+        });
+      });
+      await waitFor(() => {
+        expectMessageSentToServer({
+          type: 'fetchGeneratedStatuses',
+          paths: expect.anything(),
+        });
+      });
+      act(() => {
+        simulateMessageFromServer({
+          type: 'fetchedGeneratedStatuses',
+          results: files,
+        });
+      });
+    }
+
+    it('No generated files, opens all files', async () => {
+      const openSpy = jest.spyOn(foundPlatform, 'openFiles').mockImplementation(() => {});
+      await simulateCommitWithFiles({
+        'file_partial.txt': GeneratedStatus.PartiallyGenerated,
+        'file_manual.txt': GeneratedStatus.Manual,
+      });
+
+      fireEvent.click(screen.getByText('Open All Files'));
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith(['file_partial.txt', 'file_manual.txt']);
+    });
+
+    it('Some generated files, opens all non-generated files', async () => {
+      const openSpy = jest.spyOn(foundPlatform, 'openFiles').mockImplementation(() => {});
+      await simulateCommitWithFiles({
+        'file_gen.txt': GeneratedStatus.Generated,
+        'file_partial.txt': GeneratedStatus.PartiallyGenerated,
+        'file_manual.txt': GeneratedStatus.Manual,
+      });
+
+      fireEvent.click(screen.getByText('Open Non-Generated Files'));
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith(['file_partial.txt', 'file_manual.txt']);
+    });
+
+    it('All generated files, opens all files', async () => {
+      const openSpy = jest.spyOn(foundPlatform, 'openFiles').mockImplementation(() => {});
+      await simulateCommitWithFiles({
+        'file_gen1.txt': GeneratedStatus.Generated,
+        'file_gen2.txt': GeneratedStatus.Generated,
+      });
+
+      fireEvent.click(screen.getByText('Open All Files'));
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy).toHaveBeenCalledWith(['file_gen1.txt', 'file_gen2.txt']);
+    });
   });
 });

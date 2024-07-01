@@ -34,10 +34,10 @@ use slog::Logger;
 
 /// The amount of time to wait until the Mutation is in Prepared state
 /// When timed out, the mutation has no effect
-const MAX_WAIT_FOR_MUTATION_PREPARE: Duration = Duration::from_millis(20_000);
+const MAX_WAIT_FOR_MUTATION_PREPARE: Duration = Duration::from_millis(60_000);
 /// The amount of time to wait until the Mutation is in Landed state
 /// When timed out, the mutation *may still land*
-const MAX_WAIT_FOR_MUTATION_COMMIT: Duration = Duration::from_millis(20_000);
+const MAX_WAIT_FOR_MUTATION_COMMIT: Duration = Duration::from_millis(60_000);
 
 #[derive(Debug, Clone, Copy)]
 struct MutationId(i64);
@@ -298,6 +298,7 @@ impl MononokeConfigoClient {
 
                     ..Default::default()
                 }),
+                callsite: Some("fbcode/eden/mononoke/megarepo_api/configo_client/src/facebook.rs".to_string()),
                 ..Default::default()
             }),
             ..Default::default()

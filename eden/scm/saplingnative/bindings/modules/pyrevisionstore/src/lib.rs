@@ -17,7 +17,6 @@ use std::sync::Arc;
 use anyhow::format_err;
 use anyhow::Error;
 use configmodel::Config;
-use configmodel::ConfigExt;
 use cpython::*;
 use cpython_ext::ExtractInner;
 use cpython_ext::ExtractInnerRef;
@@ -41,8 +40,6 @@ use revisionstore::DataPack;
 use revisionstore::DataPackStore;
 use revisionstore::DataPackVersion;
 use revisionstore::Delta;
-use revisionstore::EdenApiFileStore;
-use revisionstore::EdenApiTreeStore;
 use revisionstore::ExtStoredPolicy;
 use revisionstore::HgIdDataStore;
 use revisionstore::HgIdHistoryStore;
@@ -66,6 +63,8 @@ use revisionstore::RemoteDataStore;
 use revisionstore::RemoteHistoryStore;
 use revisionstore::RepackKind;
 use revisionstore::RepackLocation;
+use revisionstore::SaplingRemoteApiFileStore;
+use revisionstore::SaplingRemoteApiTreeStore;
 use revisionstore::StoreKey;
 use revisionstore::StoreResult;
 use revisionstore::StoreType;
@@ -392,7 +391,7 @@ py_class!(class indexedlogdatastore |py| {
                 path.as_path(),
                 ExtStoredPolicy::Ignore,
                 &config,
-                StoreType::Local,
+                StoreType::Permanent,
             ).map_pyerr(py)?),
         )
     }
@@ -436,7 +435,7 @@ py_class!(class indexedloghistorystore |py| {
         let config = config.get_cfg(py);
         indexedloghistorystore::create_instance(
             py,
-            Box::new(IndexedLogHgIdHistoryStore::new(path.as_path(), &config, StoreType::Local).map_pyerr(py)?),
+            Box::new(IndexedLogHgIdHistoryStore::new(path.as_path(), &config, StoreType::Permanent).map_pyerr(py)?),
         )
     }
 
@@ -482,7 +481,7 @@ fn make_mutabledeltastore(
             indexedlogpath.as_path(),
             ExtStoredPolicy::Ignore,
             &config,
-            StoreType::Local,
+            StoreType::Permanent,
         )?)
     } else {
         return Err(format_err!("Foo"));
@@ -848,46 +847,46 @@ impl ExtractInnerRef for pyremotestore {
     }
 }
 
-// Python wrapper around an EdenAPI-backed remote store for files.
+// Python wrapper around an SaplingRemoteAPI-backed remote store for files.
 //
-// This type exists for the sole purpose of allowing an `EdenApiFileStore`
+// This type exists for the sole purpose of allowing an `SaplingRemoteApiFileStore`
 // to be passed from Rust to Python and back into Rust. It cannot be created
 // by Python code and does not expose any functionality to Python.
 py_class!(pub class edenapifilestore |py| {
-    data remote: Arc<EdenApiFileStore>;
+    data remote: Arc<SaplingRemoteApiFileStore>;
 });
 
 impl edenapifilestore {
-    pub fn new(py: Python, remote: Arc<EdenApiFileStore>) -> PyResult<Self> {
+    pub fn new(py: Python, remote: Arc<SaplingRemoteApiFileStore>) -> PyResult<Self> {
         edenapifilestore::create_instance(py, remote)
     }
 }
 
 impl ExtractInnerRef for edenapifilestore {
-    type Inner = Arc<EdenApiFileStore>;
+    type Inner = Arc<SaplingRemoteApiFileStore>;
 
     fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
         self.remote(py)
     }
 }
 
-// Python wrapper around an EdenAPI-backed remote store for trees.
+// Python wrapper around an SaplingRemoteAPI-backed remote store for trees.
 //
-// This type exists for the sole purpose of allowing an `EdenApiTreeStore`
+// This type exists for the sole purpose of allowing an `SaplingRemoteApiTreeStore`
 // to be passed from Rust to Python and back into Rust. It cannot be created
 // by Python code and does not expose any functionality to Python.
 py_class!(pub class edenapitreestore |py| {
-    data remote: Arc<EdenApiTreeStore>;
+    data remote: Arc<SaplingRemoteApiTreeStore>;
 });
 
 impl edenapitreestore {
-    pub fn new(py: Python, remote: Arc<EdenApiTreeStore>) -> PyResult<Self> {
+    pub fn new(py: Python, remote: Arc<SaplingRemoteApiTreeStore>) -> PyResult<Self> {
         edenapitreestore::create_instance(py, remote)
     }
 }
 
 impl ExtractInnerRef for edenapitreestore {
-    type Inner = Arc<EdenApiTreeStore>;
+    type Inner = Arc<SaplingRemoteApiTreeStore>;
 
     fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
         self.remote(py)
@@ -1046,6 +1045,10 @@ py_class!(class metadatastore |py| {
         self.store(py).get_node_info_py(py, &name, node)
     }
 
+    def getlocalnodeinfo(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<Option<PyTuple>> {
+        self.store(py).get_local_node_info_py(py, &name, node)
+    }
+
     def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
         self.store(py).get_missing_py(py, &mut keys.iter(py)?)
     }
@@ -1092,7 +1095,7 @@ fn make_filescmstore<'a>(
     path: Option<&'a Path>,
     config: &'a dyn Config,
     remote: Arc<PyHgIdRemoteStore>,
-    edenapi_filestore: Option<Arc<EdenApiFileStore>>,
+    edenapi_filestore: Option<Arc<SaplingRemoteApiFileStore>>,
     suffix: Option<String>,
 ) -> Result<(Arc<FileStore>, Arc<ContentStore>)> {
     let mut builder = ContentStoreBuilder::new(&config);
@@ -1177,7 +1180,7 @@ py_class!(pub class filescmstore |py| {
         contentstore::create_instance(py, self.contentstore(py).clone())
     }
 
-    def fetch_contentsha256(&self, keys: PyList) -> PyResult<PyList> {
+    def fetch_content_blake3(&self, keys: PyList) -> PyResult<PyList> {
         let keys = keys
             .iter(py)
             .map(|tuple| from_tuple_to_key(py, &tuple))
@@ -1188,22 +1191,18 @@ py_class!(pub class filescmstore |py| {
         let (found, missing, _errors) = fetch_result.consume();
         // TODO(meyer): FileStoreFetch should have utility methods to various consumer cases like this (get complete, get missing, transform to Result<EntireBatch>, transform to iterator of Result<IndividualFetch>, etc)
         // For now we just error with the first incomplete key, passing on the last recorded error if any are available.
-        if let Some((key, mut errors)) = missing.into_iter().next() {
-            if let Some(err) = errors.pop() {
-                return Err(err.context(format!("failed to fetch {}, received error", key))).map_pyerr(py);
-            } else {
-                return Err(format_err!("failed to fetch {}", key)).map_pyerr(py);
-            }
+        if let Some((key, err)) = missing.into_iter().next() {
+            return Err(err.context(format!("failed to fetch {}, received error", key))).map_pyerr(py);
         }
         for (key, storefile) in found.into_iter() {
             let key_tuple = from_key_to_tuple(py, &key).into_object();
-            let content_sha256 = storefile.aux_data().map_pyerr(py)?.sha256;
-            let content_sha256 = PyBytes::new(py, content_sha256.as_ref());
+            let content_blake3 = storefile.aux_data().map_pyerr(py)?.blake3;
+            let content_blake3 = PyBytes::new(py, content_blake3.as_ref());
             let result_tuple = PyTuple::new(
                 py,
                 &[
                     key_tuple,
-                    content_sha256.into_object(),
+                    content_blake3.into_object(),
                 ],
             );
             results.append(py, result_tuple.into_object());
@@ -1248,7 +1247,14 @@ py_class!(pub class filescmstore |py| {
 
     def prefetch(&self, keys: PyList) -> PyResult<PyObject> {
         let store = self.store(py);
-        store.prefetch_py(py, keys)
+
+        let keys = keys
+            .iter(py)
+            .map(|tuple| from_tuple_to_key(py, &tuple))
+            .collect::<PyResult<Vec<Key>>>()?;
+        py.allow_threads(|| FileStore::prefetch(store, keys)).map_pyerr(py)?;
+
+        Ok(Python::None(py))
     }
 
     def markforrefresh(&self) -> PyResult<PyNone> {
@@ -1306,7 +1312,7 @@ fn make_treescmstore<'a>(
     path: Option<&'a Path>,
     config: &'a dyn Config,
     remote: Arc<PyHgIdRemoteStore>,
-    edenapi_treestore: Option<Arc<EdenApiTreeStore>>,
+    edenapi_treestore: Option<Arc<SaplingRemoteApiTreeStore>>,
     filestore: Option<Arc<FileStore>>,
     suffix: Option<String>,
 ) -> Result<(Arc<TreeStore>, Arc<ContentStore>)> {
@@ -1325,7 +1331,7 @@ fn make_treescmstore<'a>(
         treestore_builder = treestore_builder.suffix(suffix);
     }
 
-    // Extract EdenApiAdapter for scmstore construction later on
+    // Extract SaplingRemoteApiAdapter for scmstore construction later on
     builder = if let Some(edenapi) = edenapi_treestore {
         treestore_builder = treestore_builder.edenapi(edenapi.clone());
         builder.remotestore(edenapi)

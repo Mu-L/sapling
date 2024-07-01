@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -52,6 +53,7 @@ use treestate::dirstate;
 use treestate::filestate::FileStateV2;
 use treestate::filestate::StateFlags;
 use treestate::treestate::TreeState;
+use types::errors::KeyedError;
 use types::fetch_mode::FetchMode;
 use types::hgid::MF_ADDED_NODE_ID;
 use types::hgid::MF_MODIFIED_NODE_ID;
@@ -145,6 +147,9 @@ pub struct CheckoutStats {
     pub remove_failed: Vec<(RepoPathBuf, Error)>,
     set_exec_failed: Vec<(RepoPathBuf, Error)>,
     write_failed: Vec<(RepoPathBuf, Error)>,
+
+    /// Store fetch errors
+    fetch_failed: Vec<(RepoPathBuf, Error)>,
 
     /// Errors not associated with a path.
     other_failed: Vec<Error>,
@@ -364,11 +369,29 @@ impl CheckoutPlan {
             // Turn errors into CheckoutStats.
             while let Ok((maybe_work, err)) = err_rx.recv() {
                 match maybe_work {
-                    None => stats.other_failed.push(err),
+                    None => {
+                        if let Some(KeyedError(key, _)) =
+                            err.chain().filter_map(|err| err.downcast_ref()).next()
+                        {
+                            stats.fetch_failed.push((key.path.clone(), err));
+                        } else {
+                            stats.other_failed.push(err)
+                        }
+                    }
                     Some(Work::Remove(path)) => stats.remove_failed.push((path, err)),
                     Some(Work::SetExec(path, _)) => stats.set_exec_failed.push((path, err)),
                     Some(Work::Write(key, _, _)) => stats.write_failed.push((key.path, err)),
                 }
+            }
+
+            // Sort errors for stable output order.
+            for errs in [
+                &mut stats.write_failed,
+                &mut stats.set_exec_failed,
+                &mut stats.remove_failed,
+                &mut stats.fetch_failed,
+            ] {
+                errs.sort_by(|(path_a, _), (path_b, _)| path_a.cmp(path_b));
             }
 
             let is_fatal = stats.is_fatal();
@@ -533,12 +556,8 @@ impl CheckoutPlan {
                     }
                 }
             };
-            let unknown = match state {
-                None => true,
-                Some(state) => !state.state.intersects(
-                    StateFlags::EXIST_P1 | StateFlags::EXIST_P2 | StateFlags::EXIST_NEXT,
-                ),
-            };
+            let unknown = state.map_or(true, |state| !state.state.is_tracked());
+
             if unknown && matches!(vfs.is_file(file), Ok(true)) {
                 let repo_path = file.as_repo_path();
                 let hgid = match manifest.get_file(repo_path)? {
@@ -636,6 +655,7 @@ impl CheckoutPlan {
 impl CheckoutStats {
     fn is_fatal(&self) -> bool {
         !self.write_failed.is_empty()
+            || !self.fetch_failed.is_empty()
             || !self.other_failed.is_empty()
             || !self.set_exec_failed.is_empty()
     }
@@ -643,32 +663,104 @@ impl CheckoutStats {
 
 impl fmt::Display for CheckoutStats {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (_path, err) in &self.write_failed {
-            err.fmt(f)?;
+        let mut printed_something = false;
+
+        if !self.write_failed.is_empty() {
+            printed_something = true;
+
+            write!(
+                f,
+                "error writing files:\n {}",
+                truncated_error_list(
+                    self.write_failed
+                        .iter()
+                        .map(|(path, err)| format!("{path}: {err:#}")),
+                    5
+                )
+                .join("\n "),
+            )?;
         }
-        for (_path, err) in &self.set_exec_failed {
-            err.fmt(f)?;
+
+        if !self.set_exec_failed.is_empty() {
+            if printed_something {
+                write!(f, "\n")?;
+            }
+            printed_something = true;
+
+            write!(
+                f,
+                "error setting execute bit:\n {}",
+                truncated_error_list(
+                    self.set_exec_failed
+                        .iter()
+                        .map(|(path, err)| format!("{path}: {err:#}")),
+                    5
+                )
+                .join("\n "),
+            )?;
         }
-        for (_path, err) in &self.remove_failed {
-            err.fmt(f)?;
+
+        if !self.remove_failed.is_empty() {
+            if printed_something {
+                write!(f, "\n")?;
+            }
+            printed_something = true;
+
+            write!(
+                f,
+                "error removing files:\n {}",
+                truncated_error_list(
+                    self.remove_failed
+                        .iter()
+                        .map(|(path, err)| format!("{path}: {err:#}")),
+                    5
+                )
+                .join("\n "),
+            )?;
         }
-        for err in &self.other_failed {
-            write!(f, "checkout error: {}", err)?;
+
+        if !self.fetch_failed.is_empty() {
+            if printed_something {
+                write!(f, "\n")?;
+            }
+            printed_something = true;
+
+            write!(
+                f,
+                "error fetching files:\n {}",
+                truncated_error_list(
+                    self.fetch_failed
+                        .iter()
+                        .filter_map(|(_path, err)| {
+                            err.chain()
+                                .filter_map(|err| err.downcast_ref::<KeyedError>())
+                                .next()
+                        })
+                        .map(|KeyedError(key, err)| format!("{key}: {err}")),
+                    5
+                )
+                .join("\n "),
+            )?;
         }
+
+        if !self.other_failed.is_empty() {
+            if printed_something {
+                write!(f, "\n")?;
+            }
+
+            write!(
+                f,
+                "checkout errors:\n {}",
+                truncated_error_list(self.other_failed.iter().map(|err| format!("{err:#}")), 5)
+                    .join("\n "),
+            )?;
+        }
+
         Ok(())
     }
 }
 
-impl std::error::Error for CheckoutStats {
-    // Consider impl sources() after
-    // https://github.com/rust-lang/rust/issues/58520
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Some((_path, err)) = self.write_failed.first() {
-            return Some(err.root_cause());
-        }
-        None
-    }
-}
+impl std::error::Error for CheckoutStats {}
 
 impl CheckoutProgress {
     pub fn new(path: &Path, vfs: VFS) -> Result<Self> {
@@ -1108,7 +1200,7 @@ fn prefetch_children(repo: &Repo, node: &HgId) -> Result<()> {
 }
 
 #[instrument(skip(repo))]
-fn update_distance(repo: &Repo, source: &HgId, dest: &HgId) -> Result<usize> {
+fn update_distance(repo: &Repo, source: &HgId, dest: &HgId) -> Result<u64> {
     let dag = repo.dag_commits()?;
     let dag = dag.read();
 
@@ -1359,26 +1451,34 @@ pub(crate) fn check_conflicts(
     conflicts.sort();
 
     if !conflicts.is_empty() {
-        let limit = 5;
-
-        let len = conflicts.len();
-        conflicts.truncate(limit);
-        let mut conflicts = conflicts
-            .into_iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>();
-        if len > limit {
-            conflicts.push(format!("...and {} more", len - limit));
-        }
-
         bail!(
             "{:?} conflicting file changes:\n {}\n{}",
-            len,
-            conflicts.join("\n "),
+            conflicts.len(),
+            truncated_error_list(&conflicts, 5).join("\n "),
             "(commit, shelve, goto --clean to discard all your changes, or goto --merge to merge them)",
         );
     }
     Ok(())
+}
+
+fn truncated_error_list(
+    errors: impl IntoIterator<Item = impl Display>,
+    limit: usize,
+) -> Vec<String> {
+    let mut output = Vec::with_capacity(limit);
+
+    let mut dropped = 0;
+    for error in errors {
+        if output.len() < limit {
+            output.push(format!("{error}"));
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        output.push(format!("...and {dropped} more"));
+    }
+    output
 }
 
 #[instrument(skip_all)]

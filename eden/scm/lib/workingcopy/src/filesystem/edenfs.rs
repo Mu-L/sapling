@@ -68,11 +68,12 @@ fn create_treestate(dot_dir: &std::path::Path, case_sensitive: bool) -> Result<T
 }
 
 impl FileSystem for EdenFileSystem {
+    #[tracing::instrument(skip_all)]
     fn pending_changes(
         &self,
         _ctx: &CoreContext,
         matcher: DynMatcher,
-        _ignore_matcher: DynMatcher,
+        ignore_matcher: DynMatcher,
         _ignore_dirs: Vec<PathBuf>,
         include_ignored: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<PendingChange>>>> {
@@ -91,16 +92,32 @@ impl FileSystem for EdenFileSystem {
                 // EdenFS reports files that are present in the overlay but filtered from the repo
                 // as untracked. We "drop" any files that are excluded by the current filter.
                 match matcher.matches_file(&path) {
-                    Ok(m) if m => {
-                        Some(match status {
-                            FileStatus::Removed => Ok(PendingChange::Deleted(path)),
-                            FileStatus::Ignored => Ok(PendingChange::Ignored(path)),
-                            _ => Ok(PendingChange::Changed(path)),
-                        })
+                    Ok(true) => {
+                        match status {
+                            FileStatus::Removed => Some(Ok(PendingChange::Deleted(path))),
+                            FileStatus::Ignored => Some(Ok(PendingChange::Ignored(path))),
+                            FileStatus::Added => {
+                                // EdenFS doesn't know about global ignore files in ui.ignore.* config, so we need to run
+                                // untracked files through our ignore matcher.
+                                match ignore_matcher.matches_file(&path) {
+                                    Ok(ignored) => {
+                                        if ignored {
+                                            if include_ignored {
+                                                Some(Ok(PendingChange::Ignored(path)))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            Some(Ok(PendingChange::Changed(path)))
+                                        }
+                                    }
+                                    Err(err) => Some(Err(err)),
+                                }
+                            },
+                            FileStatus::Modified => Some(Ok(PendingChange::Changed(path))),
+                        }
                     },
-                    Ok(_) => {
-                        None
-                    },
+                    Ok(false) => None,
                     Err(e) => {
                         tracing::warn!(
                             "failed to determine if {} is ignored or not tracked by the active filter: {:?}",

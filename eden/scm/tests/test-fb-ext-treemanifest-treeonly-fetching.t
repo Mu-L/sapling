@@ -1,10 +1,8 @@
-#debugruntest-compatible
 
 #require no-eden
 
 #chg-compatible
 
-  $ configure modernclient
   $ . "$TESTDIR/library.sh"
 
 Setup the server

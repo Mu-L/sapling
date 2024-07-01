@@ -63,6 +63,8 @@ async fn test_simple_3_branches() {
     A+0 : F+5 [] Root OnlyHead
   Group Non-Master:
    Segments: 0
+  Group Virtual:
+   Segments: 0
 "#
     );
 
@@ -197,7 +199,7 @@ fn reserved_head(s: &'static str, reserve_size: u32) -> (Vertex, VertexOptions) 
         Vertex::from(s),
         VertexOptions {
             reserve_size,
-            highest_group: Group::MASTER,
+            desired_group: Group::MASTER,
             ..Default::default()
         },
     )

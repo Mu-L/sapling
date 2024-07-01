@@ -1774,15 +1774,22 @@ ImmediateFuture<Unit> EdenMount::diff(
     }
 
     if (parentInfo->workingCopyParentRootId != commitHash) {
+      // TODO: We should really add a method to FilteredBackingStore that
+      // allows us to render a FOID as the underlying ObjectId. This would
+      // avoid the round trip we're doing here.
+      auto renderedParentRootId =
+          objectStore_->renderRootId(parentInfo->workingCopyParentRootId);
+      auto renderedCommitHash = objectStore_->renderRootId(commitHash);
+
       // Log this occurrence to Scuba
       getServerState()->getStructuredLogger()->logEvent(ParentMismatch{
           commitHash.value(), parentInfo->workingCopyParentRootId.value()});
       return makeImmediateFuture<Unit>(newEdenError(
           EdenErrorType::OUT_OF_DATE_PARENT,
           "error computing status: requested parent commit is out-of-date: requested ",
-          commitHash,
+          folly::hexlify(renderedCommitHash),
           ", but current parent commit is ",
-          parentInfo->workingCopyParentRootId,
+          folly::hexlify(renderedParentRootId),
           ".\nTry running `eden doctor` to remediate"));
     }
 
@@ -1921,12 +1928,15 @@ std::unique_ptr<FuseChannel, FsChannelDeleter> makeFuseChannel(
       &mount->getStraceLogger(),
       mount->getServerState()->getProcessInfoCache(),
       mount->getServerState()->getFsEventLogger(),
+      mount->getServerState()->getStructuredLogger(),
       std::chrono::duration_cast<folly::Duration>(
           edenConfig->fuseRequestTimeout.getValue()),
       mount->getServerState()->getNotifier(),
       mount->getCheckoutConfig()->getCaseSensitive(),
       mount->getCheckoutConfig()->getRequireUtf8Path(),
-      edenConfig->fuseMaximumRequests.getValue(),
+      edenConfig->fuseMaximumBackgroundRequests.getValue(),
+      edenConfig->maxFsChannelInflightRequests.getValue(),
+      edenConfig->highFsRequestsLogInterval.getValue(),
       mount->getCheckoutConfig()->getUseWriteBackCache(),
       mount->getServerState()
           ->getEdenConfig()
@@ -2025,12 +2035,15 @@ folly::Future<folly::Unit> EdenMount::fsChannelMount(bool readOnly) {
                   NfsServer::NfsMountInfo mountInfo) mutable {
                 auto [channel, mountdAddr] = std::move(mountInfo);
 #ifndef _WIN32
+                // Channel is later moved. We must assign addr to a local var
+                // to avoid the possibility of a use-after-move bug.
+                auto addr = channel->getAddr();
                 // TODO: teach privhelper or something to mount on Windows
                 return serverState_->getPrivHelper()
                     ->nfsMount(
                         mountPath.view(),
                         mountdAddr,
-                        channel->getAddr(),
+                        addr,
                         readOnly,
                         iosize,
                         useReaddirplus)
@@ -2092,7 +2105,11 @@ folly::Future<folly::Unit> EdenMount::fsChannelMount(bool readOnly) {
             });
 #else
         return serverState_->getPrivHelper()
-            ->fuseMount(mountPath.view(), readOnly)
+            ->fuseMount(
+                mountPath.view(),
+                readOnly,
+                std::make_optional<folly::StringPiece>(
+                    edenConfig->fuseVfsType.getValue()))
             .thenTry(
                 [mountPath, mountPromise, this](Try<folly::File>&& fuseDevice)
                     -> folly::Future<folly::Unit> {

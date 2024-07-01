@@ -20,11 +20,13 @@ use dag::Vertex;
 use hg_metrics::increment_counter;
 use lru_cache::LruCache;
 use manifest::DiffType;
+use manifest::FileType;
 use manifest::Manifest;
 use manifest_tree::Diff;
 use manifest_tree::TreeManifest;
 use parking_lot::Mutex;
 use pathmatcher::AlwaysMatcher;
+use pathmatcher::Matcher;
 use storemodel::FileStore;
 use types::fetch_mode::FetchMode;
 use types::Key;
@@ -32,6 +34,7 @@ use types::RepoPath;
 use types::RepoPathBuf;
 
 use crate::error::CopyTraceError;
+use crate::utils::compute_missing_files;
 use crate::utils::file_path_similarity;
 use crate::utils::is_content_similar;
 use crate::SearchDirection;
@@ -64,6 +67,14 @@ pub trait RenameFinder {
         new_path: &RepoPath,
         new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>>;
+
+    /// Find {x@new_tree: y@old_tree} rename mapping for directed compare
+    async fn find_renames(
+        &self,
+        old_tree: &TreeManifest,
+        new_tree: &TreeManifest,
+        matcher: Option<Arc<dyn Matcher + Send + Sync>>,
+    ) -> Result<HashMap<RepoPathBuf, RepoPathBuf>>;
 }
 
 /// Rename finder based on the copy information in the file header metadata
@@ -131,7 +142,11 @@ impl RenameFinder for MetadataRenameFinder {
         }
 
         // fallback to content similarity
-        let old_path_key = self.inner.get_key_from_path(old_tree, old_path)?;
+        let old_path_key = match self.inner.get_key_from_path(old_tree, old_path)? {
+            Some(k) => k,
+            None => return Ok(None),
+        };
+
         let found = self
             .inner
             .find_similar_file(candidates, old_path_key)
@@ -147,7 +162,10 @@ impl RenameFinder for MetadataRenameFinder {
         new_path: &RepoPath,
         new_vertex: &Vertex,
     ) -> Result<Option<RepoPathBuf>> {
-        let new_key = self.inner.get_key_from_path(new_tree, new_path)?;
+        let new_key = match self.inner.get_key_from_path(new_tree, new_path)? {
+            Some(k) => k,
+            None => return Ok(None),
+        };
         let found = self
             .inner
             .read_renamed_metadata_backward(new_key.clone())
@@ -168,6 +186,33 @@ impl RenameFinder for MetadataRenameFinder {
         let found = self.inner.find_similar_file(candidates, new_key).await?;
         emit_content_similarity_fallback_metric(found.is_some());
         Ok(found)
+    }
+
+    async fn find_renames(
+        &self,
+        old_tree: &TreeManifest,
+        new_tree: &TreeManifest,
+        matcher: Option<Arc<dyn Matcher + Send + Sync>>,
+    ) -> Result<HashMap<RepoPathBuf, RepoPathBuf>> {
+        let missing = compute_missing_files(old_tree, new_tree, matcher, None)?;
+        tracing::trace!(missing_len = missing.len(), " find_renames");
+        let keys: Vec<_> = missing
+            .into_iter()
+            .filter_map(|p| match self.inner.get_key_from_path(new_tree, &p) {
+                Ok(Some(k)) => Some(k),
+                _ => None,
+            })
+            .collect();
+        tracing::trace!(keys_len = keys.len(), " find_renames");
+        block_in_place(move || {
+            let renames = self.inner.file_reader.get_rename_iter(keys)?;
+            let renames = renames
+                .filter_map(|x| x.ok())
+                .filter(|(_, v)| old_tree.contains_file(&v.path).unwrap_or(false))
+                .map(|(k, v)| (k.path, v.path))
+                .collect();
+            Ok(renames)
+        })
     }
 }
 
@@ -223,6 +268,42 @@ impl RenameFinder for ContentSimilarityRenameFinder {
             )
             .await
     }
+
+    async fn find_renames(
+        &self,
+        old_tree: &TreeManifest,
+        new_tree: &TreeManifest,
+        matcher: Option<Arc<dyn Matcher + Send + Sync>>,
+    ) -> Result<HashMap<RepoPathBuf, RepoPathBuf>> {
+        let (mut added, mut deleted) = self
+            .inner
+            .get_added_and_deleted_files(old_tree, new_tree, matcher)?;
+        tracing::trace!(
+            added_len = added.len(),
+            deleted_len = deleted.len(),
+            " find_renames"
+        );
+        let batch_mv_candidates = detect_batch_move(&mut added, &mut deleted);
+        let mut renames = HashMap::new();
+        if batch_mv_candidates.is_empty() {
+            for to in added {
+                let candidates =
+                    select_rename_candidates(deleted.clone(), &to.path, &self.inner.config)?;
+                let renamed_path = self.inner.find_similar_file(candidates, to.clone()).await;
+                if let Ok(Some(p)) = renamed_path {
+                    renames.insert(to.path, p);
+                }
+            }
+        } else {
+            for (to, from) in batch_mv_candidates {
+                let renamed_path = self.inner.find_similar_file(vec![from], to.clone()).await;
+                if let Ok(Some(p)) = renamed_path {
+                    renames.insert(to.path, p);
+                }
+            }
+        }
+        Ok(renames)
+    }
 }
 
 impl RenameFinderInner {
@@ -243,7 +324,7 @@ impl RenameFinderInner {
         }
 
         let (mut added_files, mut deleted_files) =
-            self.get_added_and_deleted_files(old_tree, new_tree)?;
+            self.get_added_and_deleted_files(old_tree, new_tree, None)?;
         let batch_mv_candidates = detect_batch_move(&mut added_files, &mut deleted_files);
 
         if batch_mv_candidates.is_empty() {
@@ -285,29 +366,44 @@ impl RenameFinderInner {
         &self,
         old_tree: &TreeManifest,
         new_tree: &TreeManifest,
+        matcher: Option<Arc<dyn Matcher + Send + Sync>>,
     ) -> Result<(Vec<Key>, Vec<Key>)> {
         let mut added_files = Vec::new();
         let mut deleted_files = Vec::new();
-        let matcher = AlwaysMatcher::new();
+        let matcher = matcher.unwrap_or_else(|| Arc::new(AlwaysMatcher::new()));
         let diff = Diff::new(old_tree, new_tree, &matcher)?;
         for entry in diff {
             let entry = entry?;
             match entry.diff_type {
                 DiffType::RightOnly(file_metadata) => {
-                    let path = entry.path;
-                    let key = Key {
-                        path,
-                        hgid: file_metadata.hgid,
-                    };
-                    added_files.push(key);
+                    tracing::trace!(
+                        path = ?entry.path,
+                        file_type = ?file_metadata.file_type,
+                        " get_added_and_deleted_files"
+                    );
+                    if is_file_type_supported(&file_metadata.file_type) {
+                        let path = entry.path;
+                        let key = Key {
+                            path,
+                            hgid: file_metadata.hgid,
+                        };
+                        added_files.push(key);
+                    }
                 }
                 DiffType::LeftOnly(file_metadata) => {
-                    let path = entry.path;
-                    let key = Key {
-                        path,
-                        hgid: file_metadata.hgid,
-                    };
-                    deleted_files.push(key);
+                    tracing::trace!(
+                        path = ?entry.path,
+                        file_type = ?file_metadata.file_type,
+                        " get_added_and_deleted_files"
+                    );
+                    if is_file_type_supported(&file_metadata.file_type) {
+                        let path = entry.path;
+                        let key = Key {
+                            path,
+                            hgid: file_metadata.hgid,
+                        };
+                        deleted_files.push(key);
+                    }
                 }
                 _ => {}
             }
@@ -368,8 +464,10 @@ impl RenameFinderInner {
             SearchDirection::Forward => old_tree,
             SearchDirection::Backward => new_tree,
         };
-        let source = self.get_key_from_path(source_tree, source_path)?;
-
+        let source = match self.get_key_from_path(source_tree, source_path)? {
+            Some(source) => source,
+            None => return Ok(None),
+        };
         self.find_similar_file(candidates, source).await
     }
 
@@ -399,13 +497,25 @@ impl RenameFinderInner {
         })
     }
 
-    fn get_key_from_path(&self, tree: &TreeManifest, path: &RepoPath) -> Result<Key> {
+    fn get_key_from_path(&self, tree: &TreeManifest, path: &RepoPath) -> Result<Option<Key>> {
         let key = match tree.get_file(path)? {
             None => return Err(CopyTraceError::FileNotFound(path.to_owned()).into()),
-            Some(file_metadata) => Key {
-                path: path.to_owned(),
-                hgid: file_metadata.hgid,
-            },
+            Some(file_metadata) => {
+                tracing::trace!(
+                    ?path,
+                    file_type = ?file_metadata.file_type,
+                    " get_key_from_path"
+                );
+                if is_file_type_supported(&file_metadata.file_type) {
+                    let key = Key {
+                        path: path.to_owned(),
+                        hgid: file_metadata.hgid,
+                    };
+                    Some(key)
+                } else {
+                    None
+                }
+            }
         };
         Ok(key)
     }
@@ -501,6 +611,15 @@ fn emit_content_similarity_fallback_metric(is_found: bool) {
         "copytrace_content_similarity_fallback_failure"
     };
     increment_counter(metric, 1);
+}
+
+fn is_file_type_supported(file_type: &FileType) -> bool {
+    match file_type {
+        FileType::Regular => true,
+        FileType::Symlink => true,
+        FileType::Executable => true,
+        FileType::GitSubmodule => false,
+    }
 }
 
 #[cfg(test)]

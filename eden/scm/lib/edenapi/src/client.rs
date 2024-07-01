@@ -31,6 +31,7 @@ use edenapi_types::BonsaiChangesetContent;
 use edenapi_types::BookmarkEntry;
 use edenapi_types::BookmarkRequest;
 use edenapi_types::CloneData;
+use edenapi_types::CloudWorkspaceRequest;
 use edenapi_types::CommitGraphEntry;
 use edenapi_types::CommitGraphRequest;
 use edenapi_types::CommitGraphSegmentsEntry;
@@ -51,7 +52,6 @@ use edenapi_types::CommitRevlogData;
 use edenapi_types::CommitRevlogDataRequest;
 use edenapi_types::CommitTranslateIdRequest;
 use edenapi_types::CommitTranslateIdResponse;
-use edenapi_types::EdenApiServerError;
 use edenapi_types::EphemeralPrepareRequest;
 use edenapi_types::EphemeralPrepareResponse;
 use edenapi_types::FetchSnapshotRequest;
@@ -59,6 +59,7 @@ use edenapi_types::FetchSnapshotResponse;
 use edenapi_types::FileRequest;
 use edenapi_types::FileResponse;
 use edenapi_types::FileSpec;
+use edenapi_types::GetReferencesParams;
 use edenapi_types::HgFilenodeData;
 use edenapi_types::HgMutationEntryContent;
 use edenapi_types::HistoryEntry;
@@ -71,14 +72,19 @@ use edenapi_types::LookupRequest;
 use edenapi_types::LookupResponse;
 use edenapi_types::LookupResult;
 use edenapi_types::PushVar;
+use edenapi_types::ReferencesDataResponse;
+use edenapi_types::SaplingRemoteApiServerError;
 use edenapi_types::ServerError;
 use edenapi_types::SetBookmarkRequest;
 use edenapi_types::SetBookmarkResponse;
+use edenapi_types::SuffixQueryRequest;
+use edenapi_types::SuffixQueryResponse;
 use edenapi_types::ToApi;
 use edenapi_types::ToWire;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
 use edenapi_types::TreeRequest;
+use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadBonsaiChangesetRequest;
 use edenapi_types::UploadHgChangeset;
 use edenapi_types::UploadHgChangesetsRequest;
@@ -89,6 +95,7 @@ use edenapi_types::UploadTokensResponse;
 use edenapi_types::UploadTreeEntry;
 use edenapi_types::UploadTreeRequest;
 use edenapi_types::UploadTreeResponse;
+use edenapi_types::WorkspaceDataResponse;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use hg_http::http_client;
@@ -110,9 +117,9 @@ use types::HgId;
 use types::Key;
 use url::Url;
 
-use crate::api::EdenApi;
+use crate::api::SaplingRemoteApi;
 use crate::builder::Config;
-use crate::errors::EdenApiError;
+use crate::errors::SaplingRemoteApiError;
 use crate::response::Response;
 use crate::response::ResponseMeta;
 use crate::retryable::RetryableFileAttrs;
@@ -162,6 +169,10 @@ mod paths {
     pub const ALTER_SNAPSHOT: &str = "snapshot/alter";
     pub const DOWNLOAD_FILE: &str = "download/file";
     pub const BLAME: &str = "blame";
+    pub const CLOUD_WORKSPACE: &str = "cloud/workspace";
+    pub const CLOUD_UPDATE_REFERENCES: &str = "cloud/update_references";
+    pub const CLOUD_REFERENCES: &str = "cloud/references";
+    pub const SUFFIXQUERY: &str = "suffix_query";
 }
 
 #[derive(Clone)]
@@ -179,7 +190,7 @@ pub struct ClientInner {
 static LOG_SERVER_INFO_ONCE: Once = Once::new();
 
 impl Client {
-    /// Create an EdenAPI client with the given configuration.
+    /// Create an SaplingRemoteAPI client with the given configuration.
     pub(crate) fn with_config(config: Config) -> Self {
         let client = http_client("edenapi", config.http_config.clone());
         let inner = Arc::new(ClientInner {
@@ -200,13 +211,13 @@ impl Client {
     }
 
     /// Append endpoint path onto the server's base URL.
-    fn build_url_repoless(&self, path: &str) -> Result<Url, EdenApiError> {
+    fn build_url_repoless(&self, path: &str) -> Result<Url, SaplingRemoteApiError> {
         let url = &self.config().server_url;
         Ok(url.join(path)?)
     }
 
     /// Append a repo name and endpoint path onto the server's base URL.
-    fn build_url(&self, path: &str) -> Result<Url, EdenApiError> {
+    fn build_url(&self, path: &str) -> Result<Url, SaplingRemoteApiError> {
         let url = &self.config().server_url;
         // Repo name must be sanitized since it can be set by the user.
         let url = url
@@ -216,7 +227,7 @@ impl Client {
     }
 
     /// Add configured values to a request.
-    fn configure_request(&self, mut req: Request) -> Result<Request, EdenApiError> {
+    fn configure_request(&self, mut req: Request) -> Result<Request, SaplingRemoteApiError> {
         // This method should probably not exist. Request
         // configuration should flow through a shared config (i.e.
         // http_client::Config) that is applied by the HttpClient.
@@ -266,7 +277,7 @@ impl Client {
         min_batch_size: Option<usize>,
         mut make_req: F,
         mut mutate_url: G,
-    ) -> Result<Vec<Request>, EdenApiError>
+    ) -> Result<Vec<Request>, SaplingRemoteApiError>
     where
         K: IntoIterator<Item = T>,
         F: FnMut(Vec<T>) -> R,
@@ -280,7 +291,7 @@ impl Client {
                 let req = make_req(keys).to_wire();
                 self.configure_request(self.inner.client.post(url))?
                     .cbor(&req)
-                    .map_err(EdenApiError::RequestSerializationFailed)
+                    .map_err(SaplingRemoteApiError::RequestSerializationFailed)
             })
             .collect()
     }
@@ -296,7 +307,7 @@ impl Client {
     fn fetch_raw<T: DeserializeOwned + Send + 'static>(
         &self,
         requests: Vec<Request>,
-    ) -> Result<Response<T>, EdenApiError> {
+    ) -> Result<Response<T>, SaplingRemoteApiError> {
         let (responses, stats) = self.inner.client.send_async(requests)?;
 
         // Transform each response `Future` (which resolves when all of the HTTP
@@ -313,7 +324,7 @@ impl Client {
                     tracing::debug!(target: "mononoke_info", mononoke_host=res_meta.mononoke_host.unwrap_or_default());
                 });
 
-                Ok::<_, EdenApiError>(res.into_body().cbor::<T>().err_into())
+                Ok::<_, SaplingRemoteApiError>(res.into_body().cbor::<T>().err_into())
 
             })
             .try_flatten()
@@ -334,7 +345,7 @@ impl Client {
     /// the order the responses arrive. The response streams will be
     /// combined into a single stream, in which the returned entries
     /// from different HTTP responses may be arbitrarily interleaved.
-    fn fetch<T>(&self, requests: Vec<Request>) -> Result<Response<T>, EdenApiError>
+    fn fetch<T>(&self, requests: Vec<Request>) -> Result<Response<T>, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -346,7 +357,7 @@ impl Client {
         &self,
         requests: Vec<Request>,
         mut guards: Vec<EntranceGuard>,
-    ) -> Result<Response<T>, EdenApiError>
+    ) -> Result<Response<T>, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -356,14 +367,19 @@ impl Client {
 
         let stats = metrics::wrap_future_keep_guards(stats, guards).boxed();
         let entries = entries
-            .and_then(|v| future::ready(v.to_api().map_err(|e| EdenApiError::from(e.into()))))
+            .and_then(|v| {
+                future::ready(
+                    v.to_api()
+                        .map_err(|e| SaplingRemoteApiError::from(e.into())),
+                )
+            })
             .boxed();
 
         Ok(Response { entries, stats })
     }
 
     /// Similar to `fetch`. But returns a `Vec` directly.
-    async fn fetch_vec<T>(&self, requests: Vec<Request>) -> Result<Vec<T>, EdenApiError>
+    async fn fetch_vec<T>(&self, requests: Vec<Request>) -> Result<Vec<T>, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -372,7 +388,10 @@ impl Client {
     }
 
     /// Similar to `fetch_vec`. But with retries.
-    async fn fetch_vec_with_retry<T>(&self, requests: Vec<Request>) -> Result<Vec<T>, EdenApiError>
+    async fn fetch_vec_with_retry<T>(
+        &self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<T>, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -386,7 +405,7 @@ impl Client {
         &self,
         requests: Vec<Request>,
         prog: Arc<ProgressBar>,
-    ) -> Result<Vec<T>, EdenApiError>
+    ) -> Result<Vec<T>, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -408,7 +427,7 @@ impl Client {
     }
 
     /// Similar to `fetch`, but returns the response type directly, instead of Response<_>.
-    async fn fetch_single<T>(&self, request: Request) -> Result<T, EdenApiError>
+    async fn fetch_single<T>(&self, request: Request) -> Result<T, SaplingRemoteApiError>
     where
         <T as ToWire>::Wire: Send + DeserializeOwned + 'static,
         T: ToWire + Send + 'static,
@@ -448,7 +467,8 @@ impl Client {
         &self,
         keys: Vec<Key>,
         attributes: Option<TreeAttributes>,
-    ) -> Result<Response<Result<TreeEntry, EdenApiServerError>>, EdenApiError> {
+    ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
+    {
         tracing::info!("Requesting fetching of {} tree(s)", keys.len());
 
         if keys.is_empty() {
@@ -456,6 +476,15 @@ impl Client {
         }
 
         let url = self.build_url(paths::TREES)?;
+
+        let mut attrs = attributes.clone().unwrap_or_default();
+        // Inject augmented trees attribute if configured.
+        attrs = TreeAttributes {
+            manifest_blob: attrs.manifest_blob,
+            parents: attrs.parents,
+            child_metadata: attrs.child_metadata,
+            augmented_trees: attrs.augmented_trees || self.config().augmented_trees,
+        };
 
         let try_route_consistently = self.config().try_route_consistently;
         let min_batch_size: Option<usize> = self.config().min_batch_size;
@@ -468,7 +497,7 @@ impl Client {
             |keys| {
                 let req = TreeRequest {
                     keys,
-                    attributes: attributes.clone().unwrap_or_default(),
+                    attributes: attrs,
                 };
                 self.log_request(&req, "trees");
                 req
@@ -482,13 +511,13 @@ impl Client {
             },
         )?;
 
-        self.fetch::<Result<TreeEntry, EdenApiServerError>>(requests)
+        self.fetch::<Result<TreeEntry, SaplingRemoteApiServerError>>(requests)
     }
 
     pub(crate) async fn fetch_files_attrs(
         &self,
         reqs: Vec<FileSpec>,
-    ) -> Result<Response<FileResponse>, EdenApiError> {
+    ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting fetching of content and attributes for {} file(s)",
             reqs.len()
@@ -510,7 +539,7 @@ impl Client {
             self.config().max_files_per_batch,
             min_batch_size,
             |reqs| {
-                let req = FileRequest { reqs, keys: vec![] };
+                let req = FileRequest { reqs };
                 self.log_request(&req, "files");
                 req
             },
@@ -535,7 +564,7 @@ impl Client {
         item: AnyFileContentId,
         raw_content: Bytes,
         bubble_id: Option<NonZeroU64>,
-    ) -> Result<UploadToken, EdenApiError> {
+    ) -> Result<UploadToken, SaplingRemoteApiError> {
         let mut url = self.build_url(paths::UPLOAD)?;
         url = url.join("file/")?;
         match item {
@@ -576,7 +605,7 @@ impl Client {
         &self,
         changesets: Vec<UploadHgChangeset>,
         mutations: Vec<HgMutationEntryContent>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting changesets upload for {} item(s)",
             changesets.len(),
@@ -599,7 +628,7 @@ impl Client {
             .configure_request(self.inner.client.post(url))?
             .min_transfer_speed(None)
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch::<UploadTokensResponse>(vec![request])
     }
@@ -607,7 +636,7 @@ impl Client {
     async fn commit_revlog_data_attempt(
         &self,
         hgids: Vec<HgId>,
-    ) -> Result<Response<CommitRevlogData>, EdenApiError> {
+    ) -> Result<Response<CommitRevlogData>, SaplingRemoteApiError> {
         tracing::info!("Requesting revlog data for {} commit(s)", hgids.len());
 
         let url = self.build_url(paths::COMMIT_REVLOG_DATA)?;
@@ -618,7 +647,7 @@ impl Client {
         let req = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&commit_revlog_data_req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_raw::<CommitRevlogData>(vec![req])
     }
@@ -627,7 +656,7 @@ impl Client {
         &self,
         changeset: BonsaiChangesetContent,
         bubble_id: Option<std::num::NonZeroU64>,
-    ) -> Result<UploadTokensResponse, EdenApiError> {
+    ) -> Result<UploadTokensResponse, SaplingRemoteApiError> {
         tracing::info!("Requesting changeset upload");
 
         let mut url = self.build_url(paths::UPLOAD_BONSAI_CHANGESET)?;
@@ -640,7 +669,7 @@ impl Client {
         let request = self
             .configure_request(self.inner.client.post(url.clone()))?
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_single::<UploadTokensResponse>(request).await
     }
@@ -649,7 +678,7 @@ impl Client {
         &self,
         custom_duration: Option<Duration>,
         labels: Option<Vec<String>>,
-    ) -> Result<EphemeralPrepareResponse, EdenApiError> {
+    ) -> Result<EphemeralPrepareResponse, SaplingRemoteApiError> {
         tracing::info!("Preparing ephemeral bubble");
         let url = self.build_url(paths::EPHEMERAL_PREPARE)?;
         let req = EphemeralPrepareRequest {
@@ -660,7 +689,7 @@ impl Client {
         let request = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         let resp = self.fetch_single::<EphemeralPrepareResponse>(request).await;
         if let Ok(ref r) = resp {
@@ -672,14 +701,14 @@ impl Client {
     async fn fetch_snapshot_attempt(
         &self,
         request: FetchSnapshotRequest,
-    ) -> Result<FetchSnapshotResponse, EdenApiError> {
+    ) -> Result<FetchSnapshotResponse, SaplingRemoteApiError> {
         tracing::info!("Fetching snapshot {}", request.cs_id,);
         let url = self.build_url(paths::FETCH_SNAPSHOT)?;
         let req = request.to_wire();
         let request = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_single::<FetchSnapshotResponse>(request).await
     }
@@ -688,19 +717,19 @@ impl Client {
     async fn alter_snapshot_attempt(
         &self,
         request: AlterSnapshotRequest,
-    ) -> Result<AlterSnapshotResponse, EdenApiError> {
+    ) -> Result<AlterSnapshotResponse, SaplingRemoteApiError> {
         tracing::info!("Altering snapshot {}", request.cs_id,);
         let url = self.build_url(paths::ALTER_SNAPSHOT)?;
         let req = request.to_wire();
         let request = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_single::<AlterSnapshotResponse>(request).await
     }
 
-    async fn clone_data_attempt(&self) -> Result<CloneData<HgId>, EdenApiError> {
+    async fn clone_data_attempt(&self) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         let url = self.build_url(paths::CLONE_DATA)?;
         let req = self.configure_request(self.inner.client.post(url))?;
         self.fetch_single::<CloneData<HgId>>(req).await
@@ -709,24 +738,24 @@ impl Client {
     async fn pull_lazy_attempt(
         &self,
         req: PullLazyRequest,
-    ) -> Result<CloneData<HgId>, EdenApiError> {
+    ) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         let url = self.build_url(paths::PULL_LAZY)?;
         let req = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&req.to_wire())
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
         self.fetch_single::<CloneData<HgId>>(req).await
     }
 
     async fn fast_forward_pull_attempt(
         &self,
         req: PullFastForwardRequest,
-    ) -> Result<CloneData<HgId>, EdenApiError> {
+    ) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         let url = self.build_url(paths::PULL_FAST_FORWARD)?;
         let req = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&req.to_wire())
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
         self.fetch_single::<CloneData<HgId>>(req).await
     }
 
@@ -734,7 +763,7 @@ impl Client {
         &self,
         keys: Vec<Key>,
         length: Option<u32>,
-    ) -> Result<Response<HistoryEntry>, EdenApiError> {
+    ) -> Result<Response<HistoryEntry>, SaplingRemoteApiError> {
         tracing::info!("Requesting history for {} file(s)", keys.len());
 
         if keys.is_empty() {
@@ -776,7 +805,10 @@ impl Client {
         Ok(Response { entries, stats })
     }
 
-    async fn blame_attempt(&self, files: Vec<Key>) -> Result<Response<BlameResult>, EdenApiError> {
+    async fn blame_attempt(
+        &self,
+        files: Vec<Key>,
+    ) -> Result<Response<BlameResult>, SaplingRemoteApiError> {
         tracing::info!("Blaming {} file(s)", files.len());
 
         if files.is_empty() {
@@ -800,13 +832,42 @@ impl Client {
         self.fetch::<BlameResult>(requests)
     }
 
+    async fn suffix_query_attempt(
+        &self,
+        commit: CommitId,
+        suffixes: Vec<String>,
+    ) -> Result<Response<SuffixQueryResponse>, SaplingRemoteApiError> {
+        tracing::info!(
+            "Retrieving file paths matching {:?} in {}",
+            suffixes,
+            &self.repo_name(),
+        );
+
+        if suffixes.is_empty() {
+            return Ok(Response::empty());
+        }
+
+        let url = self.build_url(paths::SUFFIXQUERY)?;
+        let req = SuffixQueryRequest {
+            commit,
+            basename_suffixes: suffixes,
+        };
+
+        let requests = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&req.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch::<SuffixQueryResponse>(vec![requests])
+    }
+
     async fn commit_translate_id_attempt(
         &self,
         commits: Vec<CommitId>,
         scheme: CommitIdScheme,
         from_repo: Option<String>,
         to_repo: Option<String>,
-    ) -> Result<Response<CommitTranslateIdResponse>, EdenApiError> {
+    ) -> Result<Response<CommitTranslateIdResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting commit id translation for {} commits into {:?}",
             commits.len(),
@@ -833,7 +894,10 @@ impl Client {
         self.fetch::<CommitTranslateIdResponse>(requests)
     }
 
-    async fn download_file_attempt(&self, token: UploadToken) -> Result<Bytes, EdenApiError> {
+    async fn download_file_attempt(
+        &self,
+        token: UploadToken,
+    ) -> Result<Bytes, SaplingRemoteApiError> {
         tracing::info!("Downloading file");
         let url = self.build_url(paths::DOWNLOAD_FILE)?;
         let metadata = token.data.metadata.clone();
@@ -841,7 +905,7 @@ impl Client {
         let request = self
             .configure_request(self.inner.client.post(url.clone()))?
             .cbor(&req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         use bytes::BytesMut;
         let buf = if let Some(UploadTokenMetadata::FileContentTokenMetadata(m)) = metadata {
@@ -868,7 +932,7 @@ impl Client {
         to: Option<HgId>,
         from: Option<HgId>,
         pushvars: HashMap<String, String>,
-    ) -> Result<SetBookmarkResponse, EdenApiError> {
+    ) -> Result<SetBookmarkResponse, SaplingRemoteApiError> {
         tracing::info!("Set bookmark '{}' from {:?} to {:?}", &bookmark, from, to);
         let url = self.build_url(paths::SET_BOOKMARK)?;
         let set_bookmark_req = SetBookmarkRequest {
@@ -883,8 +947,9 @@ impl Client {
         self.log_request(&set_bookmark_req, "set_bookmark");
         let req = self
             .configure_request(self.inner.client.post(url))?
+            .min_transfer_speed(None)
             .cbor(&set_bookmark_req.to_wire())
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_single::<SetBookmarkResponse>(req).await
     }
@@ -897,7 +962,7 @@ impl Client {
         head: HgId,
         base: HgId,
         pushvars: HashMap<String, String>,
-    ) -> Result<LandStackResponse, EdenApiError> {
+    ) -> Result<LandStackResponse, SaplingRemoteApiError> {
         tracing::info!(
             "Landing stack between head {} and base {} to bookmark '{}'",
             head,
@@ -923,7 +988,7 @@ impl Client {
             .configure_request(self.inner.client.post(url))?
             .min_transfer_speed(None)
             .cbor(&land_stack_req.to_wire())
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_single::<LandStackResponse>(req).await
     }
@@ -931,7 +996,7 @@ impl Client {
     async fn upload_filenodes_batch_attempt(
         &self,
         items: Vec<HgFilenodeData>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         tracing::info!("Requesting hg filenodes upload for {} item(s)", items.len());
 
         if items.is_empty() {
@@ -958,7 +1023,7 @@ impl Client {
     async fn upload_trees_batch_attempt(
         &self,
         items: Vec<UploadTreeEntry>,
-    ) -> Result<Response<UploadTreeResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTreeResponse>, SaplingRemoteApiError> {
         tracing::info!("Requesting trees upload for {} item(s)", items.len());
 
         if items.is_empty() {
@@ -985,20 +1050,20 @@ impl Client {
 
     async fn with_retry<'t, T>(
         &'t self,
-        func: impl Fn(&'t Self) -> BoxFuture<'t, Result<T, EdenApiError>>,
-    ) -> Result<T, EdenApiError> {
+        func: impl Fn(&'t Self) -> BoxFuture<'t, Result<T, SaplingRemoteApiError>>,
+    ) -> Result<T, SaplingRemoteApiError> {
         let retry_count = self.inner.config.max_retry_per_request;
         with_retry(retry_count, || func(self)).await
     }
 }
 
 #[async_trait]
-impl EdenApi for Client {
+impl SaplingRemoteApi for Client {
     fn url(&self) -> Option<String> {
         Some(self.config().server_url.to_string())
     }
 
-    async fn health(&self) -> Result<ResponseMeta, EdenApiError> {
+    async fn health(&self) -> Result<ResponseMeta, SaplingRemoteApiError> {
         let url = self.build_url_repoless(paths::HEALTH_CHECK)?;
 
         tracing::info!("Sending health check request: {}", &url);
@@ -1009,21 +1074,21 @@ impl EdenApi for Client {
         Ok(ResponseMeta::from(&res))
     }
 
-    async fn capabilities(&self) -> Result<Vec<String>, EdenApiError> {
+    async fn capabilities(&self) -> Result<Vec<String>, SaplingRemoteApiError> {
         tracing::info!("Requesting capabilities for repo {}", &self.repo_name());
         let url = self.build_url("capabilities")?;
         let req = self.configure_request(self.inner.client.get(url))?;
         let res = raise_for_status(req.send_async().await?).await?;
         let body: Vec<u8> = res.into_body().decoded().try_concat().await?;
         let caps = serde_json::from_slice(&body)
-            .map_err(|e| EdenApiError::ParseResponse(e.to_string()))?;
+            .map_err(|e| SaplingRemoteApiError::ParseResponse(e.to_string()))?;
         Ok(caps)
     }
 
     async fn files_attrs(
         &self,
         reqs: Vec<FileSpec>,
-    ) -> Result<Response<FileResponse>, EdenApiError> {
+    ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting content and attributes for {} file(s)",
             reqs.len()
@@ -1046,7 +1111,7 @@ impl EdenApi for Client {
         &self,
         keys: Vec<Key>,
         length: Option<u32>,
-    ) -> Result<Response<HistoryEntry>, EdenApiError> {
+    ) -> Result<Response<HistoryEntry>, SaplingRemoteApiError> {
         self.with_retry(|this| this.history_attempt(keys.clone(), length.clone()).boxed())
             .await
     }
@@ -1055,7 +1120,8 @@ impl EdenApi for Client {
         &self,
         keys: Vec<Key>,
         attributes: Option<TreeAttributes>,
-    ) -> Result<Response<Result<TreeEntry, EdenApiServerError>>, EdenApiError> {
+    ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
+    {
         tracing::info!("Requesting {} tree(s)", keys.len());
 
         let prog = self.inner.tree_progress.create_or_extend(keys.len() as u64);
@@ -1074,7 +1140,7 @@ impl EdenApi for Client {
     async fn commit_revlog_data(
         &self,
         hgids: Vec<HgId>,
-    ) -> Result<Response<CommitRevlogData>, EdenApiError> {
+    ) -> Result<Response<CommitRevlogData>, SaplingRemoteApiError> {
         self.with_retry(|this| this.commit_revlog_data_attempt(hgids.clone()).boxed())
             .await
     }
@@ -1082,7 +1148,7 @@ impl EdenApi for Client {
     async fn hash_prefixes_lookup(
         &self,
         prefixes: Vec<String>,
-    ) -> Result<Vec<CommitHashLookupResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitHashLookupResponse>, SaplingRemoteApiError> {
         tracing::info!("Requesting full hashes for {} prefix(es)", prefixes.len());
         let url = self.build_url(paths::COMMIT_HASH_LOOKUP)?;
         let prefixes: Vec<CommitHashLookupRequest> = prefixes
@@ -1101,7 +1167,10 @@ impl EdenApi for Client {
             .await
     }
 
-    async fn bookmarks(&self, bookmarks: Vec<String>) -> Result<Vec<BookmarkEntry>, EdenApiError> {
+    async fn bookmarks(
+        &self,
+        bookmarks: Vec<String>,
+    ) -> Result<Vec<BookmarkEntry>, SaplingRemoteApiError> {
         tracing::info!("Requesting {} bookmarks", bookmarks.len());
         let url = self.build_url(paths::BOOKMARKS)?;
         let bookmark_req = BookmarkRequest { bookmarks };
@@ -1109,7 +1178,7 @@ impl EdenApi for Client {
         let req = self
             .configure_request(self.inner.client.post(url))?
             .cbor(&bookmark_req.to_wire())
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_vec_with_retry::<BookmarkEntry>(vec![req]).await
     }
@@ -1120,7 +1189,7 @@ impl EdenApi for Client {
         to: Option<HgId>,
         from: Option<HgId>,
         pushvars: HashMap<String, String>,
-    ) -> Result<SetBookmarkResponse, EdenApiError> {
+    ) -> Result<SetBookmarkResponse, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.set_bookmark_attempt(bookmark.clone(), to, from, pushvars.clone())
                 .boxed()
@@ -1134,7 +1203,7 @@ impl EdenApi for Client {
         head: HgId,
         base: HgId,
         pushvars: HashMap<String, String>,
-    ) -> Result<LandStackResponse, EdenApiError> {
+    ) -> Result<LandStackResponse, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.land_stack_attempt(bookmark.clone(), head, base, pushvars.clone())
                 .boxed()
@@ -1142,7 +1211,7 @@ impl EdenApi for Client {
         .await
     }
 
-    async fn clone_data(&self) -> Result<CloneData<HgId>, EdenApiError> {
+    async fn clone_data(&self) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting clone data for the '{}' repository",
             self.repo_name(),
@@ -1155,7 +1224,7 @@ impl EdenApi for Client {
         &self,
         old_master: HgId,
         new_master: HgId,
-    ) -> Result<CloneData<HgId>, EdenApiError> {
+    ) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting pull fast forward data for the '{}' repository",
             self.repo_name()
@@ -1175,7 +1244,7 @@ impl EdenApi for Client {
         &self,
         common: Vec<HgId>,
         missing: Vec<HgId>,
-    ) -> Result<CloneData<HgId>, EdenApiError> {
+    ) -> Result<CloneData<HgId>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting pull lazy data for the '{}' repository",
             self.repo_name()
@@ -1194,7 +1263,7 @@ impl EdenApi for Client {
     async fn commit_location_to_hash(
         &self,
         requests: Vec<CommitLocationToHashRequest>,
-    ) -> Result<Vec<CommitLocationToHashResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitLocationToHashResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting commit location to hash (batch size = {})",
             requests.len()
@@ -1226,7 +1295,7 @@ impl EdenApi for Client {
         &self,
         master_heads: Vec<HgId>,
         hgids: Vec<HgId>,
-    ) -> Result<Vec<CommitHashToLocationResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitHashToLocationResponse>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting commit hash to location (batch size = {})",
             hgids.len()
@@ -1262,13 +1331,15 @@ impl EdenApi for Client {
     async fn commit_known(
         &self,
         hgids: Vec<HgId>,
-    ) -> Result<Vec<CommitKnownResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitKnownResponse>, SaplingRemoteApiError> {
         let anyids: Vec<_> = hgids.iter().cloned().map(AnyId::HgChangesetId).collect();
         let entries = self.lookup_batch(anyids.clone(), None, None).await?;
 
         let into_hgid = |id: IndexableId| match id.id {
             AnyId::HgChangesetId(hgid) => Ok(hgid),
-            _ => Err(EdenApiError::Other(format_err!("Invalid id returned"))),
+            _ => Err(SaplingRemoteApiError::Other(format_err!(
+                "Invalid id returned"
+            ))),
         };
 
         let id_to_token: HashMap<HgId, Option<UploadToken>> = entries
@@ -1277,7 +1348,7 @@ impl EdenApi for Client {
                 LookupResult::NotPresent(id) => Ok((into_hgid(id)?, None)),
                 LookupResult::Present(token) => Ok((into_hgid(token.indexable_id())?, Some(token))),
             })
-            .collect::<Result<_, EdenApiError>>()?;
+            .collect::<Result<_, SaplingRemoteApiError>>()?;
 
         Ok(hgids
             .into_iter()
@@ -1300,7 +1371,7 @@ impl EdenApi for Client {
         &self,
         heads: Vec<HgId>,
         common: Vec<HgId>,
-    ) -> Result<Vec<CommitGraphEntry>, EdenApiError> {
+    ) -> Result<Vec<CommitGraphEntry>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting commit graph with {} heads and {} common",
             heads.len(),
@@ -1321,7 +1392,7 @@ impl EdenApi for Client {
             .accept_encoding([Encoding::Identity])
             .min_transfer_speed(None)
             .cbor(&wire_graph_req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         let prog = ProgressBar::new_detached("commit graph", 0, "commits fetched");
         self.fetch_vec_with_retry_and_prog::<CommitGraphEntry>(vec![req], prog)
@@ -1332,7 +1403,7 @@ impl EdenApi for Client {
         &self,
         heads: Vec<HgId>,
         common: Vec<HgId>,
-    ) -> Result<Vec<CommitGraphSegmentsEntry>, EdenApiError> {
+    ) -> Result<Vec<CommitGraphSegmentsEntry>, SaplingRemoteApiError> {
         tracing::info!(
             "Requesting commit graph segments with {} heads and {} common",
             heads.len(),
@@ -1347,7 +1418,7 @@ impl EdenApi for Client {
             .configure_request(self.inner.client.post(url))?
             .min_transfer_speed(None)
             .cbor(&wire_graph_req)
-            .map_err(EdenApiError::RequestSerializationFailed)?;
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
 
         self.fetch_vec_with_retry::<CommitGraphSegmentsEntry>(vec![req])
             .await
@@ -1358,7 +1429,7 @@ impl EdenApi for Client {
         items: Vec<AnyId>,
         bubble_id: Option<NonZeroU64>,
         copy_from_bubble_id: Option<NonZeroU64>,
-    ) -> Result<Vec<LookupResponse>, EdenApiError> {
+    ) -> Result<Vec<LookupResponse>, SaplingRemoteApiError> {
         tracing::info!("Requesting lookup for {} item(s)", items.len());
 
         if items.is_empty() {
@@ -1392,7 +1463,7 @@ impl EdenApi for Client {
         data: Vec<(AnyFileContentId, Bytes)>,
         bubble_id: Option<NonZeroU64>,
         copy_from_bubble_id: Option<NonZeroU64>,
-    ) -> Result<Response<UploadToken>, EdenApiError> {
+    ) -> Result<Response<UploadToken>, SaplingRemoteApiError> {
         if data.is_empty() {
             return Ok(Response::empty());
         }
@@ -1464,7 +1535,7 @@ impl EdenApi for Client {
     async fn upload_filenodes_batch(
         &self,
         items: Vec<HgFilenodeData>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         self.with_retry(|this| this.upload_filenodes_batch_attempt(items.clone()).boxed())
             .await
     }
@@ -1472,7 +1543,7 @@ impl EdenApi for Client {
     async fn upload_trees_batch(
         &self,
         items: Vec<UploadTreeEntry>,
-    ) -> Result<Response<UploadTreeResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTreeResponse>, SaplingRemoteApiError> {
         self.with_retry(|this| this.upload_trees_batch_attempt(items.clone()).boxed())
             .await
     }
@@ -1481,7 +1552,7 @@ impl EdenApi for Client {
         &self,
         changesets: Vec<UploadHgChangeset>,
         mutations: Vec<HgMutationEntryContent>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.upload_changesets_attempt(changesets.clone(), mutations.clone())
                 .boxed()
@@ -1493,7 +1564,7 @@ impl EdenApi for Client {
         &self,
         changeset: BonsaiChangesetContent,
         bubble_id: Option<std::num::NonZeroU64>,
-    ) -> Result<UploadTokensResponse, EdenApiError> {
+    ) -> Result<UploadTokensResponse, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.upload_bonsai_changeset_attempt(changeset.clone(), bubble_id)
                 .boxed()
@@ -1505,7 +1576,7 @@ impl EdenApi for Client {
         &self,
         custom_duration: Option<Duration>,
         labels: Option<Vec<String>>,
-    ) -> Result<EphemeralPrepareResponse, EdenApiError> {
+    ) -> Result<EphemeralPrepareResponse, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.ephemeral_prepare_attempt(custom_duration, labels.clone())
                 .boxed()
@@ -1516,7 +1587,7 @@ impl EdenApi for Client {
     async fn fetch_snapshot(
         &self,
         request: FetchSnapshotRequest,
-    ) -> Result<FetchSnapshotResponse, EdenApiError> {
+    ) -> Result<FetchSnapshotResponse, SaplingRemoteApiError> {
         self.with_retry(|this| this.fetch_snapshot_attempt(request.clone()).boxed())
             .await
     }
@@ -1525,12 +1596,12 @@ impl EdenApi for Client {
     async fn alter_snapshot(
         &self,
         request: AlterSnapshotRequest,
-    ) -> Result<AlterSnapshotResponse, EdenApiError> {
+    ) -> Result<AlterSnapshotResponse, SaplingRemoteApiError> {
         self.with_retry(|this| this.alter_snapshot_attempt(request.clone()).boxed())
             .await
     }
 
-    async fn download_file(&self, token: UploadToken) -> Result<Bytes, EdenApiError> {
+    async fn download_file(&self, token: UploadToken) -> Result<Bytes, SaplingRemoteApiError> {
         self.with_retry(|this| this.download_file_attempt(token.clone()).boxed())
             .await
     }
@@ -1538,7 +1609,7 @@ impl EdenApi for Client {
     async fn commit_mutations(
         &self,
         commits: Vec<HgId>,
-    ) -> Result<Vec<CommitMutationsResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitMutationsResponse>, SaplingRemoteApiError> {
         tracing::info!("Requesting mutation info for {} commit(s)", commits.len());
         let url = self.build_url(paths::COMMIT_MUTATIONS)?;
         let requests = self.prepare_requests(
@@ -1564,7 +1635,7 @@ impl EdenApi for Client {
         scheme: CommitIdScheme,
         from_repo: Option<String>,
         to_repo: Option<String>,
-    ) -> Result<Response<CommitTranslateIdResponse>, EdenApiError> {
+    ) -> Result<Response<CommitTranslateIdResponse>, SaplingRemoteApiError> {
         self.with_retry(|this| {
             this.commit_translate_id_attempt(
                 commits.clone(),
@@ -1577,9 +1648,77 @@ impl EdenApi for Client {
         .await
     }
 
-    async fn blame(&self, files: Vec<Key>) -> Result<Response<BlameResult>, EdenApiError> {
+    async fn blame(&self, files: Vec<Key>) -> Result<Response<BlameResult>, SaplingRemoteApiError> {
         self.with_retry(|this| this.blame_attempt(files.clone()).boxed())
             .await
+    }
+
+    async fn cloud_workspace(
+        &self,
+        workspace: String,
+        reponame: String,
+    ) -> Result<WorkspaceDataResponse, SaplingRemoteApiError> {
+        tracing::info!("Requesting workspace {} in repo {} ", workspace, reponame);
+        let url = self.build_url(paths::CLOUD_WORKSPACE)?;
+        let workspace_req = CloudWorkspaceRequest {
+            workspace: workspace.to_string(),
+            reponame: reponame.to_string(),
+        };
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&workspace_req.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<WorkspaceDataResponse>(request).await
+    }
+
+    async fn cloud_references(
+        &self,
+        data: GetReferencesParams,
+    ) -> Result<ReferencesDataResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud references for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_REFERENCES)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<ReferencesDataResponse>(request).await
+    }
+
+    async fn cloud_update_references(
+        &self,
+        data: UpdateReferencesParams,
+    ) -> Result<ReferencesDataResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting update cloud references for the workspace '{}' in the repo '{}'",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_UPDATE_REFERENCES)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<ReferencesDataResponse>(request).await
+    }
+
+    async fn suffix_query(
+        &self,
+        commit: CommitId,
+        suffixes: Vec<String>,
+    ) -> Result<Response<SuffixQueryResponse>, SaplingRemoteApiError> {
+        // Clone required here due to closure possibly being run more than once
+        self.with_retry(|this| {
+            this.suffix_query_attempt(commit.clone(), suffixes.clone())
+                .boxed()
+        })
+        .await
     }
 }
 
@@ -1616,7 +1755,7 @@ fn split_into_batches<T>(
     }
 }
 
-async fn raise_for_status(res: AsyncResponse) -> Result<AsyncResponse, EdenApiError> {
+async fn raise_for_status(res: AsyncResponse) -> Result<AsyncResponse, SaplingRemoteApiError> {
     let status = res.status();
     if status.as_u16() < 400 {
         return Ok(res);
@@ -1635,7 +1774,7 @@ async fn raise_for_status(res: AsyncResponse) -> Result<AsyncResponse, EdenApiEr
     }
 
     let headers = head.headers().clone();
-    Err(EdenApiError::HttpError {
+    Err(SaplingRemoteApiError::HttpError {
         status,
         message,
         headers,
@@ -1645,8 +1784,8 @@ async fn raise_for_status(res: AsyncResponse) -> Result<AsyncResponse, EdenApiEr
 
 async fn with_retry<'t, T>(
     max_retry_count: usize,
-    func: impl Fn() -> BoxFuture<'t, Result<T, EdenApiError>>,
-) -> Result<T, EdenApiError> {
+    func: impl Fn() -> BoxFuture<'t, Result<T, SaplingRemoteApiError>>,
+) -> Result<T, SaplingRemoteApiError> {
     let mut attempt = 0usize;
     loop {
         let result = func().await;

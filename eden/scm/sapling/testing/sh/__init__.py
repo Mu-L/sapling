@@ -232,8 +232,10 @@ Tilde:
     >>> t('HOME=x; echo ~ a~ ~a ~/a')
     'x a~ ~a x/a\n'
 
-Remove prefix:
+Remove prefixes:
 
+    >>> t('A=abab; echo ${A#*a}')
+    'bab\n'
     >>> t('A=abab; echo ${A##*a}')
     'b\n'
 
@@ -325,6 +327,37 @@ sort
 
     >>> t('for i in c a b; do echo $i; done | sort')
     'a\nb\nc\n'
+
+printf
+
+    >>> t(r"printf 'foo\nbar'")
+    'foo\nbar (no-eol)\n'
+    >>> t(r"printf 'foo\\nbar'")
+    'foo\\\nbar (no-eol)\n'
+    >>> t(r"printf '%s' 'foo\nbar'")
+    'foo\\nbar (no-eol)\n'
+    >>> t(r"printf '%s' 'foo\\nbar'")
+    'foo\\\\nbar (no-eol)\n'
+    >>> t(r"printf '%s' 'foo\nbar'")
+    'foo\\nbar (no-eol)\n'
+    >>> t(r"printf '%b %%b -> %b\n' 'foo\nbar' 1 2 'baz\nxyz' 3")
+    'foo\nbar %b -> 1\n2 %b -> baz\nxyz\n3 %b -> \n'
+    >>> t(r"printf '%b' 'foo\\nbar'")
+    'foo\\\nbar (no-eol)\n'
+
+echo
+
+    >>> t(r"echo 'foo\\nbar'")
+    'foo\\\nbar\n'
+    >>> t(r"echo 'foo\nbar'")
+    'foo\nbar\n'
+
+basename and dirname
+
+    >>> t('basename a b/c/d')
+    'a\nd\n'
+    >>> t('dirname a b/c/d')
+    'a\nb/c\n'
 
 Commands on OS filesystem:
 

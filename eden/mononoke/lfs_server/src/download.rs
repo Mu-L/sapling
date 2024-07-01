@@ -26,6 +26,7 @@ use gotham_ext::response::ResponseStream;
 use gotham_ext::response::ResponseTryStreamExt;
 use gotham_ext::response::StreamBody;
 use gotham_ext::response::TryIntoResponse;
+use gotham_ext::util::is_identity_subset;
 use http::header::HeaderMap;
 use http::header::RANGE;
 use mononoke_types::hash::Sha256;
@@ -41,7 +42,6 @@ use crate::errors::ErrorKind;
 use crate::lfs_server_context::RepositoryRequestContext;
 use crate::middleware::LfsMethod;
 use crate::scuba::LfsScubaKey;
-use crate::util::is_identity_subset;
 
 define_stats! {
     prefix = "mononoke.lfs.download";
@@ -153,14 +153,6 @@ async fn fetch_by_key(
         stream
             .inspect_ok(move |bytes| {
                 STATS::size_bytes_sent.add_value(bytes.len() as i64);
-                if let Some(bandwidth) = ctx.bandwidth() {
-                    if let Some(bytes_sent) = STATS::load_shed_counter
-                        .get_value(ctx.ctx.fb, ("size_bytes_sent.sum.15".to_string(),))
-                    {
-                        let bits_per_second = bytes_sent * 8 / 15;
-                        STATS::net_util.add_value(100 * bits_per_second / bandwidth);
-                    }
-                }
             })
             .left_stream()
     } else {

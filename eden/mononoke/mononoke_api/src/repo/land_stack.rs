@@ -26,8 +26,7 @@ use hook_manager::manager::HookManagerRef;
 use hook_manager::CrossRepoPushSource;
 use hook_manager::PushAuthoredBy;
 use mononoke_types::ChangesetId;
-use pushrebase_client::LocalPushrebaseClient;
-use pushrebase_client::PushrebaseClient;
+use pushrebase_client::normal_pushrebase;
 use repo_blobstore::RepoBlobstoreRef;
 use unbundle::PushRedirector;
 
@@ -51,7 +50,7 @@ impl RepoContext {
             .await?
         {
             None => anyhow::bail!(
-                "Unexpected absence of CommitSyncOutcome for {} in {:?}",
+                "Bookmark: unexpected absence of CommitSyncOutcome for {} in {:?}",
                 large_cs_id,
                 syncer
             ),
@@ -62,7 +61,7 @@ impl RepoContext {
                 Ok(Small(Some(small_cs_id)))
             }
             Some(outcome) => anyhow::bail!(
-                "Unexpected CommitSyncOutcome for {} in {:?}: {:?}",
+                "Bookmark: unexpected CommitSyncOutcome for {} in {:?}: {:?}",
                 large_cs_id,
                 syncer,
                 outcome
@@ -84,7 +83,7 @@ impl RepoContext {
             pushrebase_distance,
             log_id,
         }) = outcome;
-        redirector.backsync_latest(ctx).await?;
+        redirector.ensure_backsynced(ctx, log_id).await?;
 
         // Convert all fields from large to small repo
         let (Small(old_bookmark_value), head, rebased_changesets) = futures::try_join!(
@@ -112,6 +111,7 @@ impl RepoContext {
         pushvars: Option<&HashMap<String, Bytes>>,
         bookmark_restrictions: BookmarkKindRestrictions,
         push_authored_by: PushAuthoredBy,
+        force_local_pushrebase: bool,
     ) -> Result<PushrebaseOutcome, MononokeError> {
         self.start_write()?;
 
@@ -156,9 +156,6 @@ impl RepoContext {
             .try_collect()
             .await?;
 
-        // We CANNOT do remote pushrebase here otherwise it would result in an infinite
-        // loop, as this code is used for remote pushrebase. Let's use local pushrebase.
-
         let outcome = if let Some(redirector) = self.push_redirector.as_ref() {
             // run hooks on small repo
             bookmarks_movement::run_hooks(
@@ -177,19 +174,18 @@ impl RepoContext {
                 .sync_uploaded_changesets(ctx, changesets, Some(&large_bookmark))
                 .await?;
             // Land the mapped changesets on the large repo
-            let outcome = LocalPushrebaseClient {
-                ctx: self.ctx(),
-                authz: self.authorization_context(),
-                repo: &redirector.repo.inner,
-                hook_manager: redirector.repo.hook_manager(),
-            }
-            .pushrebase(
-                &large_bookmark,
+            let outcome = normal_pushrebase(
+                self.ctx(),
+                &redirector.repo.inner,
                 small_to_large.into_values().collect(),
+                &large_bookmark,
                 pushvars,
+                redirector.repo.hook_manager(),
                 CrossRepoPushSource::PushRedirected,
                 bookmark_restrictions,
+                self.authorization_context(),
                 true, // log_new_public_commits_to_scribe
+                force_local_pushrebase,
             )
             .await?;
             // Convert response back, finishing the land on the small repo
@@ -197,19 +193,18 @@ impl RepoContext {
                 .await?
                 .0
         } else {
-            LocalPushrebaseClient {
-                ctx: self.ctx(),
-                authz: self.authorization_context(),
-                repo: self.inner_repo(),
-                hook_manager: self.hook_manager().as_ref(),
-            }
-            .pushrebase(
-                &bookmark,
+            normal_pushrebase(
+                self.ctx(),
+                self.inner_repo(),
                 changesets,
+                &bookmark,
                 pushvars,
+                self.hook_manager().as_ref(),
                 CrossRepoPushSource::NativeToThisRepo,
                 bookmark_restrictions,
+                self.authorization_context(),
                 true, // log_new_public_commits_to_scribe
+                force_local_pushrebase,
             )
             .await?
         };

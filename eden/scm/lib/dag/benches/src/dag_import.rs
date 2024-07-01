@@ -24,10 +24,10 @@ use tempfile::tempdir;
 pub fn main() {
     let clone_data = example_clone_data();
     let tip = clone_data.idmap.last_key_value().unwrap().1.clone();
-    let expected_count = clone_data.flat_segments.vertex_count() as usize;
+    let expected_count = clone_data.flat_segments.vertex_count();
 
     let assert_graph_size = |dag: &Dag| {
-        let actual_count = nbr(async { dag.all().await.unwrap().count().await }).unwrap();
+        let actual_count = nbr(async { dag.all().await.unwrap().count_slow().await }).unwrap();
         assert_eq!(actual_count, expected_count);
     };
 
@@ -50,7 +50,7 @@ pub fn main() {
         let tmp = tempdir().unwrap();
         let mut dag = Dag::open(tmp.path()).unwrap();
         let heads =
-            VertexListWithOptions::from(vec![tip.clone()]).with_highest_group(Group::MASTER);
+            VertexListWithOptions::from(vec![tip.clone()]).with_desired_group(Group::MASTER);
         elapsed(|| {
             nbr(dag.import_pull_data(clone_data.clone(), &heads)).unwrap();
             assert_graph_size(&dag);

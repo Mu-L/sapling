@@ -14,7 +14,9 @@ anyhow = "1.0.75"
 ascii = "1.0"
 async-stream = "0.3"
 async-trait = "0.1.71"
+base64 = "0.13"
 bitflags = { version = "2.4", features = ["serde"] }
+blake3 = { version = "=1.5.0", features = ["traits-preview"] }
 blobstore = { version = "0.1.0", path = "../../blobstore" }
 bytes = { version = "1.6.0", features = ["serde"] }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
@@ -36,13 +38,17 @@ rand_distr = "0.4"
 serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_derive = "1.0.185"
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
-sorted_vector_map = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+sorted_vector_map = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 sql = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 thiserror = "1.0.49"
 time_ext = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
-tokio = { version = "1.36.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }
 types = { version = "0.1.0", path = "../../../scm/lib/types" }
 
 [dev-dependencies]
+fbinit = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fbinit-tokio = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fixtures = { version = "0.1.0", path = "../../tests/fixtures" }
 mononoke_types_serialization = { version = "0.1.0", path = "../../mononoke_types/serialization" }
+repo_blobstore = { version = "0.1.0", path = "../../blobrepo/repo_blobstore" }

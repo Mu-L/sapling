@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::ArgAction;
@@ -25,6 +26,8 @@ pub use megarepo_configs::Target;
 pub use megarepo_configs::WithExtraMoveCommit;
 use megarepo_error::MegarepoError;
 #[cfg(fbcode_build)]
+mod db;
+#[cfg(fbcode_build)]
 mod facebook;
 #[cfg(not(fbcode_build))]
 mod oss;
@@ -33,6 +36,7 @@ mod verification;
 
 #[cfg(fbcode_build)]
 pub use facebook::CfgrMononokeMegarepoConfigs;
+use metaconfig_types::RepoConfig;
 #[cfg(not(fbcode_build))]
 pub use oss::CfgrMononokeMegarepoConfigs;
 pub use test_impl::TestMononokeMegarepoConfigs;
@@ -88,17 +92,11 @@ impl MononokeMegarepoConfigsOptions {
 /// An API for Megarepo Configs
 #[async_trait]
 pub trait MononokeMegarepoConfigs: Send + Sync {
-    /// Get all the versions for a given Target
-    fn get_target_config_versions(
-        &self,
-        ctx: CoreContext,
-        target: Target,
-    ) -> Result<Vec<SyncConfigVersion>, MegarepoError>;
-
     /// Get a SyncTargetConfig by its version
-    fn get_config_by_version(
+    async fn get_config_by_version(
         &self,
         ctx: CoreContext,
+        repo_config: Arc<RepoConfig>,
         target: Target,
         version: SyncConfigVersion,
     ) -> Result<SyncTargetConfig, MegarepoError>;
@@ -107,6 +105,7 @@ pub trait MononokeMegarepoConfigs: Send + Sync {
     async fn add_config_version(
         &self,
         ctx: CoreContext,
+        repo_config: Arc<RepoConfig>,
         config: SyncTargetConfig,
     ) -> Result<(), MegarepoError>;
 }

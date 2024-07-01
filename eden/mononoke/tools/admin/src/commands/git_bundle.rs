@@ -11,11 +11,13 @@ use anyhow::Result;
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_tag_mapping::BonsaiTagMapping;
 use bookmarks::Bookmarks;
+use bookmarks_cache::BookmarksCache;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use commit_graph::CommitGraph;
 use git_symbolic_refs::GitSymbolicRefs;
+use metaconfig_types::RepoConfig;
 use mononoke_app::MononokeApp;
 use repo_blobstore::RepoBlobstore;
 use repo_derived_data::RepoDerivedData;
@@ -49,6 +51,10 @@ pub struct Repo {
     bonsai_tag_mapping: dyn BonsaiTagMapping,
     #[facet]
     git_symbolic_refs: dyn GitSymbolicRefs,
+    #[facet]
+    bookmark_cache: dyn BookmarksCache,
+    #[facet]
+    repo_config: RepoConfig,
 }
 
 #[derive(Subcommand)]

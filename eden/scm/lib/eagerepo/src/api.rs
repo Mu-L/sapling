@@ -34,12 +34,14 @@ use edenapi::types::CommitGraphSegments;
 use edenapi::types::CommitGraphSegmentsEntry;
 use edenapi::types::CommitHashLookupResponse;
 use edenapi::types::CommitHashToLocationResponse;
+use edenapi::types::CommitId;
+use edenapi::types::CommitIdScheme;
 use edenapi::types::CommitKnownResponse;
 use edenapi::types::CommitLocationToHashRequest;
 use edenapi::types::CommitLocationToHashResponse;
 use edenapi::types::CommitMutationsResponse;
 use edenapi::types::CommitRevlogData;
-use edenapi::types::EdenApiServerError;
+use edenapi::types::CommitTranslateIdResponse;
 use edenapi::types::Extra;
 use edenapi::types::FileAuxData;
 use edenapi::types::FileContent;
@@ -47,7 +49,6 @@ use edenapi::types::FileEntry;
 use edenapi::types::FileMetadata;
 use edenapi::types::FileResponse;
 use edenapi::types::FileSpec;
-use edenapi::types::FileType as EdenFileType;
 use edenapi::types::HgChangesetContent;
 use edenapi::types::HgFilenodeData;
 use edenapi::types::HgId;
@@ -60,7 +61,9 @@ use edenapi::types::LookupResult;
 use edenapi::types::NodeInfo;
 use edenapi::types::Parents;
 use edenapi::types::RepoPathBuf;
+use edenapi::types::SaplingRemoteApiServerError;
 use edenapi::types::SetBookmarkResponse;
+use edenapi::types::SuffixQueryResponse;
 use edenapi::types::TreeAttributes;
 use edenapi::types::TreeChildEntry;
 use edenapi::types::TreeChildFileEntry;
@@ -71,21 +74,21 @@ use edenapi::types::UploadTokenData;
 use edenapi::types::UploadTokensResponse;
 use edenapi::types::UploadTreeEntry;
 use edenapi::types::UploadTreeResponse;
-use edenapi::EdenApi;
-use edenapi::EdenApiError;
 use edenapi::Response;
 use edenapi::ResponseMeta;
+use edenapi::SaplingRemoteApi;
+use edenapi::SaplingRemoteApiError;
 use edenapi_trait as edenapi;
 use futures::stream::BoxStream;
 use futures::stream::TryStreamExt;
 use futures::StreamExt;
 use http::StatusCode;
 use http::Version;
-use manifest_tree::FileType as ManifestFileType;
 use manifest_tree::Flag;
 use minibytes::Bytes;
 use mutationstore::MutationEntry;
 use nonblocking::non_blocking_result;
+use storemodel::types::AugmentedTreeEntryWithDigest;
 use storemodel::SerializationFormat;
 use tracing::debug;
 use tracing::error;
@@ -96,15 +99,15 @@ use crate::EagerRepo;
 impl EagerRepo {
     /// Load file/tree store changes from disk.
     ///
-    /// This is intended to be used by EdenApi impls so content fetched
-    /// via EdenApi (during testing) is always fresh.
+    /// This is intended to be used by SaplingRemoteApi impls so content fetched
+    /// via SaplingRemoteApi (during testing) is always fresh.
     pub(crate) fn refresh_for_api(&self) {
         let _ = self.store.flush();
     }
 }
 
 #[async_trait::async_trait]
-impl EdenApi for EagerRepo {
+impl SaplingRemoteApi for EagerRepo {
     fn url(&self) -> Option<String> {
         Some(format!("eager:{}", self.dir.display()))
     }
@@ -113,7 +116,7 @@ impl EdenApi for EagerRepo {
         Ok(default_response_meta())
     }
 
-    async fn capabilities(&self) -> Result<Vec<String>, EdenApiError> {
+    async fn capabilities(&self) -> Result<Vec<String>, SaplingRemoteApiError> {
         Ok(vec![
             "segmented-changelog".to_string(),
             "commit-graph-segments".to_string(),
@@ -151,6 +154,15 @@ impl EdenApi for EagerRepo {
     }
 
     async fn files_attrs(&self, reqs: Vec<FileSpec>) -> edenapi::Result<Response<FileResponse>> {
+        ::fail::fail_point!("eagerepo::api::files_attrs", |_| {
+            Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "failpoint".to_string(),
+                headers: Default::default(),
+                url: self.url("files_attrs"),
+            })
+        });
+
         debug!("files_attrs {}", debug_spec_list(&reqs));
         self.refresh_for_api();
         let mut values = Vec::with_capacity(reqs.len());
@@ -205,7 +217,12 @@ impl EdenApi for EagerRepo {
             if !visited.insert(key.clone()) {
                 continue;
             }
-            let data = self.get_sha1_blob_for_api(key.hgid, "history")?;
+
+            // Don't report missing files as errors. This matches Mononoke's behavior.
+            let Some(data) = self.opt_sha1_blob_for_api(key.hgid, "history")? else {
+                continue;
+            };
+
             // NOTE: Order of p1, p2 are not preserved, unlike revlog hg.
             // It should be okay correctness-wise.
             let (p1, p2) = extract_p1_p2(&data);
@@ -246,80 +263,110 @@ impl EdenApi for EagerRepo {
         &self,
         keys: Vec<Key>,
         attributes: Option<TreeAttributes>,
-    ) -> edenapi::Result<Response<Result<TreeEntry, EdenApiServerError>>> {
+    ) -> edenapi::Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>> {
         debug!("trees {} {:?}", debug_key_list(&keys), attributes);
         self.refresh_for_api();
         let mut values = Vec::new();
         let attributes = attributes.unwrap_or_default();
-        for key in keys {
-            let data = self.get_sha1_blob_for_api(key.hgid, "trees")?;
-            let mut entry = TreeEntry {
-                key: key.clone(),
-                ..Default::default()
-            };
-
-            if attributes.manifest_blob {
-                // PERF: to_vec().into() converts minibytes::Bytes to bytes::Bytes.
-                entry.data = Some(extract_body(&data).to_vec().into());
-            }
-
-            if attributes.parents {
-                let (p1, p2) = extract_p1_p2(&data);
-                let parents = Parents::new(p1, p2);
-                entry.parents = Some(parents);
-            }
-
-            if attributes.child_metadata {
-                let mut children: Vec<Result<TreeChildEntry, EdenApiServerError>> = Vec::new();
-
-                let tree_entry =
-                    manifest_tree::TreeEntry(extract_body(&data), SerializationFormat::Hg);
-                for child in tree_entry.elements() {
-                    let child = match child {
-                        Ok(child) => child,
-                        Err(err) => {
-                            children.push(Err(EdenApiServerError::with_key(key.clone(), err)));
-                            continue;
+        if attributes.augmented_trees {
+            for key in keys {
+                match self
+                    .get_augmented_tree_blob_with_digest_for_api(key.hgid, "trees")
+                    .await
+                {
+                    Ok(tree) => {
+                        let augmented_tree_with_digest =
+                            AugmentedTreeEntryWithDigest::try_deserialize(std::io::Cursor::new(
+                                tree,
+                            ))?;
+                        let mut converted_entry: TreeEntry =
+                            TreeEntry::try_from(augmented_tree_with_digest).map_err(|err| {
+                                SaplingRemoteApiServerError::with_key(key.clone(), err)
+                            })?;
+                        // Match the key in the response and in the request!
+                        // TreeEntry produced from the augmented tree format doesn't contain path for itself, only for the children.
+                        converted_entry.key = key.clone();
+                        // Clean up fields that were not requested, since the augmented trees format contains
+                        // everything by default
+                        if !attributes.manifest_blob {
+                            converted_entry.with_data(None);
                         }
-                    };
-
-                    match child.flag {
-                        Flag::File(file_type) => {
-                            let file_with_parents =
-                                self.get_sha1_blob_for_api(child.hgid, "trees (aux)")?;
-                            let file_body = extract_body(&file_with_parents);
-
-                            // The client currently extracts only file aux data fields from the file metadata.
-                            let aux_data = FileAuxData::from_content(&file_body);
-                            children.push(Ok(TreeChildEntry::File(TreeChildFileEntry {
-                                key: Key::new(key.path.join(child.component.as_ref()), child.hgid),
-                                file_metadata: Some(FileMetadata {
-                                    content_id: Some(aux_data.content_id),
-                                    file_type: Some(match file_type {
-                                        ManifestFileType::Regular => EdenFileType::Regular,
-                                        ManifestFileType::Executable => EdenFileType::Executable,
-                                        ManifestFileType::Symlink => EdenFileType::Symlink,
-                                        ManifestFileType::GitSubmodule => {
-                                            panic!("git submodule when serving hg manifest?")
-                                        }
-                                    }),
-                                    size: Some(aux_data.total_size),
-                                    content_sha1: Some(aux_data.sha1),
-                                    content_sha256: Some(aux_data.sha256),
-                                    content_seeded_blake3: aux_data.seeded_blake3,
-                                    ..Default::default()
-                                }),
-                            })));
+                        if !attributes.parents {
+                            converted_entry.with_parents(None);
                         }
-                        // The client currently ignores directory metadata, so don't bother.
-                        Flag::Directory => {}
+                        if !attributes.child_metadata {
+                            converted_entry.with_children(None);
+                        }
+                        values.push(Ok(Ok(converted_entry)));
                     }
+                    Err(e) => values.push(Err(e)),
+                }
+            }
+        } else {
+            for key in keys {
+                let data = self.get_sha1_blob_for_api(key.hgid, "trees")?;
+                let mut entry = TreeEntry {
+                    key: key.clone(),
+                    ..Default::default()
+                };
+
+                if attributes.manifest_blob {
+                    // PERF: to_vec().into() converts minibytes::Bytes to bytes::Bytes.
+                    entry.data = Some(extract_body(&data).to_vec().into());
                 }
 
-                entry.children = Some(children);
-            }
+                if attributes.parents {
+                    let (p1, p2) = extract_p1_p2(&data);
+                    let parents = Parents::new(p1, p2);
+                    entry.parents = Some(parents);
+                }
 
-            values.push(Ok(Ok(entry)));
+                if attributes.child_metadata {
+                    let mut children: Vec<Result<TreeChildEntry, SaplingRemoteApiServerError>> =
+                        Vec::new();
+
+                    let tree_entry =
+                        manifest_tree::TreeEntry(extract_body(&data), SerializationFormat::Hg);
+                    for child in tree_entry.elements() {
+                        let child = match child {
+                            Ok(child) => child,
+                            Err(err) => {
+                                children.push(Err(SaplingRemoteApiServerError::with_key(
+                                    key.clone(),
+                                    err,
+                                )));
+                                continue;
+                            }
+                        };
+
+                        match child.flag {
+                            Flag::File(_) => {
+                                let file_with_parents =
+                                    self.get_sha1_blob_for_api(child.hgid, "trees (aux)")?;
+                                let file_body_without_parents = extract_body(&file_with_parents);
+                                let (file_body, _copy_from) =
+                                    hgstore::split_hg_file_metadata(&file_body_without_parents)?;
+
+                                let aux_data = FileAuxData::from_content(&file_body);
+                                children.push(Ok(TreeChildEntry::File(TreeChildFileEntry {
+                                    key: Key::new(
+                                        RepoPathBuf::from_string(child.component.to_string())
+                                            .map_err(anyhow::Error::from)?,
+                                        child.hgid,
+                                    ),
+                                    file_metadata: Some(FileMetadata::from(aux_data)),
+                                })));
+                            }
+                            // The client currently ignores directory metadata, so don't bother.
+                            Flag::Directory => {}
+                        }
+                    }
+
+                    entry.children = Some(children);
+                }
+
+                values.push(Ok(Ok(entry)));
+            }
         }
         Ok(convert_to_response(values))
     }
@@ -358,9 +405,9 @@ impl EdenApi for EagerRepo {
         &self,
         common: Vec<HgId>,
         missing: Vec<HgId>,
-    ) -> Result<dag::CloneData<HgId>, EdenApiError> {
+    ) -> Result<dag::CloneData<HgId>, SaplingRemoteApiError> {
         ::fail::fail_point!("eagerepo::api::pulllazy", |_| {
-            Err(EdenApiError::NotSupported)
+            Err(SaplingRemoteApiError::NotSupported)
         });
 
         debug!("pull_lazy");
@@ -494,7 +541,7 @@ impl EdenApi for EagerRepo {
         &self,
         heads: Vec<HgId>,
         common: Vec<HgId>,
-    ) -> Result<Vec<CommitGraphEntry>, EdenApiError> {
+    ) -> Result<Vec<CommitGraphEntry>, SaplingRemoteApiError> {
         debug!(
             "commit_graph {} {}",
             debug_hgid_list(&heads),
@@ -536,9 +583,9 @@ impl EdenApi for EagerRepo {
         &self,
         heads: Vec<HgId>,
         common: Vec<HgId>,
-    ) -> Result<Vec<CommitGraphSegmentsEntry>, EdenApiError> {
+    ) -> Result<Vec<CommitGraphSegmentsEntry>, SaplingRemoteApiError> {
         ::fail::fail_point!("eagerepo::api::commitgraphsegments", |_| {
-            Err(EdenApiError::NotSupported)
+            Err(SaplingRemoteApiError::NotSupported)
         });
 
         debug!(
@@ -589,14 +636,14 @@ impl EdenApi for EagerRepo {
         to: Option<HgId>,
         from: Option<HgId>,
         _pushvars: HashMap<String, String>,
-    ) -> Result<SetBookmarkResponse, EdenApiError> {
+    ) -> Result<SetBookmarkResponse, SaplingRemoteApiError> {
         debug!("bookmarks {:?} -> {:?}", from, to);
         self.refresh_for_api();
 
         let mut bms = self.get_bookmarks_map().map_err(map_crate_err)?;
 
         if to.is_none() && from.is_none() {
-            return Err(EdenApiError::HttpError {
+            return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "must specify one of 'to' or 'from'".to_string(),
                 headers: Default::default(),
@@ -607,7 +654,7 @@ impl EdenApi for EagerRepo {
         if let Some(from) = from {
             match bms.get(&bookmark) {
                 None => {
-                    return Err(EdenApiError::HttpError {
+                    return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::NOT_FOUND,
                         message: format!("bookmark {bookmark} doesn't exist"),
                         headers: Default::default(),
@@ -616,7 +663,7 @@ impl EdenApi for EagerRepo {
                 }
                 Some(node) => {
                     if *node != from {
-                        return Err(EdenApiError::HttpError {
+                        return Err(SaplingRemoteApiError::HttpError {
                             status: StatusCode::BAD_REQUEST,
                             message: format!(
                                 "bookmark {bookmark}'s current value is {node}, not {from}"
@@ -628,7 +675,7 @@ impl EdenApi for EagerRepo {
                 }
             }
         } else if bms.contains_key(&bookmark) {
-            return Err(EdenApiError::HttpError {
+            return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: format!("bookmark {bookmark} already exists"),
                 headers: Default::default(),
@@ -652,17 +699,17 @@ impl EdenApi for EagerRepo {
     async fn hash_prefixes_lookup(
         &self,
         prefixes: Vec<String>,
-    ) -> Result<Vec<CommitHashLookupResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitHashLookupResponse>, SaplingRemoteApiError> {
         self.refresh_for_api();
         let dag = self.dag().await;
         prefixes
             .into_iter()
             .map(
-                move |prefix| -> Result<CommitHashLookupResponse, EdenApiError> {
+                move |prefix| -> Result<CommitHashLookupResponse, SaplingRemoteApiError> {
                     let req = make_hash_lookup_request(prefix.clone())?;
                     let resp =
                         non_blocking_result(dag.vertexes_by_hex_prefix(prefix.as_bytes(), 100))
-                            .map_err(|e| EdenApiError::Other(e.into()));
+                            .map_err(|e| SaplingRemoteApiError::Other(e.into()));
                     resp.and_then(|vertexes| {
                         Ok(CommitHashLookupResponse {
                             request: req,
@@ -683,7 +730,7 @@ impl EdenApi for EagerRepo {
     async fn commit_mutations(
         &self,
         mut commits: Vec<HgId>,
-    ) -> Result<Vec<CommitMutationsResponse>, EdenApiError> {
+    ) -> Result<Vec<CommitMutationsResponse>, SaplingRemoteApiError> {
         commits.sort();
         debug!("commit_mutations {}", debug_hgid_list(&commits));
         self.refresh_for_api();
@@ -725,7 +772,7 @@ impl EdenApi for EagerRepo {
         data: Vec<(AnyFileContentId, Bytes)>,
         bubble_id: Option<NonZeroU64>,
         copy_from_bubble_id: Option<NonZeroU64>,
-    ) -> Result<Response<UploadToken>, EdenApiError> {
+    ) -> Result<Response<UploadToken>, SaplingRemoteApiError> {
         debug!(?data, "process_files_upload");
 
         self.refresh_for_api();
@@ -764,7 +811,7 @@ impl EdenApi for EagerRepo {
     async fn upload_filenodes_batch(
         &self,
         items: Vec<HgFilenodeData>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         debug!(?items, "upload_filenodes_batch");
 
         self.refresh_for_api();
@@ -820,7 +867,7 @@ impl EdenApi for EagerRepo {
     async fn upload_trees_batch(
         &self,
         items: Vec<UploadTreeEntry>,
-    ) -> Result<Response<UploadTreeResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTreeResponse>, SaplingRemoteApiError> {
         debug!(?items, "upload_trees_batch");
 
         self.refresh_for_api();
@@ -845,7 +892,7 @@ impl EdenApi for EagerRepo {
             res.push(Ok(UploadTreeResponse {
                 token: UploadToken {
                     data: UploadTokenData {
-                        id: AnyId::HgFilenodeId(tree.node_id),
+                        id: AnyId::HgTreeId(tree.node_id),
                         bubble_id: None,
                         metadata: None,
                     },
@@ -863,12 +910,12 @@ impl EdenApi for EagerRepo {
         &self,
         changesets: Vec<UploadHgChangeset>,
         mutations: Vec<HgMutationEntryContent>,
-    ) -> Result<Response<UploadTokensResponse>, EdenApiError> {
+    ) -> Result<Response<UploadTokensResponse>, SaplingRemoteApiError> {
         debug!(?changesets, ?mutations, "upload_changesets");
         self.refresh_for_api();
 
         ::fail::fail_point!("eagerepo::api::uploadchangesets", |_| {
-            Err(EdenApiError::HttpError {
+            Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: "failpoint".to_string(),
                 headers: Default::default(),
@@ -930,7 +977,7 @@ impl EdenApi for EagerRepo {
             let mut mut_store = self.mut_store.lock().await;
             for m in mutations {
                 if let Err(err) = mut_store.add(&edenapi_mutation_to_local(m)) {
-                    return Err(EdenApiError::HttpError {
+                    return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         message: format!("error inserting mutation entry: {:?}", err),
                         headers: Default::default(),
@@ -950,7 +997,7 @@ impl EdenApi for EagerRepo {
         items: Vec<AnyId>,
         bubble_id: Option<NonZeroU64>,
         copy_from_bubble_id: Option<NonZeroU64>,
-    ) -> Result<Vec<LookupResponse>, EdenApiError> {
+    ) -> Result<Vec<LookupResponse>, SaplingRemoteApiError> {
         debug!(?items, "lookup_batch");
 
         self.refresh_for_api();
@@ -988,7 +1035,7 @@ impl EdenApi for EagerRepo {
                     });
                 }
                 Err(e) => {
-                    return Err(EdenApiError::HttpError {
+                    return Err(SaplingRemoteApiError::HttpError {
                         status: StatusCode::INTERNAL_SERVER_ERROR,
                         message: format!("{:?}", e),
                         headers: Default::default(),
@@ -999,6 +1046,136 @@ impl EdenApi for EagerRepo {
         }
 
         Ok(res)
+    }
+
+    async fn commit_translate_id(
+        &self,
+        commits: Vec<CommitId>,
+        scheme: CommitIdScheme,
+        from_repo: Option<String>,
+        to_repo: Option<String>,
+    ) -> Result<Response<CommitTranslateIdResponse>, SaplingRemoteApiError> {
+        debug!("files {commits:?} -> {scheme:?}");
+
+        if std::env::var_os("TESTTMP").is_none() {
+            return Err(SaplingRemoteApiError::NotSupported);
+        }
+
+        // Implement a dummy "Bonsai" translation for testing.
+
+        if from_repo.is_some() || to_repo.is_some() {
+            return Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::BAD_REQUEST,
+                message: "from_repo and to_repo not supported".to_string(),
+                headers: Default::default(),
+                url: self.url("commit_translate_id"),
+            });
+        }
+
+        if !matches!(scheme, CommitIdScheme::Hg | CommitIdScheme::Bonsai) {
+            return Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::BAD_REQUEST,
+                message: "only hg and bonsai supported".to_string(),
+                headers: Default::default(),
+                url: self.url("commit_translate_id"),
+            });
+        }
+
+        let mut res = Vec::new();
+        for commit in commits {
+            let translated = match &commit {
+                CommitId::Hg(hg) => {
+                    if scheme == CommitIdScheme::Hg {
+                        commit.clone()
+                    } else {
+                        let mut fake_bonsai = [0u8; 32];
+                        fake_bonsai[..20].copy_from_slice(hg.as_ref());
+                        CommitId::Bonsai(fake_bonsai.into())
+                    }
+                }
+                CommitId::Bonsai(bz) => {
+                    if scheme == CommitIdScheme::Hg {
+                        let mut hg = [0u8; 20];
+                        hg[..].copy_from_slice(&bz.as_ref()[..20]);
+                        CommitId::Hg(hg.into())
+                    } else {
+                        commit.clone()
+                    }
+                }
+                _ => {
+                    return Err(SaplingRemoteApiError::HttpError {
+                        status: StatusCode::BAD_REQUEST,
+                        message: "only hg and bonsai supported".to_string(),
+                        headers: Default::default(),
+                        url: self.url("commit_translate_id"),
+                    });
+                }
+            };
+
+            res.push(Ok(CommitTranslateIdResponse { commit, translated }));
+        }
+
+        Ok(convert_to_response(res))
+    }
+
+    async fn suffix_query(
+        &self,
+        commit: CommitId,
+        suffixes: Vec<String>,
+    ) -> Result<Response<SuffixQueryResponse>, SaplingRemoteApiError> {
+        debug!("suffix_query");
+        // TODO(T189729875) Make this react to commited files
+        //let files = self.files();
+        let _ = commit;
+        let mut res = vec![];
+        for suffix in suffixes {
+            match suffix.clone().as_str() {
+                ".cpp" => {
+                    let from_string = RepoPathBuf::from_string("ranier.cpp".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string("fuji/peak.cpp".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                }
+                ".dot" => {
+                    let from_string = RepoPathBuf::from_string("throw.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string(".more.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string(".stop.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string(".dps/very.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string =
+                        RepoPathBuf::from_string("slowly/.and.by.slow.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string("i/.mean/slow.dot".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                }
+                ".txt" => {
+                    let from_string = RepoPathBuf::from_string("foo.txt".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                    let from_string = RepoPathBuf::from_string("baz.txt".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                }
+                ".rs" => {
+                    let from_string = RepoPathBuf::from_string("bar.rs".to_string());
+                    let file_path = from_string.unwrap();
+                    res.push(Ok(SuffixQueryResponse { file_path }));
+                }
+                _ => {}
+            }
+        }
+        Ok(convert_to_response(res))
     }
 }
 
@@ -1090,21 +1267,33 @@ fn changeset_to_text(mut cs: HgChangesetContent) -> anyhow::Result<Vec<u8>> {
 impl EagerRepo {
     fn get_sha1_blob_for_api(&self, id: HgId, handler: &str) -> edenapi::Result<minibytes::Bytes> {
         // Emulate the HTTP errors.
+        match self.opt_sha1_blob_for_api(id, handler)? {
+            None => Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("{} cannot be found", id.to_hex()),
+                headers: Default::default(),
+                url: self.url(handler),
+            }),
+            Some(data) => Ok(data),
+        }
+    }
+
+    fn opt_sha1_blob_for_api(
+        &self,
+        id: HgId,
+        handler: &str,
+    ) -> edenapi::Result<Option<minibytes::Bytes>> {
+        // Emulate the HTTP errors.
         match self.get_sha1_blob(id) {
             Ok(None) => {
                 trace!(" not found: {}", id.to_hex());
-                Err(EdenApiError::HttpError {
-                    status: StatusCode::NOT_FOUND,
-                    message: format!("{} cannot be found", id.to_hex()),
-                    headers: Default::default(),
-                    url: self.url(handler),
-                })
+                Ok(None)
             }
             Ok(Some(data)) => {
                 trace!(" found: {}, {} bytes", id.to_hex(), data.len());
-                Ok(data)
+                Ok(Some(data))
             }
-            Err(e) => Err(EdenApiError::HttpError {
+            Err(e) => Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!("{:?}", e),
                 headers: Default::default(),
@@ -1122,7 +1311,7 @@ impl EagerRepo {
         let actual_id = match self.add_sha1_blob(blob.as_ref()) {
             Ok(actual_id) => actual_id,
             Err(e) => {
-                return Err(EdenApiError::HttpError {
+                return Err(SaplingRemoteApiError::HttpError {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
                     message: format!("{:?}", e),
                     headers: Default::default(),
@@ -1131,7 +1320,7 @@ impl EagerRepo {
             }
         };
         if id != actual_id {
-            return Err(EdenApiError::HttpError {
+            return Err(SaplingRemoteApiError::HttpError {
                 status: StatusCode::BAD_REQUEST,
                 message: "content hash mismatch".to_string(),
                 headers: Default::default(),
@@ -1142,18 +1331,61 @@ impl EagerRepo {
         Ok(())
     }
 
+    fn opt_augmented_tree_blob_with_digest_for_api(
+        &self,
+        id: HgId,
+        handler: &str,
+    ) -> edenapi::Result<Option<minibytes::Bytes>> {
+        // Emulate the HTTP errors.
+        match self.derive_augmented_tree_recursively(id) {
+            Ok(None) => {
+                trace!(" not found: {}", id.to_hex());
+                Ok(None)
+            }
+            Ok(Some(data)) => {
+                trace!(" found: {}, {} bytes", id.to_hex(), data.len());
+                Ok(Some(data))
+            }
+            Err(e) => Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!("{:?}", e),
+                headers: Default::default(),
+                url: self.url(handler),
+            }),
+        }
+    }
+
+    async fn get_augmented_tree_blob_with_digest_for_api(
+        &self,
+        id: HgId,
+        handler: &str,
+    ) -> edenapi::Result<minibytes::Bytes> {
+        // Emulate the HTTP errors.
+        match self.opt_augmented_tree_blob_with_digest_for_api(id, handler)? {
+            None => Err(SaplingRemoteApiError::HttpError {
+                status: StatusCode::NOT_FOUND,
+                message: format!("{} cannot be found", id.to_hex()),
+                headers: Default::default(),
+                url: self.url(handler),
+            }),
+            Some(data) => Ok(data),
+        }
+    }
+
     async fn flush_for_api(&self, handler: &str) -> edenapi::Result<()> {
-        self.flush().await.map_err(|err| EdenApiError::HttpError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("error flushing dag/store: {:?}", err),
-            headers: Default::default(),
-            url: self.url(handler),
-        })
+        self.flush()
+            .await
+            .map_err(|err| SaplingRemoteApiError::HttpError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!("error flushing dag/store: {:?}", err),
+                headers: Default::default(),
+                url: self.url(handler),
+            })
     }
 
     /// Not implement error.
-    fn not_implemented_error(&self, message: String, handler: &str) -> EdenApiError {
-        EdenApiError::HttpError {
+    fn not_implemented_error(&self, message: String, handler: &str) -> SaplingRemoteApiError {
+        SaplingRemoteApiError::HttpError {
             status: StatusCode::NOT_IMPLEMENTED,
             message,
             headers: Default::default(),
@@ -1182,22 +1414,24 @@ impl EagerRepo {
     }
 }
 
-/// Optionally build `EdenApi` from config.
+/// Optionally build `SaplingRemoteApi` from config.
 ///
-/// If the config does not specify eagerepo-based `EdenApi`, return `Ok(None)`.
-pub fn edenapi_from_config(config: &dyn Config) -> edenapi::Result<Option<Arc<dyn EdenApi>>> {
+/// If the config does not specify eagerepo-based `SaplingRemoteApi`, return `Ok(None)`.
+pub fn edenapi_from_config(
+    config: &dyn Config,
+) -> edenapi::Result<Option<Arc<dyn SaplingRemoteApi>>> {
     for (section, name) in [("paths", "default"), ("edenapi", "url")] {
         if let Ok(value) = config.get_or_default::<String>(section, name) {
             trace!(
                 target: "eagerepo::edenapi_from_config",
-                "attempt to create EagerRepo as EdenApi from config {}.{}={}",
+                "attempt to create EagerRepo as SaplingRemoteApi from config {}.{}={}",
                 section,
                 name,
                 &value
             );
             if let Some(path) = EagerRepo::url_to_dir(&value) {
-                let repo =
-                    EagerRepo::open(&path).map_err(|e| edenapi::EdenApiError::Other(e.into()))?;
+                let repo = EagerRepo::open(&path)
+                    .map_err(|e| edenapi::SaplingRemoteApiError::Other(e.into()))?;
                 return Ok(Some(Arc::new(repo)));
             }
         }
@@ -1263,7 +1497,7 @@ fn convert_to_response<T: Send + Sync + 'static>(values: Vec<edenapi::Result<T>>
 
 fn check_convert_to_hgid<'a>(vertexes: impl Iterator<Item = &'a Vertex>) -> edenapi::Result<()> {
     for v in vertexes {
-        let _ = HgId::from_slice(v.as_ref()).map_err(|e| EdenApiError::Other(e.into()))?;
+        let _ = HgId::from_slice(v.as_ref()).map_err(|e| SaplingRemoteApiError::Other(e.into()))?;
     }
     Ok(())
 }
@@ -1287,12 +1521,12 @@ fn convert_clone_data(
     Ok(clone_data)
 }
 
-fn map_dag_err(e: dag::Error) -> EdenApiError {
-    EdenApiError::Other(e.into())
+fn map_dag_err(e: dag::Error) -> SaplingRemoteApiError {
+    SaplingRemoteApiError::Other(e.into())
 }
 
-fn map_crate_err(e: crate::Error) -> EdenApiError {
-    EdenApiError::Other(e.into())
+fn map_crate_err(e: crate::Error) -> SaplingRemoteApiError {
+    SaplingRemoteApiError::Other(e.into())
 }
 
 fn debug_key_list(keys: &[Key]) -> String {

@@ -25,6 +25,8 @@ use metaconfig_types::CrossRepoCommitValidation;
 use metaconfig_types::DerivedDataConfig;
 use metaconfig_types::DerivedDataTypesConfig;
 use metaconfig_types::GitConcurrencyParams;
+use metaconfig_types::GitDeltaManifestV2Config;
+use metaconfig_types::GitDeltaManifestVersion;
 use metaconfig_types::GlobalrevConfig;
 use metaconfig_types::HgSyncConfig;
 use metaconfig_types::HookBypass;
@@ -54,6 +56,7 @@ use metaconfig_types::UpdateLoggingConfig;
 use metaconfig_types::WalkerConfig;
 use metaconfig_types::WalkerJobParams;
 use metaconfig_types::WalkerJobType;
+use metaconfig_types::ZelosConfig;
 use mononoke_types::path::MPath;
 use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
@@ -69,6 +72,7 @@ use repos::RawCrossRepoCommitValidationConfig;
 use repos::RawDerivedDataConfig;
 use repos::RawDerivedDataTypesConfig;
 use repos::RawGitConcurrencyParams;
+use repos::RawGitDeltaManifestV2Config;
 use repos::RawHgSyncConfig;
 use repos::RawHookConfig;
 use repos::RawHookManagerParams;
@@ -94,6 +98,7 @@ use repos::RawUpdateLoggingConfig;
 use repos::RawWalkerConfig;
 use repos::RawWalkerJobParams;
 use repos::RawWalkerJobType;
+use repos::RawZelosConfig;
 
 use crate::convert::Convert;
 use crate::errors::ConfigurationError;
@@ -155,6 +160,7 @@ impl Convert for RawHookConfig {
         let config = HookConfig {
             bypass,
             options: self.config_json,
+            log_only: self.log_only.unwrap_or_default(),
             strings: self.config_strings.unwrap_or_default(),
             ints: self.config_ints.unwrap_or_default(),
             ints_64: self.config_ints_64.unwrap_or_default(),
@@ -481,6 +487,16 @@ impl Convert for RawDerivedDataTypesConfig {
             Some(2) => BlameVersion::V2,
             Some(version) => return Err(anyhow!("unknown blame version {}", version)),
         };
+        let git_delta_manifest_version = match self.git_delta_manifest_version {
+            None => GitDeltaManifestVersion::default(),
+            Some(1) => GitDeltaManifestVersion::V1,
+            Some(2) => GitDeltaManifestVersion::V2,
+            Some(version) => return Err(anyhow!("unknown git delta manifest version {}", version)),
+        };
+        let git_delta_manifest_v2_config = self
+            .git_delta_manifest_v2_config
+            .map(|raw| raw.convert())
+            .transpose()?;
         Ok(DerivedDataTypesConfig {
             types,
             mapping_key_prefixes,
@@ -488,6 +504,20 @@ impl Convert for RawDerivedDataTypesConfig {
             blame_filesize_limit,
             hg_set_committer_extra: self.hg_set_committer_extra.unwrap_or(false),
             blame_version,
+            git_delta_manifest_version,
+            git_delta_manifest_v2_config,
+        })
+    }
+}
+
+impl Convert for RawGitDeltaManifestV2Config {
+    type Output = GitDeltaManifestV2Config;
+
+    fn convert(self) -> Result<Self::Output> {
+        Ok(GitDeltaManifestV2Config {
+            max_inlined_object_size: self.max_inlined_object_size as usize,
+            max_inlined_delta_size: self.max_inlined_delta_size as u64,
+            delta_chunk_size: self.delta_chunk_size as u64,
         })
     }
 }
@@ -733,6 +763,8 @@ impl Convert for RawCommitGraphConfig {
         Ok(CommitGraphConfig {
             scuba_table: self.scuba_table,
             preloaded_commit_graph_blobstore_key: self.preloaded_commit_graph_blobstore_key,
+            disable_commit_graph_v2_with_empty_common: self
+                .disable_commit_graph_v2_with_empty_common,
         })
     }
 }
@@ -747,7 +779,22 @@ impl Convert for RawMetadataLoggerConfig {
                 .into_iter()
                 .map(BookmarkKey::new)
                 .collect::<Result<_>>()?,
+            sleep_interval_secs: self.sleep_interval_secs.try_into()?,
         })
+    }
+}
+
+impl Convert for RawZelosConfig {
+    type Output = ZelosConfig;
+
+    fn convert(self) -> Result<Self::Output> {
+        match self {
+            Self::local_zelos_port(port) => Ok(ZelosConfig::Local {
+                port: port.try_into()?,
+            }),
+            Self::zelos_tier(tier) => Ok(ZelosConfig::Remote { tier }),
+            Self::UnknownField(f) => Err(anyhow!("Unknown variant {} of RawZelosConfig", f)),
+        }
     }
 }
 
@@ -756,7 +803,7 @@ impl Convert for RawShardedService {
 
     fn convert(self) -> Result<Self::Output> {
         let service = match self {
-            RawShardedService::EDEN_API => ShardedService::EdenApi,
+            RawShardedService::EDEN_API => ShardedService::SaplingRemoteApi,
             RawShardedService::SOURCE_CONTROL_SERVICE => ShardedService::SourceControlService,
             RawShardedService::DERIVED_DATA_SERVICE => ShardedService::DerivedDataService,
             RawShardedService::LAND_SERVICE => ShardedService::LandService,
@@ -771,6 +818,7 @@ impl Convert for RawShardedService {
             RawShardedService::ALIAS_VERIFY => ShardedService::AliasVerify,
             RawShardedService::DRAFT_COMMIT_DELETION => ShardedService::DraftCommitDeletion,
             RawShardedService::MONONOKE_GIT_SERVER => ShardedService::MononokeGitServer,
+            RawShardedService::REPO_METADATA_LOGGER => ShardedService::RepoMetadataLogger,
             v => return Err(anyhow!("Invalid value {} for enum ShardedService", v)),
         };
         Ok(service)

@@ -73,26 +73,38 @@ To mark files as resolved:  @prog@ resolve --mark FILE"""
     ui.warn(prefixlines(msg))
 
 
-def helpmessage(ui, continuecmd, abortcmd):
-    msg = _("To continue:                %s\n" "To abort:                   %s") % (
-        continuecmd,
-        abortcmd,
-    )
+def helpmessage(ui, continuecmd, abortcmd, quitcmd=None):
+    items = [
+        _("To continue:                %s") % continuecmd,
+        _("To abort:                   %s") % abortcmd,
+        _("To quit:                    %s") % quitcmd if quitcmd else None,
+    ]
+    msg = "\n".join(filter(None, items))
     ui.warn(prefixlines(msg))
 
 
 def rebasemsg(repo, ui):
-    helpmessage(ui, _("@prog@ rebase --continue"), _("@prog@ rebase --abort"))
+    helpmessage(
+        ui,
+        _("@prog@ rebase --continue"),
+        _("@prog@ rebase --abort"),
+        _("@prog@ rebase --quit"),
+    )
     dstnode, srcnode = repo.dirstate.parents()
     if srcnode != nodeutil.nullid:
         src = repo[srcnode]
         dst = repo[dstnode]
-        msg = _("\nRebasing from %s (%s)\n           to %s (%s)") % (
-            src,
-            src.shortdescription(),
-            dst,
-            dst.shortdescription(),
+
+        # fmt: off
+        msg = _(
+            "\n"
+            "Rebasing %s (%s)\n"
+            "      to %s (%s)"
+        ) % (
+            src, src.shortdescription(),
+            dst, dst.shortdescription(),
         )
+        # fmt: on
         ui.write_err(prefixlines(msg))
 
 
@@ -130,6 +142,10 @@ def updatemergemsg(repo, ui):
 def mergemsg(repo, ui):
     # tweakdefaults requires `update` to have a rev hence the `.`
     helpmessage(ui, _("@prog@ commit"), updatecleanmsg())
+
+
+def mergestate2msg(repo, ui):
+    helpmessage(ui, _("@prog@ continue, then @prog@ commit"), updatecleanmsg())
 
 
 def bisectmsg(repo, ui):
@@ -208,7 +224,7 @@ STATES = (
     # Sometimes you end up in a merge state when update completes, because you
     # ran `hg update --merge`. We should inform you that you can still use the
     # full suite of resolve tools to deal with conflicts in this state.
-    ("merge", fileexistspredicate("merge/state2"), None),
+    ("merge", fileexistspredicate("merge/state2"), mergestate2msg),
     # If there were no conflicts, you may still be in an interrupted update
     # state. Ideally, we should expand this update state to include the merge
     # updates mentioned above, so there's a way to "continue" and finish the

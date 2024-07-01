@@ -1,3 +1,4 @@
+#debugruntest-incompatible
 FIXME(debugruntest) - "devel.print-metrics" stderr not working
 #chg-compatible
 
@@ -5,8 +6,6 @@ FIXME(debugruntest) - "devel.print-metrics" stderr not working
 
   $ newrepo server
   $ drawdag <<EOS
-  > C
-  > |
   > B
   > |
   > A
@@ -15,7 +14,7 @@ FIXME(debugruntest) - "devel.print-metrics" stderr not working
   $ newclientrepo client test:server
 
 First, sanity that we don't have any data locally:
-  $ hg debugscmstore -r $A A --fetch-mode=local_only --mode=file
+  $ hg debugscmstore -r $A A --fetch-mode=LOCAL --mode=file
   abort: unknown revision '426bada5c67598ca65036d57d9e4b64b0c1ce7a0'
   [255]
 
@@ -28,10 +27,6 @@ Prefetch (and also check we get counters):
   scmstore.file.fetch.aux.cache.misses: 1
   scmstore.file.fetch.aux.cache.requests: 1
   scmstore.file.fetch.aux.cache.time: * (glob) (?)
-  scmstore.file.fetch.aux.local.keys: 1
-  scmstore.file.fetch.aux.local.misses: 1
-  scmstore.file.fetch.aux.local.requests: 1
-  scmstore.file.fetch.aux.local.time: * (glob) (?)
   scmstore.file.fetch.edenapi.hits: 1
   scmstore.file.fetch.edenapi.keys: 1
   scmstore.file.fetch.edenapi.requests: 1
@@ -57,7 +52,7 @@ Prefetch (and also check we get counters):
   scmstore.tree.fetch.indexedlog.local.time: * (glob) (?)
 
 Now we do have aux data locally:
-  $ hg debugscmstore -r $A A --fetch-mode=local_only --mode=file
+  $ hg debugscmstore -r $A A --fetch-mode=LOCAL --mode=file
   Successfully fetched file: StoreFile {
       content: Some(
           IndexedLog(
@@ -82,12 +77,9 @@ Now we do have aux data locally:
       aux_data: Some(
           FileAuxData {
               total_size: 1,
-              content_id: ContentId("eb56488e97bb4cf5eb17f05357b80108a4a71f6c3bab52dfcaec07161d105ec9"),
               sha1: Sha1("6dcd4ce23d88e2ee9568ba546c007c63d9131c1b"),
-              sha256: Sha256("559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd"),
-              seeded_blake3: Some(
-                  Blake3("5ad3ba58a716e5fc04296ac9af7a1420f726b401fdf16d270beb5b6b30bc0cda"),
-              ),
+              blake3: Blake3("5ad3ba58a716e5fc04296ac9af7a1420f726b401fdf16d270beb5b6b30bc0cda"),
+              file_header_metadata: None,
           },
       ),
   }
@@ -98,7 +90,7 @@ Fetch only content first:
   B (no-eol)
 
 Make sure we don't have aux data yet:
-  $ hg debugscmstore -r $B B --fetch-mode=local_only --mode=file --config scmstore.compute-aux-data=false
+  $ hg debugscmstore -r $B B --fetch-mode=LOCAL --mode=file --config scmstore.compute-aux-data=false
   Successfully fetched file: StoreFile {
       content: Some(
           IndexedLog(
@@ -130,12 +122,9 @@ Fetching only aux data does not trigger a remote query:
       aux_data: Some(
           FileAuxData {
               total_size: 1,
-              content_id: ContentId("55662471e2a28db8257939b2f9a2d24e65b46a758bac12914a58f17dcde6905f"),
               sha1: Sha1("ae4f281df5a5d0ff3cad6371f76d5c29b6d953ec"),
-              sha256: Sha256("df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c"),
-              seeded_blake3: Some(
-                  Blake3("5667f2421ac250c4bb9af657b5ead3cdbd940bfbc350b2bfee47454643832b48"),
-              ),
+              blake3: Blake3("5667f2421ac250c4bb9af657b5ead3cdbd940bfbc350b2bfee47454643832b48"),
+              file_header_metadata: None,
           },
       ),
   }
@@ -144,35 +133,3 @@ Fetching only aux data does not trigger a remote query:
   scmstore.file.fetch.aux.cache.misses: 1
   scmstore.file.fetch.aux.cache.requests: 1
   scmstore.file.fetch.aux.cache.time: * (glob) (?)
-  scmstore.file.fetch.aux.local.keys: 1
-  scmstore.file.fetch.aux.local.misses: 1
-  scmstore.file.fetch.aux.local.requests: 1
-  scmstore.file.fetch.aux.local.time: * (glob) (?)
-
-
-
-Fetch only content first:
-  $ hg cat -q -r $C C
-  C (no-eol)
-
-Make sure we don't have aux data yet:
-  $ hg debugscmstore -r $C C --fetch-mode=local_only --mode=file --config scmstore.compute-aux-data=false | grep aux_data
-      aux_data: None,
-
-Prefetch fills in aux data without a remote query:
-  $ LOG=eagerepo::api=debug hg prefetch -r $C C
-  $ LOG=eagerepo::api=debug hg debugscmstore -r $C C --aux-only --mode=file --config scmstore.compute-aux-data=false
-  Successfully fetched file: StoreFile {
-      content: None,
-      aux_data: Some(
-          FileAuxData {
-              total_size: 1,
-              content_id: ContentId("896ad5879a5df0403bfc93fc96507ad9c93b31b11f3d0fa05445da7918241e5d"),
-              sha1: Sha1("32096c2e0eff33d844ee6d675407ace18289357d"),
-              sha256: Sha256("6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d"),
-              seeded_blake3: Some(
-                  Blake3("6fb4c384e79ac0771a483fcf3c46fb4ea8609f79608e8bcbf710f9887a3b9cf6"),
-              ),
-          },
-      ),
-  }

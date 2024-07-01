@@ -50,8 +50,13 @@ impl AsyncNameSetQuery for StaticSet {
         Ok(Box::pin(futures::stream::iter(iter)))
     }
 
-    async fn count(&self) -> Result<usize> {
-        Ok(self.0.len())
+    async fn count(&self) -> Result<u64> {
+        Ok(self.0.len().try_into()?)
+    }
+
+    async fn size_hint(&self) -> (u64, Option<u64>) {
+        let size = self.0.len() as u64;
+        (size, Some(size))
     }
 
     async fn is_empty(&self) -> Result<bool> {
@@ -120,6 +125,7 @@ mod tests {
         assert_eq!(nb(set.count())?, 5);
         assert_eq!(shorten_name(nb(set.first())?.unwrap()), "11");
         assert_eq!(shorten_name(nb(set.last())?.unwrap()), "55");
+        assert_eq!(nb(set.size_hint()), (5, Some(5)));
         Ok(())
     }
 
@@ -153,7 +159,7 @@ mod tests {
             let set = static_set(&a);
             check_invariants(&set).unwrap();
 
-            let count = nb(set.count()).unwrap();
+            let count = nb(set.count()).unwrap() as usize;
             assert!(count <= a.len());
 
             let set2: HashSet<_> = a.iter().cloned().collect();

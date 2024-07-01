@@ -14,6 +14,7 @@ use hooks::PushAuthoredBy;
 use mononoke_api::ChangesetSpecifier;
 use mononoke_api::MononokeError;
 use pushrebase::PushrebaseConflict;
+use repo_identity::RepoIdentityRef;
 use service::RepoLandStackExn;
 use source_control as thrift;
 use source_control_services::errors::source_control_service as service;
@@ -28,7 +29,7 @@ use crate::from_request::FromRequest;
 use crate::into_response::AsyncIntoResponseWith;
 use crate::source_control_impl::SourceControlServiceImpl;
 
-enum LandStackError {
+pub(crate) enum LandStackError {
     Service(errors::ServiceError),
     PushrebaseConflicts(Vec<PushrebaseConflict>),
     HookRejections(Vec<HookRejection>),
@@ -130,7 +131,7 @@ impl LoggableError for LandStackError {
 }
 
 impl SourceControlServiceImpl {
-    async fn impl_repo_land_stack(
+    pub(crate) async fn repo_land_stack(
         &self,
         ctx: CoreContext,
         repo: thrift::RepoSpecifier,
@@ -158,6 +159,13 @@ impl SourceControlServiceImpl {
         let pushvars = convert_pushvars(params.pushvars);
         let bookmark_restrictions =
             BookmarkKindRestrictions::from_request(&params.bookmark_restrictions)?;
+        // default to true since scs_server has a permission issue to use land_service for now
+        let force_local_pushrebase = justknobs::eval(
+            "scm/mononoke:scs_force_local_pushrebase",
+            None,
+            Some(repo.inner_repo().repo_identity().name()),
+        )
+        .unwrap_or(true);
 
         let pushrebase_outcome = repo
             .land_stack(
@@ -167,6 +175,7 @@ impl SourceControlServiceImpl {
                 pushvars.as_ref(),
                 bookmark_restrictions,
                 push_authored_by,
+                force_local_pushrebase,
             )
             .await?
             .into_response_with(&(
@@ -180,15 +189,5 @@ impl SourceControlServiceImpl {
             pushrebase_outcome,
             ..Default::default()
         })
-    }
-
-    pub(crate) async fn repo_land_stack(
-        &self,
-        ctx: CoreContext,
-        repo: thrift::RepoSpecifier,
-        params: thrift::RepoLandStackParams,
-    ) -> Result<thrift::RepoLandStackResponse, impl Into<service::RepoLandStackExn> + LoggableError>
-    {
-        self.impl_repo_land_stack(ctx, repo, params).await
     }
 }

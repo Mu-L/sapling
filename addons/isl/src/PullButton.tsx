@@ -10,13 +10,13 @@ import type {Operation} from './operations/Operation';
 import {fetchStableLocations} from './BookmarksData';
 import {Internal} from './Internal';
 import {DOCUMENTATION_DELAY, Tooltip} from './Tooltip';
-import {VSCodeButtonDropdown} from './VSCodeButtonDropdown';
+import {Button} from './components/Button';
+import {ButtonDropdown} from './components/ButtonDropdown';
 import {t, T} from './i18n';
 import {configBackedAtom} from './jotaiUtils';
 import {PullOperation} from './operations/PullOperation';
 import {useRunOperation} from './operationsState';
 import {uncommittedChangesWithPreviews, useMostRecentPendingOperation} from './previews';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
 import {useAtom, useAtomValue} from 'jotai';
 import {Icon} from 'shared/Icon';
 
@@ -77,8 +77,7 @@ export function PullButton() {
     <Tooltip placement="bottom" delayMs={DOCUMENTATION_DELAY} title={tooltip}>
       <div className="pull-info">
         {pullButtonOptions.length > 1 ? (
-          <VSCodeButtonDropdown
-            appearance="secondary"
+          <ButtonDropdown
             buttonDisabled={!!isRunningPull || disabledFromUncommittedChanges}
             options={pullButtonOptions}
             onClick={() => {
@@ -90,8 +89,7 @@ export function PullButton() {
             icon={<Icon slot="start" icon={isRunningPull ? 'loading' : 'repo'} />}
           />
         ) : (
-          <VSCodeButton
-            appearance="secondary"
+          <Button
             disabled={!!isRunningPull}
             onClick={() => {
               runOperation(new PullOperation());
@@ -99,7 +97,7 @@ export function PullButton() {
             }}>
             <Icon slot="start" icon={isRunningPull ? 'loading' : 'cloud-download'} />
             <T>Pull</T>
-          </VSCodeButton>
+          </Button>
         )}
       </div>
     </Tooltip>

@@ -54,13 +54,17 @@ from facebook.eden.ttypes import (
     DebugGetBlobMetadataRequest,
     DebugGetRawJournalParams,
     DebugGetScmBlobRequest,
+    DebugGetScmTreeRequest,
+    DebugInvalidateRequest,
     DebugJournalDelta,
     EdenError,
     MountId,
-    NoValueForKeyError,
     ScmBlobMetadata,
     ScmBlobOrError,
     ScmBlobWithOrigin,
+    ScmTreeEntry,
+    ScmTreeOrError,
+    ScmTreeWithOrigin,
     SyncBehavior,
     TimeSpec,
     TreeInodeDebugInfo,
@@ -231,44 +235,52 @@ class ParentsCmd(Subcmd):
         return 0
 
 
-@debug_cmd("tree", "Show EdenFS's data for a source control tree")
+@debug_cmd(
+    "tree",
+    "Show EdenFS's data for a source control tree. Fetches from ObjectStore "
+    "by default: use options to inspect different origins.",
+)
 class TreeCmd(Subcmd):
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(
-            "-L",
-            "--load",
-            action=BooleanOptionalAction,
-            default=True,
-            help="Load data from the backing store if necessary",
-        )
+        add_get_object_options(parser, "tree")
         parser.add_argument("mount", help="The EdenFS mount point path.")
         parser.add_argument("id", help="The tree ID")
+
+    def print_all_trees(self, trees: List[ScmTreeWithOrigin]) -> None:
+        print_all_objects(
+            trees,
+            "tree",
+            lambda tree: tree.scmTreeData.getType() != ScmTreeOrError.TREEENTRIES,
+            lambda trees: trees[0].scmTreeData.get_treeEntries()
+            == trees[1].scmTreeData.get_treeEntries(),
+            lambda tree: print_tree(tree.scmTreeData.get_treeEntries()),
+        )
+
+    def print_tree_or_error(self, treeOrError: ScmTreeOrError) -> None:
+        if treeOrError.getType() == ScmTreeOrError.TREEENTRIES:
+            print_tree(treeOrError.get_treeEntries())
+        else:
+            error = treeOrError.get_error()
+            sys.stdout.buffer.write(f"ERROR fetching data: {error}\n".encode())
 
     def run(self, args: argparse.Namespace) -> int:
         instance, checkout, _rel_path = cmd_util.require_checkout(args, args.mount)
         tree_id = parse_object_id(args.id)
 
-        local_only = not args.load
-        with instance.get_thrift_client_legacy() as client:
-            entries = client.debugGetScmTree(
-                bytes(checkout.path), tree_id, localStoreOnly=local_only
-            )
+        origin_flags = get_origin_flags(args)
 
-        max_object_id_len = max(
-            (len(object_id_str(entry.id)) for entry in entries), default=0
-        )
-        for entry in entries:
-            file_type_flags, perms = _parse_mode(entry.mode)
-            print(
-                "{} {:4o} {:<{}} {}".format(
-                    file_type_flags,
-                    perms,
-                    object_id_str(entry.id),
-                    max_object_id_len,
-                    escape_path(entry.name),
+        with instance.get_thrift_client_legacy() as client:
+            resp = client.debugGetTree(
+                DebugGetScmTreeRequest(
+                    MountId(bytes(checkout.path)),
+                    tree_id,
+                    origin_flags,
                 )
             )
-
+            if args.all:
+                self.print_all_trees(resp.trees)
+            else:
+                self.print_tree_or_error(resp.trees[0].scmTreeData)
         return 0
 
 
@@ -446,6 +458,23 @@ def origin_to_text(origin: DataFetchOrigin) -> str:
 
 def print_blob(blob: bytes) -> None:
     sys.stdout.buffer.write(blob)
+
+
+def print_tree(treeEntries: List[ScmTreeEntry]) -> None:
+    max_object_id_len = max(
+        (len(object_id_str(entry.id)) for entry in treeEntries), default=0
+    )
+    for entry in treeEntries:
+        file_type_flags, perms = _parse_mode(entry.mode)
+        print(
+            "{} {:4o} {:<{}} {}".format(
+                file_type_flags,
+                perms,
+                object_id_str(entry.id),
+                max_object_id_len,
+                escape_path(entry.name),
+            )
+        )
 
 
 def print_blob_metadata(id: str, metadata: ScmBlobMetadata) -> None:
@@ -1867,6 +1896,55 @@ class DropRequestsCmd(Subcmd):
             num_dropped = client.debugDropAllPendingRequests()
             print(f"Dropped {num_dropped} source control fetch requests")
             return 0
+
+
+@debug_cmd(
+    "gc-inodes",
+    "Invalidate not recently used files and directories (non-materialized inodes)",
+)
+class GCInodesCmd(Subcmd):
+    def setup_parser(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--mount", help="The EdenFS mount point path.", default=None
+        )
+        parser.add_argument(
+            "--path",
+            help="Relative path in the repo to recursively invalidate",
+            default="",
+        )
+        parser.add_argument(
+            "--background",
+            action="store_true",
+            help="Run invalidation in the background",
+        )
+
+    def run(self, args: argparse.Namespace) -> int:
+        instance, checkout, _rel_path = cmd_util.require_checkout(args, args.mount)
+        # non-zero age is only supported on Windows
+        if sys.platform == "win32":
+            # On Windows, the atime is updated only once an hour,
+            # so values below 1h may over-invalidate. This is also the
+            # value used in `eden doctor`
+            seconds = 3600
+        else:
+            seconds = 0
+        with instance.get_thrift_client_legacy() as client:
+            try:
+                result = client.debugInvalidateNonMaterialized(
+                    DebugInvalidateRequest(
+                        mount=MountId(mountPoint=os.fsencode(checkout.path)),
+                        path=os.fsencode(args.path),
+                        background=args.background,
+                        age=TimeSpec(seconds=seconds),
+                    )
+                )
+                print(
+                    f"Invalidated {result.numInvalidated} inodes under {checkout.path}/{args.path}"
+                )
+                return 0
+            except EdenError as err:
+                print(err, file=sys.stderr)
+                return 1
 
 
 @subcmd_mod.subcmd("debug", "Internal commands for examining EdenFS state")

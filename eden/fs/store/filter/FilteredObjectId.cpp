@@ -280,8 +280,11 @@ FilteredObjectId FilteredObjectId::parseFilteredObjectId(
     std::shared_ptr<BackingStore> underlyingBackingStore) {
   // Parse the foid type and convert it to an int. This also asserts that the
   // rendered object we're parsing
-  auto foidTypeEndIdx = object.find(":");
-  XCHECK_NE(foidTypeEndIdx, string::npos);
+  auto foidTypeEndIdx = object.find(':');
+  if (foidTypeEndIdx == string::npos) {
+    throwf<std::invalid_argument>(
+        "Cannot parse invalid FilteredObjectId: {}", object);
+  }
   auto typeInt = folly::to<decltype(FilteredObjectIdType::OBJECT_TYPE_BLOB)>(
       object.substr(0, foidTypeEndIdx));
   auto foidType = static_cast<FilteredObjectIdType>(typeInt);
@@ -298,12 +301,12 @@ FilteredObjectId FilteredObjectId::parseFilteredObjectId(
   }
 
   // Guards against future additions to FilteredObjectIdType
-  XCHECK_EQ(foidType, FilteredObjectIdType::OBJECT_TYPE_TREE);
+  XDCHECK_EQ(foidType, FilteredObjectIdType::OBJECT_TYPE_TREE);
 
   // Tree objects have filter and path information we must extract. We first
   // extract the filter length from the string.
   auto filterLenStartIdx = foidTypeEndIdx + 1;
-  auto filterLenEndIdx = object.find(":", filterLenStartIdx);
+  auto filterLenEndIdx = object.find(':', filterLenStartIdx);
   XCHECK_NE(filterLenEndIdx, string::npos);
   auto filterLength =
       folly::to<size_t>(object.substr(filterLenStartIdx, filterLenEndIdx));
@@ -315,7 +318,7 @@ FilteredObjectId FilteredObjectId::parseFilteredObjectId(
   auto filter = object.substr(filterStartIdx, filterEndIdx);
 
   // We now have enough info to determine the path length and extract it.
-  auto pathLenEndIdx = object.find(":", filterEndIdx);
+  auto pathLenEndIdx = object.find(':', filterEndIdx);
   XCHECK_NE(pathLenEndIdx, string::npos);
   auto pathLength =
       folly::to<size_t>(object.substr(filterEndIdx, pathLenEndIdx));

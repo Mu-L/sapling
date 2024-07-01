@@ -42,6 +42,7 @@ use mononoke_api::BookmarkKey;
 use mononoke_api::ChangesetContext;
 use mononoke_api::CoreContext;
 use mononoke_api::MononokeError;
+use mononoke_api::Repo;
 use mononoke_api::RepoContext;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
@@ -61,6 +62,7 @@ use sql::rusqlite::Connection as SqliteConnection;
 use test_repo_factory::TestRepoFactory;
 use tokio::task;
 use unodes::RootUnodeManifestId;
+use warm_bookmarks_cache::NoopBookmarksCache;
 
 pub use crate::git_repo::create_git_repo_on_disk;
 use crate::logging::run_and_log_stats_to_scuba;
@@ -216,6 +218,7 @@ pub async fn rewrite_partial_changesets(
                             vec![new_bcs],
                             source_repo_ctx.repo(),
                             temp_repo_ctx.repo(),
+                            Vec::<(Arc<Repo>, HashSet<_>)>::new(),
                         ),
                     )
                     .await?;
@@ -255,7 +258,12 @@ pub async fn rewrite_partial_changesets(
 
     // Set master bookmark to point to the latest changeset
     temp_repo_ctx
-        .create_bookmark(&BookmarkKey::from_str(MASTER_BOOKMARK)?, head_cs_id, None)
+        .create_bookmark(
+            &BookmarkKey::from_str(MASTER_BOOKMARK)?,
+            head_cs_id,
+            None,
+            None,
+        )
         .await
         .with_context(|| "Failed to create master bookmark")?;
 
@@ -386,6 +394,7 @@ async fn create_bonsai_for_new_repo<'a>(
                             exp_p,
                             copy_from_cs_id
                         );
+                        warn!(logger, "pre move/copy path: {}", old_path);
                     }
 
                     *tracked_fc = tracked_fc.with_new_copy_from(None);
@@ -541,8 +550,8 @@ async fn create_temp_repo(fb: FacebookInit, ctx: &CoreContext) -> Result<RepoCon
         "default".to_string() => derived_data_types_config.clone(),
         "backfilling".to_string() => derived_data_types_config
     };
-
-    let temp_repo = TestRepoFactory::with_sqlite_connection(fb, metadata_conn, hg_mutation_conn)?
+    let mut factory = TestRepoFactory::with_sqlite_connection(fb, metadata_conn, hg_mutation_conn)?;
+    factory
         .with_blobstore(file_blobstore)
         .with_core_context_that_does_not_override_logger(ctx.clone())
         .with_name(temp_repo_name)
@@ -552,9 +561,12 @@ async fn create_temp_repo(fb: FacebookInit, ctx: &CoreContext) -> Result<RepoCon
             // If this isn't disabled the master bookmark creation will fail
             // because skeleton manifests derivation is disabled.
             cfg.pushrebase.flags.casefolding_check = false;
-        })
-        .build()
-        .await?;
+        });
+    let bookmarks =
+        factory.bookmarks(&factory.sql_bookmarks(&factory.repo_identity(&factory.repo_config()))?);
+    factory.with_bookmarks_cache(Arc::new(NoopBookmarksCache::new(bookmarks)));
+
+    let temp_repo = factory.build().await?;
     let temp_repo_ctx = RepoContext::new_test(ctx.clone(), temp_repo).await?;
 
     Ok(temp_repo_ctx)

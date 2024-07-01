@@ -102,13 +102,13 @@ class RequestContext {
   template <typename T>
   void startRequest(
       EdenStatsPtr stats,
-      StatsGroupBase::Duration T::*stat,
+      StatsGroupBase::Duration T::*duration,
       std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>
           requestWatches) {
     return startRequest(
         std::move(stats),
-        [stat](EdenStats& stats) -> StatsGroupBase::Duration& {
-          return stats.getStatsForCurrentThread<T>().*stat;
+        [duration](EdenStats& stats) -> StatsGroupBase::Duration& {
+          return stats.getStatsForCurrentThread<T>().*duration;
         },
         std::move(requestWatches));
   }
@@ -133,7 +133,7 @@ class RequestContext {
 
   void startRequest(
       EdenStatsPtr stats,
-      DurationFn stat,
+      DurationFn durationFn,
       std::shared_ptr<RequestMetricsScope::LockedRequestWatchList>
           requestWatches);
 

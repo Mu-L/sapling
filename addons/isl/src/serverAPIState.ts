@@ -203,6 +203,8 @@ registerCleanup(
   }),
 );
 
+export const inMergeConflicts = atom(get => get(mergeConflicts) != undefined);
+
 export const latestCommitsData = atom<{
   fetchStartTimestamp: number;
   fetchCompletedTimestamp: number;
@@ -283,6 +285,13 @@ export const hasExperimentalFeatures = configBackedAtom<boolean | null>(
   'isl.experimental-features',
   false,
   true /* read-only */,
+);
+
+export const authorString = configBackedAtom<string | null>(
+  'ui.username',
+  null,
+  true /* read-only */,
+  true /* use raw value */,
 );
 
 export const isFetchingCommits = atom(false);

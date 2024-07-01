@@ -9,11 +9,11 @@
 
 #include <folly/FileUtil.h>
 #include <folly/executors/ManualExecutor.h>
-#include <folly/experimental/TestUtil.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+#include <folly/testing/TestUtil.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -23,6 +23,7 @@
 #include "eden/common/utils/Guid.h"
 #include "eden/common/utils/ProcessInfoCache.h"
 #include "eden/common/utils/UnboundedQueueExecutor.h"
+#include "eden/common/utils/UserInfo.h"
 #include "eden/fs/config/CheckoutConfig.h"
 #include "eden/fs/config/EdenConfig.h"
 #include "eden/fs/inodes/EdenDispatcherFactory.h"
@@ -53,7 +54,6 @@
 #include "eden/fs/testharness/TestConfigSource.h"
 #include "eden/fs/testharness/TestUtil.h"
 #include "eden/fs/utils/NotImplemented.h"
-#include "eden/fs/utils/UserInfo.h"
 
 using folly::Unit;
 using namespace std::chrono_literals;
@@ -81,14 +81,10 @@ bool TestMountFile::operator==(const TestMountFile& other) const {
 }
 
 TestMount::TestMount(bool enableActivityBuffer, CaseSensitivity caseSensitivity)
-    : blobCache_{BlobCache::create(
-          kBlobCacheMaximumSize,
-          kBlobCacheMinimumEntries,
-          makeRefPtr<EdenStats>())},
-      privHelper_{make_shared<FakePrivHelper>()},
+    : privHelper_{make_shared<FakePrivHelper>()},
       serverExecutor_{make_shared<folly::ManualExecutor>()} {
   // Initialize the temporary directory.
-  // This sets both testDir_, config_, localStore_, and backingStore_
+  // This sets both testDir_, config_, and localStore_
   initTestDirectory(caseSensitivity);
 
   testConfigSource_ =
@@ -108,8 +104,15 @@ TestMount::TestMount(bool enableActivityBuffer, CaseSensitivity caseSensitivity)
 
   auto reloadableConfig = std::make_shared<ReloadableConfig>(edenConfig_);
 
+  // create blobCache
+  blobCache_ = BlobCache::create(
+      kBlobCacheMaximumSize,
+      kBlobCacheMinimumEntries,
+      reloadableConfig,
+      makeRefPtr<EdenStats>());
+
   // Create treeCache
-  treeCache_ = TreeCache::create(reloadableConfig);
+  treeCache_ = TreeCache::create(reloadableConfig, makeRefPtr<EdenStats>());
 
   serverState_ = make_shared<ServerState>(
       UserInfo::lookup(),
@@ -126,6 +129,9 @@ TestMount::TestMount(bool enableActivityBuffer, CaseSensitivity caseSensitivity)
       nullptr,
       make_shared<CommandNotifier>(reloadableConfig),
       /*enableFaultInjection=*/true);
+
+  backingStore_ = make_shared<FakeBackingStore>(
+      BackingStore::LocalStoreCachingPolicy::NoCaching, serverState_);
 }
 
 TestMount::TestMount(
@@ -139,7 +145,7 @@ TestMount::TestMount(
 
   auto edenConfig = std::make_shared<ReloadableConfig>(
       edenConfig_, ConfigReloadBehavior::NoReload);
-  treeCache_ = TreeCache::create(edenConfig);
+  treeCache_ = TreeCache::create(edenConfig, makeRefPtr<EdenStats>());
   initialize(rootBuilder, startReady);
 }
 
@@ -168,7 +174,7 @@ TestMount::TestMount(
   // Create treeCache
   auto edenConfig = std::make_shared<ReloadableConfig>(
       edenConfig_, ConfigReloadBehavior::NoReload);
-  treeCache_ = TreeCache::create(edenConfig);
+  treeCache_ = TreeCache::create(edenConfig, makeRefPtr<EdenStats>());
   initialize(initialCommitHash, rootBuilder, startReady);
 }
 
@@ -259,6 +265,7 @@ void TestMount::createMount(
     InodeCatalogOptions inodeCatalogOptions) {
   shared_ptr<ObjectStore> objectStore = ObjectStore::create(
       backingStore_,
+      localStore_,
       treeCache_,
       stats_.copy(),
       std::make_shared<ProcessInfoCache>(),
@@ -338,9 +345,8 @@ void TestMount::initTestDirectory(CaseSensitivity caseSensitivity) {
   // Create the CheckoutConfig using our newly-populated client directory
   config_ = CheckoutConfig::loadFromClientDirectory(mountPath, clientDirectory);
 
-  // Create localStore_ and backingStore_
+  // Create localStore_
   localStore_ = make_shared<MemoryLocalStore>(makeRefPtr<EdenStats>());
-  backingStore_ = make_shared<FakeBackingStore>();
 
   stats_ = makeRefPtr<EdenStats>();
 }
@@ -374,6 +380,7 @@ void TestMount::remount() {
   // Create a new ObjectStore pointing to our local store and backing store
   auto objectStore = ObjectStore::create(
       backingStore_,
+      localStore_,
       treeCache_,
       stats_.copy(),
       std::make_shared<ProcessInfoCache>(),
@@ -416,6 +423,7 @@ void TestMount::remountGracefully() {
   // Create a new ObjectStore pointing to our local store and backing store
   auto objectStore = ObjectStore::create(
       backingStore_,
+      localStore_,
       treeCache_,
       stats_.copy(),
       std::make_shared<ProcessInfoCache>(),

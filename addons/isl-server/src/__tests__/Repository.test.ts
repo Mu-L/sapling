@@ -15,8 +15,9 @@ import {makeServerSideTracker} from '../analytics/serverSideTracker';
 import {extractRepoInfoFromUrl, setConfigOverrideForTests} from '../commands';
 import * as execa from 'execa';
 import {CommandRunner, type MergeConflicts, type ValidatedRepoInfo} from 'isl/src/types';
-import os from 'os';
-import path from 'path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import * as fsUtils from 'shared/fs';
 import {clone, mockLogger, nextTick} from 'shared/testUtils';
 
@@ -279,7 +280,7 @@ describe('Repository', () => {
     }
 
     it('runs operations', async () => {
-      runOperation({
+      await runOperation({
         args: ['commit', '--message', 'hi'],
       });
 
@@ -291,7 +292,7 @@ describe('Repository', () => {
     });
 
     it('handles succeedable revsets', async () => {
-      runOperation({
+      await runOperation({
         args: ['rebase', '--rev', {type: 'succeedable-revset', revset: 'aaa'}],
       });
 
@@ -303,7 +304,7 @@ describe('Repository', () => {
     });
 
     it('handles exact revsets', async () => {
-      runOperation({
+      await runOperation({
         args: ['rebase', '--rev', {type: 'exact-revset', revset: 'aaa'}],
       });
 
@@ -315,7 +316,7 @@ describe('Repository', () => {
     });
 
     it('handles repo-relative files', async () => {
-      runOperation({
+      await runOperation({
         args: ['add', {type: 'repo-relative-file', path: 'path/to/file.txt'}],
       });
 
@@ -327,7 +328,7 @@ describe('Repository', () => {
     });
 
     it('handles allowed configs', async () => {
-      runOperation({
+      await runOperation({
         args: ['commit', {type: 'config', key: 'ui.allowemptycommit', value: 'True'}],
       });
 
@@ -339,7 +340,7 @@ describe('Repository', () => {
     });
 
     it('disallows some commands', async () => {
-      runOperation({
+      await runOperation({
         args: ['debugsh'],
       });
 
@@ -351,7 +352,7 @@ describe('Repository', () => {
     });
 
     it('disallows unknown configs', async () => {
-      runOperation({
+      await runOperation({
         args: ['commit', {type: 'config', key: 'foo.bar', value: '1'}],
       });
 
@@ -363,13 +364,85 @@ describe('Repository', () => {
     });
 
     it('disallows unstructured --config flag', async () => {
-      runOperation({
+      await runOperation({
         args: ['commit', '--config', 'foo.bar=1'],
       });
 
       expect(execaSpy).not.toHaveBeenCalledWith(
         'sl',
         expect.arrayContaining(['commit', '--config', 'foo.bar=1']),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('fetchSloc', () => {
+    const repoInfo: ValidatedRepoInfo = {
+      type: 'success',
+      command: 'sl',
+      dotdir: '/path/to/repo/.sl',
+      repoRoot: '/path/to/repo',
+      codeReviewSystem: {type: 'unknown'},
+      pullRequestDomain: undefined,
+    };
+
+    const EXAMPLE_DIFFSTAT = `
+|  34 ++++++++++
+www/flib/intern/entity/diff/EntPhabricatorDiffSchema.php                                                            |  11 +++
+2 files changed, 45 insertions(+), 0 deletions(-)\n`;
+
+    it('parses sloc', async () => {
+      const repo = new Repository(repoInfo, ctx);
+
+      const execaSpy = mockExeca([[/^sl diff/, () => ({stdout: EXAMPLE_DIFFSTAT})]]);
+      const results = repo.fetchSignificantLinesOfCode(ctx, 'abcdef', ['generated.file']);
+      await expect(results).resolves.toEqual(45);
+      expect(execaSpy).toHaveBeenCalledWith(
+        'sl',
+        expect.arrayContaining([
+          'diff',
+          '-B',
+          '-X',
+          '**__generated__**',
+          '-X',
+          '/path/to/repo/generated.file',
+          '-c',
+          'abcdef',
+        ]),
+        expect.anything(),
+      );
+    });
+
+    it('handles empty generated list', async () => {
+      const repo = new Repository(repoInfo, ctx);
+      const execaSpy = mockExeca([[/^sl diff/, () => ({stdout: EXAMPLE_DIFFSTAT})]]);
+      repo.fetchSignificantLinesOfCode(ctx, 'abcdef', []);
+      expect(execaSpy).toHaveBeenCalledWith(
+        'sl',
+        expect.arrayContaining(['diff', '-B', '-X', '**__generated__**', '-c', 'abcdef']),
+        expect.anything(),
+      );
+    });
+
+    it('handles multiple generated files', async () => {
+      const repo = new Repository(repoInfo, ctx);
+      const execaSpy = mockExeca([[/^sl diff/, () => ({stdout: EXAMPLE_DIFFSTAT})]]);
+      const generatedFiles = ['generated1.file', 'generated2.file'];
+      repo.fetchSignificantLinesOfCode(ctx, 'abcdef', generatedFiles);
+      expect(execaSpy).toHaveBeenCalledWith(
+        'sl',
+        expect.arrayContaining([
+          'diff',
+          '-B',
+          '-X',
+          '**__generated__**',
+          '-X',
+          '/path/to/repo/generated1.file',
+          '-X',
+          '/path/to/repo/generated2.file',
+          '-c',
+          'abcdef',
+        ]),
         expect.anything(),
       );
     });
@@ -425,7 +498,9 @@ describe('Repository', () => {
       const execaSpy = mockExeca([]);
       const repo = new Repository(repoInfo, ctx);
 
-      repo.stableLocations = [{name: 'mystable', hash: 'aaa', info: 'this is the stable for aaa'}];
+      repo.stableLocations = [
+        {name: 'mystable', hash: 'aaa', info: 'this is the stable for aaa', date: new Date(0)},
+      ];
       await repo.fetchSmartlogCommits();
       expectCalledWithRevset(
         execaSpy,
@@ -433,8 +508,8 @@ describe('Repository', () => {
       );
 
       repo.stableLocations = [
-        {name: 'mystable', hash: 'aaa', info: 'this is the stable for aaa'},
-        {name: '2', hash: 'bbb', info: '2'},
+        {name: 'mystable', hash: 'aaa', info: 'this is the stable for aaa', date: new Date(0)},
+        {name: '2', hash: 'bbb', info: '2', date: new Date(0)},
       ];
       await repo.fetchSmartlogCommits();
       expectCalledWithRevset(
@@ -581,8 +656,79 @@ ${MARK_OUT}
         toContinue: 'rebase --continue',
         toAbort: 'rebase --abort',
         files: [
-          {path: 'file1.txt', status: 'U'},
-          {path: 'file2.txt', status: 'U'},
+          {path: 'file1.txt', status: 'U', conflictType: 'both_changed'},
+          {path: 'file2.txt', status: 'U', conflictType: 'both_changed'},
+        ],
+        fetchStartTimestamp: expect.anything(),
+        fetchCompletedTimestamp: expect.anything(),
+      } as MergeConflicts);
+    });
+
+    it('shows deleted file conflicts', async () => {
+      const repo = new Repository(repoInfo, ctx);
+
+      const onChange = jest.fn();
+      repo.onChangeConflictState(onChange);
+
+      await repo.checkForMergeConflicts();
+      expect(onChange).toHaveBeenCalledTimes(0);
+
+      const MOCK_DELETED_CONFLICT: ResolveCommandConflictOutput = [
+        {
+          command: 'rebase',
+          command_details: {
+            cmd: 'rebase',
+            to_abort: 'rebase --abort',
+            to_continue: 'rebase --continue',
+          },
+          conflicts: [
+            {
+              base: conflictFileData('hello\nworld\n'),
+              local: conflictFileData('hello\nworld - modified 1\n'),
+              other: {
+                contents: null,
+                exists: false,
+                isexec: false,
+                issymlink: false,
+              },
+              output: {
+                contents: null,
+                exists: false,
+                isexec: false,
+                issymlink: false,
+              },
+              path: 'file_del1.txt',
+            },
+            {
+              base: conflictFileData('hello\nworld\n'),
+              local: {
+                contents: null,
+                exists: false,
+                isexec: false,
+                issymlink: false,
+              },
+              other: conflictFileData('hello\nworld - modified 2\n'),
+              output: conflictFileData('hello\nworld - modified 2\n'),
+              path: 'file_del2.txt',
+            },
+          ],
+          pathconflicts: [],
+        },
+      ];
+
+      enterMergeConflict(MOCK_DELETED_CONFLICT);
+
+      await repo.checkForMergeConflicts();
+
+      expect(onChange).toHaveBeenCalledWith({state: 'loading'});
+      expect(onChange).toHaveBeenCalledWith({
+        state: 'loaded',
+        command: 'rebase',
+        toContinue: 'rebase --continue',
+        toAbort: 'rebase --abort',
+        files: [
+          {path: 'file_del1.txt', status: 'U', conflictType: 'source_deleted'},
+          {path: 'file_del2.txt', status: 'U', conflictType: 'dest_deleted'},
         ],
         fetchStartTimestamp: expect.anything(),
         fetchCompletedTimestamp: expect.anything(),
@@ -617,8 +763,8 @@ ${MARK_OUT}
         toContinue: 'rebase --continue',
         toAbort: 'rebase --abort',
         files: [
-          {path: 'file1.txt', status: 'U'},
-          {path: 'file2.txt', status: 'U'},
+          {path: 'file1.txt', status: 'U', conflictType: 'both_changed'},
+          {path: 'file2.txt', status: 'U', conflictType: 'both_changed'},
         ],
         fetchStartTimestamp: expect.anything(),
         fetchCompletedTimestamp: expect.anything(),
@@ -638,8 +784,8 @@ ${MARK_OUT}
         toContinue: 'rebase --continue',
         toAbort: 'rebase --abort',
         files: [
-          {path: 'file1.txt', status: 'U'},
-          {path: 'file2.txt', status: 'U'},
+          {path: 'file1.txt', status: 'U', conflictType: 'both_changed'},
+          {path: 'file2.txt', status: 'U', conflictType: 'both_changed'},
         ],
         fetchStartTimestamp: expect.anything(),
         fetchCompletedTimestamp: expect.anything(),
@@ -654,8 +800,8 @@ ${MARK_OUT}
         toAbort: 'rebase --abort',
         files: [
           // even though file1 is no longer in the output, we remember it from before.
-          {path: 'file1.txt', status: 'Resolved'},
-          {path: 'file2.txt', status: 'U'},
+          {path: 'file1.txt', status: 'Resolved', conflictType: 'both_changed'},
+          {path: 'file2.txt', status: 'U', conflictType: 'both_changed'},
         ],
         fetchStartTimestamp: expect.anything(),
         fetchCompletedTimestamp: expect.anything(),
@@ -843,5 +989,59 @@ describe('absolutePathForFileInRepo', () => {
     );
 
     expect(absolutePathForFileInRepo('foo\\..\\..\\file.txt', repo, path.win32)).toEqual(null);
+  });
+});
+
+describe('getCwdInfo', () => {
+  it('computes cwd path and labels', async () => {
+    mockExeca([[/^sl root/, {stdout: '/path/to/myRepo'}]]);
+    jest.spyOn(fs.promises, 'realpath').mockImplementation(async (path, _opts) => {
+      return path as string;
+    });
+    await expect(
+      Repository.getCwdInfo({
+        cmd: 'sl',
+        cwd: '/path/to/myRepo/some/subdir',
+        logger: mockLogger,
+        tracker: mockTracker,
+      }),
+    ).resolves.toEqual({
+      cwd: '/path/to/myRepo/some/subdir',
+      repoRoot: '/path/to/myRepo',
+      repoRelativeCwdLabel: 'myRepo/some/subdir',
+    });
+  });
+
+  it('uses realpath', async () => {
+    mockExeca([[/^sl root/, {stdout: '/data/users/name/myRepo'}]]);
+    jest.spyOn(fs.promises, 'realpath').mockImplementation(async (path, _opts) => {
+      return (path as string).replace(/^\/home\/name\//, '/data/users/name/');
+    });
+    await expect(
+      Repository.getCwdInfo({
+        cmd: 'sl',
+        cwd: '/home/name/myRepo/some/subdir',
+        logger: mockLogger,
+        tracker: mockTracker,
+      }),
+    ).resolves.toEqual({
+      cwd: '/home/name/myRepo/some/subdir', // cwd is not realpath'd
+      repoRoot: '/data/users/name/myRepo', // repo root is realpath'd
+      repoRelativeCwdLabel: 'myRepo/some/subdir',
+    });
+  });
+
+  it('returns null for non-repos', async () => {
+    mockExeca([[/^sl root/, new Error('not a repository')]]);
+    await expect(
+      Repository.getCwdInfo({
+        cmd: 'sl',
+        cwd: '/path/ro/myRepo/some/subdir',
+        logger: mockLogger,
+        tracker: mockTracker,
+      }),
+    ).resolves.toEqual({
+      cwd: '/path/ro/myRepo/some/subdir',
+    });
   });
 });

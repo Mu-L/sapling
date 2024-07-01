@@ -155,6 +155,7 @@ class EdenFS:
         capture_stderr: bool = False,
         encoding: str = "utf-8",
         config_dir: bool = True,
+        env: Optional[Dict[str, str]] = None,
     ) -> str:
         """
         Run the specified eden command.
@@ -163,18 +164,27 @@ class EdenFS:
         Usage example: run_cmd('mount', 'my_eden_client')
         Throws a subprocess.CalledProcessError if eden exits unsuccessfully.
         """
-        cmd, env = self.get_edenfsctl_cmd_env(command, *args, config_dir=config_dir)
+        cmd, cmd_env = self.get_edenfsctl_cmd_env(command, *args, config_dir=config_dir)
+
+        # Merge explicit env with env vars supplied by the test harness.
+        # Explicitly provided env vars take precedence.
+        merged_env = {}
+        if env is not None:
+            merged_env = cmd_env | env
+        else:
+            merged_env = cmd_env
+
         try:
             stderr = subprocess.STDOUT if capture_stderr else subprocess.PIPE
             # TODO(T37669726): Re-enable LSAN.
-            env["LSAN_OPTIONS"] = "detect_leaks=0:verbosity=1:log_threads=1"
+            merged_env["LSAN_OPTIONS"] = "detect_leaks=0:verbosity=1:log_threads=1"
             completed_process = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=stderr,
                 check=True,
                 cwd=cwd,
-                env=env,
+                env=merged_env,
                 encoding=encoding,
             )
         except subprocess.CalledProcessError as ex:
@@ -205,6 +215,7 @@ class EdenFS:
         command: str,
         *args: str,
         config_dir: bool = True,
+        home_dir: bool = True,
     ) -> Tuple[List[str], Dict[str, str]]:
         """Combines the specified eden command args with the appropriate
         defaults.
@@ -221,11 +232,11 @@ class EdenFS:
             edenfsctl,
             "--etc-eden-dir",
             str(self._etc_eden_dir),
-            "--home-dir",
-            str(self._home_dir),
         ]
         if config_dir:
             cmd += ["--config-dir", str(self._eden_dir)]
+        if home_dir:
+            cmd += ["--home-dir", str(self._home_dir)]
         cmd.append(command)
         cmd.extend(args)
         return cmd, env
@@ -620,10 +631,10 @@ class EdenFS:
             params.append("--case-insensitive")
         if enable_windows_symlinks:
             params.append("--enable-windows-symlinks")
-        if backing_store:
+        if backing_store is not None:
             params.append("--backing-store")
             params.append(backing_store)
-        if filter_path:
+        if filter_path is not None:
             params.append("--filter-path")
             params.append(filter_path)
         self.run_cmd(*params)

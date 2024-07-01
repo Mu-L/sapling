@@ -1,4 +1,3 @@
-#debugruntest-compatible
 
 #require no-eden
 
@@ -16,6 +15,7 @@
   > automv=
   > rebase=
   > EOF
+  $ setconfig automv.similarity=75
 
 # Setup repo
 

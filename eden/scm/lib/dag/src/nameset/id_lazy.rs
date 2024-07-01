@@ -260,9 +260,9 @@ impl AsyncNameSetQuery for IdLazySet {
         Ok(Box::pin(stream))
     }
 
-    async fn count(&self) -> Result<usize> {
+    async fn count_slow(&self) -> Result<u64> {
         let inner = self.load_all()?;
-        Ok(inner.visited.len())
+        Ok(inner.visited.len().try_into()?)
     }
 
     async fn last(&self) -> Result<Option<VertexName>> {
@@ -277,11 +277,7 @@ impl AsyncNameSetQuery for IdLazySet {
     }
 
     async fn contains(&self, name: &VertexName) -> Result<bool> {
-        let id = match self
-            .map
-            .vertex_id_with_max_group(name, Group::NON_MASTER)
-            .await?
-        {
+        let id = match self.map.vertex_id_with_max_group(name, Group::MAX).await? {
             None => {
                 return Ok(false);
             }
@@ -321,11 +317,7 @@ impl AsyncNameSetQuery for IdLazySet {
     }
 
     async fn contains_fast(&self, name: &VertexName) -> Result<Option<bool>> {
-        let id = match self
-            .map
-            .vertex_id_with_max_group(name, Group::NON_MASTER)
-            .await?
-        {
+        let id = match self.map.vertex_id_with_max_group(name, Group::MAX).await? {
             None => {
                 return Ok(Some(false));
             }
@@ -463,7 +455,7 @@ pub(crate) mod tests {
             ["55", "77", "22", "33", "11"]
         );
         assert!(!nb(set.is_empty())?);
-        assert_eq!(nb(set.count())?, 5);
+        assert_eq!(nb(set.count_slow())?, 5);
         assert_eq!(shorten_name(nb(set.first())?.unwrap()), "11");
         assert_eq!(shorten_name(nb(set.last())?.unwrap()), "55");
         Ok(())
@@ -492,7 +484,7 @@ pub(crate) mod tests {
     fn test_debug() {
         let set = lazy_set(&[0]);
         assert_eq!(format!("{:?}", set), "<lazy [] + ? more>");
-        nb(set.count()).unwrap();
+        nb(set.count_slow()).unwrap();
         assert_eq!(format!("{:?}", set), "<lazy [0000000000000000+0]>");
 
         let set = lazy_set(&[1, 3, 2]);
@@ -552,7 +544,7 @@ pub(crate) mod tests {
             let set = lazy_set(&a);
             check_invariants(&set).unwrap();
 
-            let count = nb(set.count()).unwrap();
+            let count = nb(set.count_slow()).unwrap() as usize;
             assert!(count <= a.len());
 
             let set2: HashSet<_> = a.iter().cloned().collect();

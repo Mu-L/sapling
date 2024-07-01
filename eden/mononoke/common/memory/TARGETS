@@ -1,0 +1,12 @@
+load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
+
+oncall("mononoke")
+
+rust_library(
+    name = "memory",
+    srcs = glob(["src/**/*.rs"]),
+    test_labels = ["serialize_test_cases"],
+    deps = [
+        "fbsource//third-party/rust:memory-stats",
+    ],
+)

@@ -49,6 +49,7 @@ class Notifier;
 class FsEventLogger;
 class FuseRequestContext;
 class PrivHelper;
+class StructuredLogger;
 
 #ifndef _WIN32
 
@@ -234,6 +235,63 @@ class FuseChannel final : public FsChannel {
    * The caller is expected to follow up with a call to the
    * initialize() method to perform the handshake with the
    * kernel and set up the thread pool.
+   *
+   * privHelper -
+   *      a helper object that can be used to perform privileged actions like
+   *      mounting/unmounting the FUSE device.
+   * fuseDevice -
+   *      the file to use for communication with the kernel. Fuse requests and
+   *      responses go through here.
+   * mountPath -
+   *      the absolute path to the mount point on disk.
+   * threadPool -
+   *      the thread pool to use for processing FUSE requests. Note this is not
+   *      used to read fuse requests, but the processing that is not run on
+   *      another thread pool in EdenFS is run here.
+   * numThreads -
+   *      the number of worker threads to read fuse requests off the fuseDevice.
+   * dispatcher -
+   *      once parsed requests are passed off to the dispatcher for handling,
+   *      this is the connection to the rest of EdenFS.
+   * straceLogger -
+   *      a logger to use for logging strace/syscall like events.
+   * processInfoCache -
+   *      a cache of client process infomation (pid, command line, parent, etc).
+   * fsEventLogger -
+   *      legacy telemetry on filesystem access.
+   * structuredLogger -
+   *      This is a logger for error events. Inside a Meta environment, these
+   *      events are exported off the machine this EdenFS instace is running on.
+   *      This is where you log anomalous things that you want to monitor
+   *      accross the fleet.
+   * requestTimeout -
+   *      internal timeout for how long the FuseChannel will give the lower
+   *      levels of EdenFS to process an event. ETIMEDOUT will be returned to
+   *      the kernel if a request exceeds this amount of time.
+   * notifier -
+   *      used to flag abnormal EdenFS behavior to users.
+   * caseSensitive -
+   *      whether or not the mount is case sensitive.
+   * requireUtf8Path -
+   *      whether the mount requires utf-8 compliant paths.
+   * maximumBackgroundRequests -
+   *      The max number of background requests the kernel will send. The
+   *      libfuse documentation says this only applies to background requests
+   *      like readahead prefetches and direct I/O, but we have empirically
+   *      observed that, on Linux, without setting this value, `rg -j 200`
+   *      limits the number of active FUSE requests to 16.
+   * maximumInFlightRequests -
+   *      The max number of in-flight requests that EdenFS will process at once.
+   *      fuse requests over this threshold will block.
+   * highFuseRequestsLogInterval -
+   *      How often to log when we see a high number of in-flight FUSE requests.
+   *      This is used to prevent us from spamming data to scuba.
+   * useWriteBackCache -
+   *      Fuse may complete writes while they are cached in kernel before they
+   *      are written to EdenFS.
+   * fuseTraceBusCapacity -
+   *      The maximum number of FuseTraceEvents that can be buffered in the
+   *      trace bus at any one time. This data feeds into `eden trace fs`.
    */
   FuseChannel(
       PrivHelper* privHelper,
@@ -245,11 +303,14 @@ class FuseChannel final : public FsChannel {
       const folly::Logger* straceLogger,
       std::shared_ptr<ProcessInfoCache> processInfoCache,
       std::shared_ptr<FsEventLogger> fsEventLogger,
+      const std::shared_ptr<StructuredLogger>& structuredLogger,
       folly::Duration requestTimeout,
       std::shared_ptr<Notifier> notifier,
       CaseSensitivity caseSensitive,
       bool requireUtf8Path,
       int32_t maximumBackgroundRequests,
+      size_t maximumInFlightRequests,
+      std::chrono::nanoseconds highFuseRequestsLogInterval,
       bool useWriteBackCache,
       size_t fuseTraceBusCapacity);
 
@@ -513,6 +574,14 @@ class FuseChannel final : public FsChannel {
     size_t pendingRequests{0};
 
     /**
+     * We log to scuba when clients see a high number of FUSE requests. It's
+     * likely we exceed this threshold many times in a row, so we only log
+     * once every EdenConfig::highFsRequestsLogInterval. This keeps track of
+     * the last time we logged to scuba.
+     */
+    std::chrono::steady_clock::time_point lastHighFuseRequestsLog_;
+
+    /**
      * We track the number of stopped threads, to know when we are done and can
      * signal sessionCompletePromise_.  We only want to signal
      * sessionCompletePromise_ after initialization is successful and then all
@@ -562,9 +631,9 @@ class FuseChannel final : public FsChannel {
     InvalidationEntry(InodeNumber inode, PathComponentPiece name);
     explicit InvalidationEntry(folly::Promise<folly::Unit> promise);
     InvalidationEntry(InvalidationEntry&& other) noexcept(
-        std::is_nothrow_move_constructible_v<PathComponent>&&
-            std::is_nothrow_move_constructible_v<folly::Promise<folly::Unit>>&&
-                std::is_nothrow_move_constructible_v<DataRange>);
+        std::is_nothrow_move_constructible_v<PathComponent> &&
+        std::is_nothrow_move_constructible_v<folly::Promise<folly::Unit>> &&
+        std::is_nothrow_move_constructible_v<DataRange>);
     ~InvalidationEntry();
 
     InvalidationType type;
@@ -784,12 +853,15 @@ class FuseChannel final : public FsChannel {
   const size_t numThreads_;
   std::unique_ptr<FuseDispatcher> dispatcher_;
   const folly::Logger* const straceLogger_;
+  const std::shared_ptr<StructuredLogger> structuredLogger_;
   const AbsolutePath mountPath_;
   const folly::Duration requestTimeout_;
   std::shared_ptr<Notifier> const notifier_;
   CaseSensitivity caseSensitive_;
   bool requireUtf8Path_;
   int32_t maximumBackgroundRequests_;
+  size_t maximumInFlightRequests_;
+  std::chrono::nanoseconds highFuseRequestsLogInterval_;
   bool useWriteBackCache_;
 
   /*

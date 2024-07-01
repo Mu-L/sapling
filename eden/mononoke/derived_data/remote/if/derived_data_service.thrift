@@ -75,6 +75,8 @@ union DerivedData {
   15: DerivedDataTestManifest test_manifest;
   16: DerivedDataTestShardedManifest test_sharded_manifest;
   17: DerivedDataBssmV3 bssm_v3;
+  18: DerivedDataHgAugmentedManifest hg_augmented_manifest;
+  19: DerivedDataGitDeltaManifestV2 git_delta_manifest_v2;
 }
 
 union DerivedDataFsnode {
@@ -154,6 +156,13 @@ union DerivedDataCommitHandle {
 
 union DerivedDataGitDeltaManifest {
   1: git_types_thrift.GitDeltaManifestId root_git_delta_manifest_id;
+}
+
+union DerivedDataHgAugmentedManifest {
+  1: mercurial_thrift.HgNodeHash root_hg_augmented_manifest_id;
+}
+union DerivedDataGitDeltaManifestV2 {
+  1: git_types_thrift.GitDeltaManifestV2Id root_git_delta_manifest_v2_id;
 }
 
 struct DerivedDataTypeNotEnabled {

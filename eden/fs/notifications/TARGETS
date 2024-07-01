@@ -15,6 +15,7 @@ buck_genrule(
     srcs = [
         "WindowsNotifier.rc",
         "WindowsNotifierConstants.h",
+        "edenb256.ico",
         "edenfs.exe.manifest",
         "edeng256.ico",
         "edeno256.ico",
@@ -43,19 +44,26 @@ cpp_library(
 )
 
 cpp_library(
+    name = "null_notifier",
+    headers = ["NullNotifier.h"],
+    exported_deps = [
+        ":notifier",
+    ],
+)
+
+cpp_library(
     name = "windows_notifier",
     srcs = ["WindowsNotifier.cpp"],
-    headers = [
-        "NullNotifier.h",
-        "WindowsNotifier.h",
+    headers = ["WindowsNotifier.h"],
+    os_deps = [
+        (
+            "windows",
+            [
+                "fbsource//third-party/toolchains/win:ComCtl32.Lib",
+                "fbsource//third-party/toolchains/win:shell32.lib",
+            ],
+        ),
     ],
-    os_deps = [(
-        "windows",
-        [
-            "fbsource//third-party/toolchains/win:ComCtl32.Lib",
-            "fbsource//third-party/toolchains/win:shell32.lib",
-        ],
-    )],
     os_linker_flags = [
         (
             "windows",

@@ -13,6 +13,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::sync::Arc;
 
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_git_mapping::BonsaiGitMappingArc;
@@ -20,6 +21,7 @@ use bonsai_git_mapping::BonsaiGitMappingRef;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMappingArc;
 use bonsai_hg_mapping::BonsaiHgMapping;
+use bonsai_hg_mapping::BonsaiHgMappingArc;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bookmarks::BookmarkUpdateLog;
 use bookmarks::BookmarkUpdateLogArc;
@@ -28,9 +30,14 @@ use bookmarks::Bookmarks;
 use bookmarks::BookmarksArc;
 use bookmarks::BookmarksRef;
 use changesets::Changesets;
+use changesets::ChangesetsArc;
 use changesets::ChangesetsRef;
 use commit_graph::CommitGraph;
+use commit_graph::CommitGraphArc;
 use commit_graph::CommitGraphRef;
+use filenodes::Filenodes;
+use filenodes::FilenodesArc;
+use filenodes::FilenodesRef;
 use filestore::FilestoreConfig;
 use filestore::FilestoreConfigRef;
 use metaconfig_types::CommitSyncConfigVersion;
@@ -54,9 +61,11 @@ use repo_bookmark_attrs::RepoBookmarkAttrsRef;
 use repo_cross_repo::RepoCrossRepo;
 use repo_cross_repo::RepoCrossRepoRef;
 use repo_derived_data::RepoDerivedData;
+use repo_derived_data::RepoDerivedDataArc;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentity;
 use repo_identity::RepoIdentityRef;
+use sorted_vector_map::SortedVectorMap;
 use static_assertions::assert_impl_all;
 use thiserror::Error;
 
@@ -175,6 +184,7 @@ pub trait Repo = BookmarksArc
     + BookmarkUpdateLogRef
     + RepoBlobstoreArc
     + BonsaiHgMappingRef
+    + BonsaiHgMappingArc
     + BonsaiGlobalrevMappingArc
     + RepoCrossRepoRef
     + PushrebaseMutationMappingRef
@@ -183,13 +193,18 @@ pub trait Repo = BookmarksArc
     + BonsaiGitMappingArc
     + FilestoreConfigRef
     + ChangesetsRef
+    + ChangesetsArc
     + RepoIdentityRef
     + MutableCountersArc
     + PhasesRef
     + RepoBlobstoreRef
     + RepoConfigRef
     + RepoDerivedDataRef
+    + RepoDerivedDataArc
     + CommitGraphRef
+    + CommitGraphArc
+    + FilenodesArc
+    + FilenodesRef
     + Send
     + Sync
     + Clone
@@ -249,6 +264,9 @@ pub struct ConcreteRepo {
 
     #[facet]
     commit_graph: CommitGraph,
+
+    #[facet]
+    file_nodes: dyn Filenodes,
 }
 
 assert_impl_all!(ConcreteRepo: Repo);
@@ -262,12 +280,46 @@ assert_impl_all!(ConcreteRepo: Repo);
 /// this map has to be available, or the operation will crash otherwise.
 #[derive(Clone)]
 pub enum SubmoduleDeps<R> {
-    ForSync(HashMap<NonRootMPath, R>),
+    ForSync(HashMap<NonRootMPath, Arc<R>>),
     NotNeeded,
+    NotAvailable,
 }
 
 impl<R> Default for SubmoduleDeps<R> {
     fn default() -> Self {
         Self::NotNeeded
+    }
+}
+
+impl<R: Repo> SubmoduleDeps<R> {
+    pub fn get_submodule_deps_names(&self) -> Option<SortedVectorMap<&NonRootMPath, &str>> {
+        match self {
+            Self::ForSync(map) => Some(
+                map.iter()
+                    .map(|(k, v)| (k, v.repo_identity().name()))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    pub fn repos(&self) -> Vec<Arc<R>> {
+        match self {
+            Self::ForSync(map) => map.values().cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn dep_map(&self) -> Option<&HashMap<NonRootMPath, Arc<R>>> {
+        match self {
+            Self::ForSync(map) => Some(map),
+            _ => None,
+        }
+    }
+}
+
+impl<R: Repo> Debug for SubmoduleDeps<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get_submodule_deps_names().fmt(f)
     }
 }

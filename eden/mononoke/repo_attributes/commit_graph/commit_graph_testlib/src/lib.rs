@@ -5,6 +5,7 @@
  * GNU General Public License version 2.
  */
 
+#![feature(iter_array_chunks)]
 #![feature(trait_upcasting)]
 
 use std::collections::HashSet;
@@ -13,11 +14,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use cloned::cloned;
+use commit_graph::BaseCommitGraphWriter;
 use commit_graph::CommitGraph;
+use commit_graph::CommitGraphWriter;
 use commit_graph_types::storage::CommitGraphStorage;
 use commit_graph_types::storage::Prefetch;
 use context::CoreContext;
+use futures::FutureExt;
 use in_memory_commit_graph_storage::InMemoryCommitGraphStorage;
+use justknobs::test_helpers::with_just_knobs_async;
+use justknobs::test_helpers::JustKnobsInMemory;
+use justknobs::test_helpers::KnobVal;
+use maplit::hashmap;
 use maplit::hashset;
 use mononoke_types::ChangesetIdPrefix;
 use mononoke_types::ChangesetIdsResolvedFromPrefix;
@@ -43,9 +51,12 @@ macro_rules! impl_commit_graph_tests {
         $crate::impl_commit_graph_tests_internal!(
             $test_runner,
             test_storage_store_and_fetch,
+            test_is_ancestor_exact_prefetching,
+            test_is_ancestor_skew_ancestors_prefetching,
             test_skip_tree,
             test_p1_linear_tree,
             test_ancestors_difference,
+            test_ancestors_difference_segment_slices,
             test_find_by_prefix,
             test_add_recursive,
             test_add_recursive_many_changesets,
@@ -139,6 +150,127 @@ pub async fn test_storage_store_and_fetch(
             .as_slice(),
         &[name_cs_id("D"), name_cs_id("F")]
     );
+
+    // Check some underlying storage details.
+    assert_eq!(
+        storage
+            .maybe_fetch_edges(&ctx, name_cs_id("A"))
+            .await?
+            .unwrap()
+            .merge_ancestor,
+        None
+    );
+    assert_eq!(
+        storage
+            .maybe_fetch_edges(&ctx, name_cs_id("C"))
+            .await?
+            .unwrap()
+            .merge_ancestor,
+        Some(name_cs_node("A", 1, 0, 0))
+    );
+    assert_eq!(
+        storage
+            .maybe_fetch_edges(&ctx, name_cs_id("I"))
+            .await?
+            .unwrap()
+            .merge_ancestor,
+        Some(name_cs_node("G", 5, 1, 4))
+    );
+
+    // fetch_many_edges and maybe_fetch_many_edges return the same result if none of the changesets
+    // are missing.
+    assert_eq!(
+        storage
+            .fetch_many_edges(
+                &ctx,
+                &[name_cs_id("A"), name_cs_id("C"), name_cs_id("I")],
+                Prefetch::None
+            )
+            .await?,
+        storage
+            .maybe_fetch_many_edges(
+                &ctx,
+                &[name_cs_id("A"), name_cs_id("C"), name_cs_id("I")],
+                Prefetch::None
+            )
+            .await?,
+    );
+
+    // fetch_many_edges returns an error if any of the changesets are missing.
+    assert!(
+        storage
+            .fetch_many_edges(
+                &ctx,
+                &[name_cs_id("Z"), name_cs_id("A"), name_cs_id("B")],
+                Prefetch::None
+            )
+            .await
+            .is_err()
+    );
+
+    // maybe_fetch_many_edges ignores missing changesets ("Z" in this case).
+    assert_eq!(
+        storage
+            .maybe_fetch_many_edges(
+                &ctx,
+                &[
+                    name_cs_id("Z"),
+                    name_cs_id("A"),
+                    name_cs_id("C"),
+                    name_cs_id("I")
+                ],
+                Prefetch::None
+            )
+            .await?
+            .into_keys()
+            .collect::<HashSet<_>>(),
+        hashset! {name_cs_id("A"), name_cs_id("C"), name_cs_id("I")},
+    );
+
+    Ok(())
+}
+
+pub async fn test_is_ancestor_exact_prefetching(
+    ctx: CoreContext,
+    storage: Arc<dyn CommitGraphStorageTest>,
+) -> Result<()> {
+    with_just_knobs_async(
+        JustKnobsInMemory::new(hashmap![
+            "scm/mononoke:commit_graph_use_skip_tree_exact_prefetching".to_string() => KnobVal::Bool(true)
+        ]),
+        test_is_ancestor_impl(ctx, storage).boxed(),
+    )
+    .await
+}
+
+pub async fn test_is_ancestor_skew_ancestors_prefetching(
+    ctx: CoreContext,
+    storage: Arc<dyn CommitGraphStorageTest>,
+) -> Result<()> {
+    with_just_knobs_async(
+        JustKnobsInMemory::new(hashmap![
+            "scm/mononoke:commit_graph_use_skip_tree_exact_prefetching".to_string() => KnobVal::Bool(false)
+        ]),
+        test_is_ancestor_impl(ctx, storage).boxed(),
+    )
+    .await
+}
+
+async fn test_is_ancestor_impl(
+    ctx: CoreContext,
+    storage: Arc<dyn CommitGraphStorageTest>,
+) -> Result<()> {
+    let graph = from_dag(
+        &ctx,
+        r"
+             A-B-C-D-G-H-I
+              \     /
+               E---F
+         ",
+        storage.clone(),
+    )
+    .await?;
+    storage.flush();
 
     assert!(
         graph
@@ -241,82 +373,6 @@ pub async fn test_storage_store_and_fetch(
             .await?
     );
 
-    // Check some underlying storage details.
-    assert_eq!(
-        storage
-            .maybe_fetch_edges(&ctx, name_cs_id("A"))
-            .await?
-            .unwrap()
-            .merge_ancestor,
-        None
-    );
-    assert_eq!(
-        storage
-            .maybe_fetch_edges(&ctx, name_cs_id("C"))
-            .await?
-            .unwrap()
-            .merge_ancestor,
-        Some(name_cs_node("A", 1, 0, 0))
-    );
-    assert_eq!(
-        storage
-            .maybe_fetch_edges(&ctx, name_cs_id("I"))
-            .await?
-            .unwrap()
-            .merge_ancestor,
-        Some(name_cs_node("G", 5, 1, 4))
-    );
-
-    // fetch_many_edges and maybe_fetch_many_edges return the same result if none of the changesets
-    // are missing.
-    assert_eq!(
-        storage
-            .fetch_many_edges(
-                &ctx,
-                &[name_cs_id("A"), name_cs_id("C"), name_cs_id("I")],
-                Prefetch::None
-            )
-            .await?,
-        storage
-            .maybe_fetch_many_edges(
-                &ctx,
-                &[name_cs_id("A"), name_cs_id("C"), name_cs_id("I")],
-                Prefetch::None
-            )
-            .await?,
-    );
-
-    // fetch_many_edges returns an error if any of the changesets are missing.
-    assert!(
-        storage
-            .fetch_many_edges(
-                &ctx,
-                &[name_cs_id("Z"), name_cs_id("A"), name_cs_id("B")],
-                Prefetch::None
-            )
-            .await
-            .is_err()
-    );
-
-    // maybe_fetch_many_edges ignores missing changesets ("Z" in this case).
-    assert_eq!(
-        storage
-            .maybe_fetch_many_edges(
-                &ctx,
-                &[
-                    name_cs_id("Z"),
-                    name_cs_id("A"),
-                    name_cs_id("C"),
-                    name_cs_id("I")
-                ],
-                Prefetch::None
-            )
-            .await?
-            .into_keys()
-            .collect::<HashSet<_>>(),
-        hashset! {name_cs_id("A"), name_cs_id("C"), name_cs_id("I")},
-    );
-
     Ok(())
 }
 
@@ -417,6 +473,65 @@ pub async fn test_p1_linear_tree(
     assert_p1_linear_lowest_common_ancestor(&graph, &ctx, "D", "C", Some("C")).await?;
     assert_p1_linear_lowest_common_ancestor(&graph, &ctx, "N", "K", None).await?;
     assert_p1_linear_lowest_common_ancestor(&graph, &ctx, "A", "I", Some("A")).await?;
+
+    Ok(())
+}
+
+pub async fn test_ancestors_difference_segment_slices(
+    ctx: CoreContext,
+    storage: Arc<dyn CommitGraphStorageTest>,
+) -> Result<()> {
+    let graph = from_dag(
+        &ctx,
+        r"
+         A-B-C-D-G-H---J-K
+            \   /   \ /
+             E-F     I
+
+         L-M-N-O-P-Q-R-S-T-U
+         ",
+        storage.clone(),
+    )
+    .await?;
+    storage.flush();
+
+    assert_ancestors_difference_segment_slices(
+        &graph,
+        &ctx,
+        &["K"],
+        &[],
+        3,
+        &[
+            &["A", "B", "C"],
+            &["D"],
+            &["E", "F"],
+            &["G", "H", "I"],
+            &["J", "K"],
+        ],
+    )
+    .await?;
+
+    assert_ancestors_difference_segment_slices(
+        &graph,
+        &ctx,
+        &["K", "U"],
+        &[],
+        3,
+        &[
+            &["L", "M", "N"],
+            &["O", "P", "Q"],
+            &["R", "S", "T"],
+            &["U"],
+            &["A", "B"],
+            &["C", "D"],
+            &["E"],
+            &["F"],
+            &["G", "H"],
+            &["I"],
+            &["J", "K"],
+        ],
+    )
+    .await?;
 
     Ok(())
 }
@@ -632,8 +747,10 @@ pub async fn test_add_recursive(
     );
 
     let graph = CommitGraph::new(storage.clone());
+    let graph_writer = BaseCommitGraphWriter::new(graph.clone());
+
     assert_eq!(
-        graph
+        graph_writer
             .add_recursive(
                 &ctx,
                 reference_graph.clone(),
@@ -643,7 +760,7 @@ pub async fn test_add_recursive(
         9
     );
     assert_eq!(
-        graph
+        graph_writer
             .add_recursive(
                 &ctx,
                 reference_graph,
@@ -708,8 +825,10 @@ pub async fn test_add_recursive_many_changesets(
     );
 
     let graph = CommitGraph::new(storage.clone());
+    let graph_writer = BaseCommitGraphWriter::new(graph.clone());
+
     assert_eq!(
-        graph
+        graph_writer
             .add_recursive(
                 &ctx,
                 reference_graph.clone(),
@@ -748,7 +867,7 @@ pub async fn test_add_recursive_many_changesets(
     );
 
     assert_eq!(
-        graph
+        graph_writer
             .add_recursive(
                 &ctx,
                 reference_graph.clone(),
@@ -1477,16 +1596,37 @@ pub async fn test_ancestors_within_distance(
     .await?;
     storage.flush();
 
-    assert_ancestors_within_distance(&ctx, &graph, vec!["N"], 0, vec!["N"]).await?;
-    assert_ancestors_within_distance(&ctx, &graph, vec!["N"], 1, vec!["N", "L", "K"]).await?;
-    assert_ancestors_within_distance(&ctx, &graph, vec!["N"], 2, vec!["N", "L", "K", "E", "J"])
-        .await?;
+    assert_ancestors_within_distance(&ctx, &graph, vec!["N"], 0, vec![("N", 0)]).await?;
+    assert_ancestors_within_distance(
+        &ctx,
+        &graph,
+        vec!["N"],
+        1,
+        vec![("N", 0), ("L", 1), ("K", 1)],
+    )
+    .await?;
+    assert_ancestors_within_distance(
+        &ctx,
+        &graph,
+        vec!["N"],
+        2,
+        vec![("N", 0), ("L", 1), ("K", 1), ("E", 2), ("J", 2)],
+    )
+    .await?;
     assert_ancestors_within_distance(
         &ctx,
         &graph,
         vec!["N"],
         3,
-        vec!["N", "L", "K", "E", "J", "I", "D"],
+        vec![
+            ("N", 0),
+            ("L", 1),
+            ("K", 1),
+            ("E", 2),
+            ("J", 2),
+            ("I", 3),
+            ("D", 3),
+        ],
     )
     .await?;
     assert_ancestors_within_distance(
@@ -1494,7 +1634,17 @@ pub async fn test_ancestors_within_distance(
         &graph,
         vec!["N"],
         4,
-        vec!["N", "L", "K", "E", "J", "I", "D", "F", "C"],
+        vec![
+            ("N", 0),
+            ("L", 1),
+            ("K", 1),
+            ("E", 2),
+            ("J", 2),
+            ("I", 3),
+            ("D", 3),
+            ("F", 4),
+            ("C", 4),
+        ],
     )
     .await?;
     assert_ancestors_within_distance(
@@ -1502,7 +1652,18 @@ pub async fn test_ancestors_within_distance(
         &graph,
         vec!["N"],
         5,
-        vec!["N", "L", "K", "E", "J", "I", "D", "F", "C", "B"],
+        vec![
+            ("N", 0),
+            ("L", 1),
+            ("K", 1),
+            ("E", 2),
+            ("J", 2),
+            ("I", 3),
+            ("D", 3),
+            ("F", 4),
+            ("C", 4),
+            ("B", 5),
+        ],
     )
     .await?;
     assert_ancestors_within_distance(
@@ -1510,7 +1671,19 @@ pub async fn test_ancestors_within_distance(
         &graph,
         vec!["N"],
         6,
-        vec!["N", "L", "K", "E", "J", "I", "D", "F", "C", "B", "A"],
+        vec![
+            ("N", 0),
+            ("L", 1),
+            ("K", 1),
+            ("E", 2),
+            ("J", 2),
+            ("I", 3),
+            ("D", 3),
+            ("F", 4),
+            ("C", 4),
+            ("B", 5),
+            ("A", 6),
+        ],
     )
     .await?;
     assert_ancestors_within_distance(
@@ -1518,17 +1691,35 @@ pub async fn test_ancestors_within_distance(
         &graph,
         vec!["N"],
         100,
-        vec!["N", "L", "K", "E", "J", "I", "D", "F", "C", "B", "A"],
+        vec![
+            ("N", 0),
+            ("L", 1),
+            ("K", 1),
+            ("E", 2),
+            ("J", 2),
+            ("I", 3),
+            ("D", 3),
+            ("F", 4),
+            ("C", 4),
+            ("B", 5),
+            ("A", 6),
+        ],
     )
     .await?;
-    assert_ancestors_within_distance(&ctx, &graph, vec!["N", "M", "H"], 0, vec!["N", "M", "H"])
-        .await?;
+    assert_ancestors_within_distance(
+        &ctx,
+        &graph,
+        vec!["N", "M", "H"],
+        0,
+        vec![("N", 0), ("M", 0), ("H", 0)],
+    )
+    .await?;
     assert_ancestors_within_distance(
         &ctx,
         &graph,
         vec!["N", "M", "H"],
         1,
-        vec!["N", "M", "H", "L", "K", "G"],
+        vec![("N", 0), ("M", 0), ("H", 0), ("L", 1), ("K", 1), ("G", 1)],
     )
     .await?;
     assert_ancestors_within_distance(&ctx, &graph, vec![], 100, vec![]).await?;

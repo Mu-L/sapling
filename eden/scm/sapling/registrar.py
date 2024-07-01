@@ -239,6 +239,7 @@ class command(_funcregistrarbase):
         func.subcommandcategories = []
         func.subonly = subonly
         func.namesforhooks = list(filter(None, [primaryname, legacyname]))
+        func.legacyname = legacyname
 
         if name in self._table:
             # If the command already was in the table it is because it was an existing Rust command.
@@ -546,6 +547,9 @@ class internalmerge(_funcregistrarbase):
     'files' and 'labels'. If it returns false value, merging is aborted
     immediately (and file is marked as "unresolved").
 
+    Optional 'handlesall' indicates whether the merge tool handles all
+    types of conflicts, in particular change/delete conflicts.
+
     'internalmerge' instance in example above can be used to
     decorate multiple functions.
 
@@ -563,10 +567,13 @@ class internalmerge(_funcregistrarbase):
     mergeonly = "mergeonly"  # just the full merge, no premerge
     fullmerge = "fullmerge"  # both premerge and merge
 
-    def _extrasetup(self, name, func, mergetype, onfailure=None, precheck=None):
+    def _extrasetup(
+        self, name, func, mergetype, onfailure=None, precheck=None, handlesall=False
+    ):
         func.mergetype = mergetype
         func.onfailure = onfailure
         func.precheck = precheck
+        func.handlesall = handlesall or mergetype is self.nomerge
 
 
 class hint(_funcregistrarbase):

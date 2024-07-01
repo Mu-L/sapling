@@ -22,11 +22,11 @@ export const vars = {
   fg: 'var(--foreground)',
   border: 'var(--contrast-border)',
   /** very bright border, usually only set in high-contrast themes */
-  activeBorder: 'var(--contrast-active-border)',
-  focusBorder: 'var(--focus-border)',
+  activeBorder: 'var(--contrast-active-border, transparent)',
+  focusBorder: 'var(--focus-border, transparent)',
 };
 
-const styles = stylex.create({
+export const buttonStyles = stylex.create({
   button: {
     background: {
       default: 'var(--button-secondary-background)',
@@ -60,7 +60,7 @@ const styles = stylex.create({
     borderColor: colors.subtleHoverDarken,
     background: {
       default: colors.subtleHoverDarken,
-      ':hover': 'var(--button-icon-hover-background)',
+      ':hover': 'var(--button-icon-hover-background, rgba(90, 93, 94, 0.31))',
     },
     borderRadius: '5px',
     color: vars.fg,
@@ -86,21 +86,55 @@ const styles = stylex.create({
 export const Button = forwardRef(
   (
     {
-      icon,
-      primary,
+      icon: iconProp,
+      primary: primaryProp,
       disabled,
       onClick,
       children,
       xstyle,
+      kind,
+      className,
       ...rest
     }: {
+      className?: string;
       children?: ReactNode;
       disabled?: boolean;
       xstyle?: stylex.StyleXStyles;
+      primary?: boolean;
+      icon?: boolean;
     } & Omit<ReactProps<HTMLButtonElement>, 'className'> &
-      ExclusiveOr<{primary?: boolean}, {icon?: boolean}>,
+      ExclusiveOr<
+        ExclusiveOr<
+          {
+            /**
+             * Render as a bright button, encouraged the primary confirmation action.
+             * Equivalent to kind='primary'.
+             */
+            primary?: boolean;
+          },
+          {
+            /**
+             * Render as a smaller, more subtle button. Useful in toolbars or when using an icon instead of a label.
+             * Equivalent to kind='icon'.
+             */
+            icon?: boolean;
+          }
+        >,
+        /** How to display the button. Can also provide `primary` or `icon` shorthand bool props instead. */
+        {kind?: 'primary' | 'icon' | undefined}
+      >,
     ref: ForwardedRef<HTMLButtonElement>,
   ) => {
+    const primary = kind === 'primary' || primaryProp === true;
+    const icon = kind === 'icon' || iconProp === true;
+    const {className: stylexClassName, ...otherStylex} = stylex.props(
+      layout.flexRow,
+      buttonStyles.button,
+      primary && buttonStyles.primary,
+      icon && buttonStyles.icon,
+      disabled && buttonStyles.disabled,
+      xstyle,
+    );
     return (
       <button
         tabIndex={disabled ? -1 : 0}
@@ -109,14 +143,8 @@ export const Button = forwardRef(
           disabled !== true && onClick?.(e);
         }}
         ref={ref}
-        {...stylex.props(
-          layout.flexRow,
-          styles.button,
-          primary && styles.primary,
-          icon && styles.icon,
-          disabled && styles.disabled,
-          xstyle,
-        )}
+        className={stylexClassName + (className ? ' ' + className : '')}
+        {...otherStylex}
         disabled={disabled}
         {...rest}>
         {children}

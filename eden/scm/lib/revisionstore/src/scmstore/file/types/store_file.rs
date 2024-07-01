@@ -19,7 +19,7 @@ use crate::scmstore::FileAuxData;
 
 #[derive(Debug, Default)]
 pub struct StoreFile {
-    // TODO(meyer): We'll probably eventually need a better "canonical lazy file" abstraction, since EdenApi FileEntry won't always carry content
+    // TODO(meyer): We'll probably eventually need a better "canonical lazy file" abstraction, since SaplingRemoteApi FileEntry won't always carry content
     pub(crate) content: Option<LazyFile>,
     pub(crate) aux_data: Option<FileAuxData>,
 }
@@ -47,6 +47,7 @@ impl StoreValue for StoreFile {
 impl StoreFile {
     pub fn aux_data(&self) -> Result<FileAuxData> {
         self.aux_data
+            .clone()
             .ok_or_else(|| anyhow!("no aux data available"))
     }
 

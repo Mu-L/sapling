@@ -7,15 +7,18 @@
 
 import type {DagCommitInfo} from './dag/dag';
 import type {CommitInfo, SuccessorInfo} from './types';
+import type {ReactNode} from 'react';
 import type {ContextMenuItem} from 'shared/ContextMenu';
 
-import {Bookmarks} from './Bookmark';
+import {Bookmarks, createBookmarkAtCommit} from './Bookmark';
+import {openBrowseUrlForHash, supportsBrowseUrlForHash} from './BrowseRepo';
 import {hasUnsavedEditedCommitMessage} from './CommitInfoView/CommitInfoState';
 import {currentComparisonMode} from './ComparisonView/atoms';
 import {Row} from './ComponentUtils';
 import {DragToRebase} from './DragToRebase';
 import {EducationInfoTip} from './Education';
 import {HighlightCommitsWhileHovering} from './HighlightedCommits';
+import {Internal} from './Internal';
 import {SubmitSelectionButton} from './SubmitSelectionButton';
 import {Subtle} from './Subtle';
 import {latestSuccessorUnlessExplicitlyObsolete} from './SuccessionTracker';
@@ -30,12 +33,15 @@ import {
   diffSummary,
   latestCommitMessageTitle,
 } from './codeReview/CodeReviewInfo';
-import {DiffInfo} from './codeReview/DiffBadge';
+import {DiffFollower, DiffInfo} from './codeReview/DiffBadge';
 import {SyncStatus, syncStatusAtom} from './codeReview/syncStatus';
+import {Button} from './components/Button';
 import {FoldButton, useRunFoldPreview} from './fold';
+import {findPublicBaseAncestor} from './getCommitTree';
 import {t, T} from './i18n';
 import {IconStack} from './icons/IconStack';
-import {readAtom, writeAtom} from './jotaiUtils';
+import {atomFamilyWeak, readAtom, writeAtom} from './jotaiUtils';
+import {CONFLICT_SIDE_LABELS} from './mergeConflicts/state';
 import {getAmendToOperation, isAmendToAllowedForCommit} from './operationUtils';
 import {GotoOperation} from './operations/GotoOperation';
 import {HideOperation} from './operations/HideOperation';
@@ -45,23 +51,27 @@ import {
   useRunPreviewedOperation,
   inlineProgressByHash,
 } from './operationsState';
+import platform from './platform';
 import {CommitPreview, dagWithPreviews, uncommittedChangesWithPreviews} from './previews';
-import {RelativeDate} from './relativeDate';
+import {RelativeDate, relativeDate} from './relativeDate';
 import {isNarrowCommitTree} from './responsive';
 import {selectedCommits, useCommitCallbacks} from './selection';
+import {inMergeConflicts, mergeConflicts} from './serverAPIState';
 import {useConfirmUnsavedEditsBeforeSplit} from './stackEdit/ui/ConfirmUnsavedEditsBeforeSplit';
 import {SplitButton} from './stackEdit/ui/SplitButton';
 import {editingStackIntentionHashes} from './stackEdit/ui/stackEditState';
-import {useShowToast} from './toast';
+import {copyAndShowToast} from './toast';
+import {spacing} from './tokens.stylex';
 import {succeedableRevset} from './types';
 import {short} from './utils';
-import {VSCodeButton} from '@vscode/webview-ui-toolkit/react';
-import {useAtomValue, useSetAtom} from 'jotai';
+import * as stylex from '@stylexjs/stylex';
+import {atom, useAtomValue, useSetAtom} from 'jotai';
 import {useAtomCallback} from 'jotai/utils';
 import React, {memo} from 'react';
 import {ComparisonType} from 'shared/Comparison';
 import {useContextMenu} from 'shared/ContextMenu';
 import {Icon} from 'shared/Icon';
+import {MS_PER_DAY} from 'shared/constants';
 import {useAutofocusRef} from 'shared/hooks';
 import {notEmpty} from 'shared/utils';
 
@@ -85,6 +95,20 @@ function previewPreventsActions(preview?: CommitPreview): boolean {
   return false;
 }
 
+const commitLabelForCommit = atomFamilyWeak((hash: string) =>
+  atom(get => {
+    const conflicts = get(mergeConflicts);
+    const {localShort, incomingShort} = CONFLICT_SIDE_LABELS;
+    const hashes = conflicts?.hashes;
+    if (hash === hashes?.other) {
+      return incomingShort;
+    } else if (hash === hashes?.local) {
+      return localShort;
+    }
+    return null;
+  }),
+);
+
 export const Commit = memo(
   ({
     commit,
@@ -107,14 +131,16 @@ export const Commit = memo(
     const {isSelected, onDoubleClickToShowDrawer} = useCommitCallbacks(commit);
     const actionsPrevented = previewPreventsActions(previewType);
 
+    const inConflicts = useAtomValue(inMergeConflicts);
+
     const isNarrow = useAtomValue(isNarrowCommitTree);
 
     const title = useAtomValue(latestCommitMessageTitle(commit.hash));
 
-    const toast = useShowToast();
+    const commitLabel = useAtomValue(commitLabelForCommit(commit.hash));
 
     const clipboardCopy = (text: string, url?: string) =>
-      toast.copyAndShowToast(text, url == null ? undefined : clipboardLinkHtml(text, url));
+      copyAndShowToast(text, url == null ? undefined : clipboardLinkHtml(text, url));
 
     const viewChangesCallback = useAtomCallback((_get, set) => {
       set(currentComparisonMode, {
@@ -142,6 +168,19 @@ export const Commit = memo(
           onClick: () => clipboardCopy(commit.hash),
         },
       ];
+      if (isPublic && readAtom(supportsBrowseUrlForHash)) {
+        items.push({
+          label: (
+            <Row>
+              <T>Browse Repo At This Commit</T>
+              <Icon icon="link-external" />
+            </Row>
+          ),
+          onClick: () => {
+            openBrowseUrlForHash(commit.hash);
+          },
+        });
+      }
       if (!isPublic && commit.diffId != null) {
         items.push({
           label: <T replace={{$number: commit.diffId}}>Copy Diff Number "$number"</T>,
@@ -158,10 +197,7 @@ export const Commit = memo(
           onClick: viewChangesCallback,
         });
       }
-      if (
-        !isPublic &&
-        (syncStatus === SyncStatus.LocalIsNewer || syncStatus === SyncStatus.RemoteIsNewer)
-      ) {
+      if (!isPublic && syncStatus != null && syncStatus !== SyncStatus.InSync) {
         const provider = readAtom(codeReviewProvider);
         if (provider?.supportsComparingSinceLastSubmit) {
           items.push({
@@ -175,7 +211,7 @@ export const Commit = memo(
           });
         }
       }
-      if (!isPublic && !actionsPrevented) {
+      if (!isPublic && !actionsPrevented && !inConflicts) {
         const suggestedRebases = readAtom(suggestedRebaseDestinations);
         items.push({
           label: 'Rebase onto',
@@ -214,6 +250,12 @@ export const Commit = memo(
           });
         }
         items.push({
+          label: <T>Create Bookmark...</T>,
+          onClick: () => {
+            createBookmarkAtCommit(commit);
+          },
+        });
+        items.push({
           label: hasChildren ? <T>Hide Commit and Descendants</T> : <T>Hide Commit</T>,
           onClick: () =>
             writeAtom(
@@ -232,13 +274,11 @@ export const Commit = memo(
     if (previewType === CommitPreview.REBASE_ROOT) {
       commitActions.push(
         <React.Fragment key="rebase">
-          <VSCodeButton
-            appearance="secondary"
-            onClick={() => handlePreviewedOperation(/* cancel */ true)}>
+          <Button onClick={() => handlePreviewedOperation(/* cancel */ true)}>
             <T>Cancel</T>
-          </VSCodeButton>
-          <VSCodeButton
-            appearance="primary"
+          </Button>
+          <Button
+            primary
             onClick={() => {
               handlePreviewedOperation(/* cancel */ false);
 
@@ -254,17 +294,15 @@ export const Commit = memo(
               }
             }}>
             <T>Run Rebase</T>
-          </VSCodeButton>
+          </Button>
         </React.Fragment>,
       );
     } else if (previewType === CommitPreview.HIDDEN_ROOT) {
       commitActions.push(
         <React.Fragment key="hide">
-          <VSCodeButton
-            appearance="secondary"
-            onClick={() => handlePreviewedOperation(/* cancel */ true)}>
+          <Button onClick={() => handlePreviewedOperation(/* cancel */ true)}>
             <T>Cancel</T>
-          </VSCodeButton>
+          </Button>
           <ConfirmHideButton onClick={() => handlePreviewedOperation(/* cancel */ false)} />
         </React.Fragment>,
       );
@@ -287,36 +325,43 @@ export const Commit = memo(
               'Update files in the working copy to match this commit. Mark this commit as the "current commit".',
             )}
             delayMs={250}>
-            <VSCodeButton
-              appearance="secondary"
+            <Button
               aria-label={t('Go to commit "$title"', {replace: {$title: commit.title}})}
-              onClick={event => {
-                runOperation(
-                  new GotoOperation(
-                    // If the commit has a remote bookmark, use that instead of the hash. This is easier to read in the command history
-                    // and works better with optimistic state
-                    commit.remoteBookmarks.length > 0
-                      ? succeedableRevset(commit.remoteBookmarks[0])
-                      : latestSuccessorUnlessExplicitlyObsolete(commit),
-                  ),
-                );
+              xstyle={styles.gotoButton}
+              onClick={async event => {
                 event.stopPropagation(); // don't toggle selection by letting click propagate onto selection target.
-                // Instead, ensure we remove the selection, so we view the new head commit by default
+
+                const dest =
+                  // If the commit has a remote bookmark, use that instead of the hash. This is easier to read in the command history
+                  // and works better with optimistic state
+                  commit.remoteBookmarks.length > 0
+                    ? succeedableRevset(commit.remoteBookmarks[0])
+                    : latestSuccessorUnlessExplicitlyObsolete(commit);
+                const shouldContinue = await maybeWarnAboutOldDestination(commit);
+                if (!shouldContinue) {
+                  return;
+                }
+                runOperation(new GotoOperation(dest));
+
+                // Instead of propagating, ensure we remove the selection, so we view the new head commit by default
                 // (since the head commit is the default thing shown in the sidebar)
                 writeAtom(selectedCommits, new Set());
               }}>
-              <T>Goto</T> <Icon icon="newline" />
-            </VSCodeButton>
+              <T>Goto</T>
+              <Icon icon="newline" />
+            </Button>
           </Tooltip>
         </span>,
       );
     }
 
-    if (!isPublic && !actionsPrevented && commit.isDot) {
+    if (!isPublic && !actionsPrevented && commit.isDot && !inConflicts) {
       commitActions.push(<UncommitButton key="uncommit" />);
     }
-    if (!isPublic && !actionsPrevented && commit.isDot && !isObsoleted) {
-      commitActions.push(<SplitButton key="split" commit={commit} />);
+    if (!isPublic && !actionsPrevented && commit.isDot && !isObsoleted && !inConflicts) {
+      commitActions.push(
+        <SplitButton icon key="split" trackerEventName="SplitOpenFromHeadCommit" commit={commit} />,
+      );
     }
 
     if (!isPublic && !actionsPrevented) {
@@ -355,6 +400,7 @@ export const Commit = memo(
             previewType={previewType}>
             {isPublic ? null : (
               <span className="commit-title">
+                {commitLabel && <CommitLabel>{commitLabel}</CommitLabel>}
                 <span>{title}</span>
                 <CommitDate date={commit.date} />
               </span>
@@ -376,6 +422,7 @@ export const Commit = memo(
               <SuccessorInfoToDisplay successorInfo={commit.successorInfo} />
             ) : null}
             {inlineProgress && <InlineProgressSpan message={inlineProgress} />}
+            {commit.isFollower ? <DiffFollower commit={commit} /> : null}
           </DivIfChildren>
           {!isNarrow ? commitActions : null}
         </div>
@@ -395,6 +442,22 @@ export const Commit = memo(
   },
 );
 
+const styles = stylex.create({
+  commitLabel: {
+    fontVariant: 'all-petite-caps',
+    opacity: '0.8',
+    fontWeight: 'bold',
+    fontSize: '90%',
+  },
+  gotoButton: {
+    gap: spacing.half,
+  },
+});
+
+function CommitLabel({children}: {children?: ReactNode}) {
+  return <div {...stylex.props(styles.commitLabel)}>{children}</div>;
+}
+
 export function InlineProgressSpan(props: {message: string}) {
   return (
     <span className="commit-inline-operation-progress">
@@ -412,8 +475,8 @@ function OpenCommitInfoButton({
 }) {
   return (
     <Tooltip title={t("Open commit's details in sidebar")} delayMs={250}>
-      <VSCodeButton
-        appearance="icon"
+      <Button
+        icon
         onClick={e => {
           revealCommit();
           e.stopPropagation();
@@ -423,7 +486,7 @@ function OpenCommitInfoButton({
         aria-label={t('Open commit "$title"', {replace: {$title: commit.title}})}
         data-testid="open-commit-info-button">
         <Icon icon="chevron-right" />
-      </VSCodeButton>
+      </Button>
     </Tooltip>
   );
 }
@@ -431,9 +494,9 @@ function OpenCommitInfoButton({
 function ConfirmHideButton({onClick}: {onClick: () => unknown}) {
   const ref = useAutofocusRef() as React.MutableRefObject<null>;
   return (
-    <VSCodeButton ref={ref} appearance="primary" onClick={onClick}>
+    <Button ref={ref} primary onClick={onClick}>
       <T>Hide</T>
-    </VSCodeButton>
+    </Button>
   );
 }
 
@@ -443,12 +506,12 @@ function ConfirmCombineButtons() {
 
   return (
     <>
-      <VSCodeButton appearance="secondary" onClick={cancel}>
+      <Button onClick={cancel}>
         <T>Cancel</T>
-      </VSCodeButton>
-      <VSCodeButton ref={ref} appearance="primary" onClick={run}>
+      </Button>
+      <Button ref={ref} primary onClick={run}>
         <T>Run Combine</T>
-      </VSCodeButton>
+      </Button>
     </>
   );
 }
@@ -542,6 +605,41 @@ function ObsoleteTipInner(props: {isSuccessorPublic?: boolean}) {
         ))}
       </ul>
     </div>
+  );
+}
+
+function maybeWarnAboutOldDestination(dest: CommitInfo): Promise<boolean> {
+  const provider = readAtom(codeReviewProvider);
+  // Cutoff age is determined by the code review provider since internal repos have different requirements than GitHub-backed repos.
+  const MAX_AGE_CUTOFF_MS = provider?.gotoDistanceWarningAgeCutoff ?? 30 * MS_PER_DAY;
+
+  const dag = readAtom(dagWithPreviews);
+  const currentBase = findPublicBaseAncestor(dag);
+  const destBase = findPublicBaseAncestor(dag, dest.hash);
+  if (!currentBase || !destBase) {
+    // can't determine if we can show warning
+    return Promise.resolve(true);
+  }
+
+  const ageDiff = currentBase.date.valueOf() - destBase.date.valueOf();
+  if (ageDiff < MAX_AGE_CUTOFF_MS) {
+    // Either destination base is within time limit or destination base is newer than the current base.
+    // No need to warn.
+    return Promise.resolve(true);
+  }
+
+  return platform.confirm(
+    t(
+      Internal.warnAboutOldGotoReason ??
+        'The destination commit is $age older than the current commit. ' +
+          "Going here may be slow. It's often faster to rebase the commit to a newer base before going. " +
+          'Do you want to `goto` anyway?',
+      {
+        replace: {
+          $age: relativeDate(destBase.date, {reference: currentBase.date, useRelativeForm: true}),
+        },
+      },
+    ),
   );
 }
 

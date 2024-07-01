@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import type {Hash, Result, ChangedFile, CommitInfo} from './types';
+import type {Hash, Result, CommitInfo, FilesSample} from './types';
 
 import serverAPI from './ClientToServerAPI';
 import {ChangedFiles} from './UncommittedChanges';
@@ -14,7 +14,7 @@ import {ComparisonType} from 'shared/Comparison';
 import {LRU} from 'shared/LRU';
 
 // Cache fetches in progress so we don't double fetch
-const allCommitFilesCache = new LRU<Hash, Promise<Result<Array<ChangedFile>>>>(10);
+const commitFilesCache = new LRU<Hash, Promise<Result<FilesSample>>>(10);
 
 /**
  * The basic CommitInfo we fetch in bulk only contains the first 25 files.
@@ -23,7 +23,7 @@ const allCommitFilesCache = new LRU<Hash, Promise<Result<Array<ChangedFile>>>>(1
  * to augment the subset we already have.
  */
 export function ChangedFilesWithFetching({commit}: {commit: CommitInfo}) {
-  const [fetchedAllFiles, setFetchedAllFiles] = useState<Array<ChangedFile> | undefined>(undefined);
+  const [fetchedAllFiles, setFetchedAllFiles] = useState<FilesSample | undefined>(undefined);
 
   const hasAllFilesAlready = commit.filesSample.length === commit.totalFileCount;
   useEffect(() => {
@@ -31,37 +31,17 @@ export function ChangedFilesWithFetching({commit}: {commit: CommitInfo}) {
     if (hasAllFilesAlready) {
       return;
     }
-    const foundPromise = allCommitFilesCache.get(commit.hash);
-    if (foundPromise != null) {
-      foundPromise.then(result => {
-        if (result.value != null) {
-          setFetchedAllFiles(result.value);
-        }
-      });
-      return;
-    }
-    serverAPI.postMessage({
-      type: 'fetchAllCommitChangedFiles',
-      hash: commit.hash,
-    });
-
-    const resultPromise = serverAPI
-      .nextMessageMatching('fetchedAllCommitChangedFiles', message => message.hash === commit.hash)
-      .then(result => result.result);
-    allCommitFilesCache.set(commit.hash, resultPromise);
-
-    resultPromise.then(result => {
-      const files = result.value;
-      if (files != null) {
-        setFetchedAllFiles(files);
+    getChangedFilesForHash(commit.hash).then(result => {
+      if (result.value != null) {
+        setFetchedAllFiles(result.value);
       }
     });
   }, [commit.hash, hasAllFilesAlready]);
 
   return (
     <ChangedFiles
-      filesSubset={fetchedAllFiles ?? commit.filesSample}
-      totalFiles={commit.totalFileCount}
+      filesSubset={fetchedAllFiles?.filesSample ?? commit.filesSample}
+      totalFiles={fetchedAllFiles?.totalFileCount ?? commit.totalFileCount}
       comparison={
         commit.isDot
           ? {type: ComparisonType.HeadChanges}
@@ -72,4 +52,27 @@ export function ChangedFilesWithFetching({commit}: {commit: CommitInfo}) {
       }
     />
   );
+}
+
+/**
+ * Get changed files in a given commit.
+ * A small subset of the files may have already been fetched,
+ * or in some cases no files may be cached yet and all files need to be fetched asynchronously. */
+export function getChangedFilesForHash(hash: Hash, limit = 1000): Promise<Result<FilesSample>> {
+  const foundPromise = commitFilesCache.get(hash);
+  if (foundPromise != null) {
+    return foundPromise;
+  }
+  serverAPI.postMessage({
+    type: 'fetchCommitChangedFiles',
+    hash,
+    limit,
+  });
+
+  const resultPromise = serverAPI
+    .nextMessageMatching('fetchedCommitChangedFiles', message => message.hash === hash)
+    .then(result => result.result);
+  commitFilesCache.set(hash, resultPromise);
+
+  return resultPromise;
 }

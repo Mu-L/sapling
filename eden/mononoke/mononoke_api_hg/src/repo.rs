@@ -28,10 +28,15 @@ use bytes::Bytes;
 use changeset_fetcher::ChangesetFetcherRef;
 use changesets::ChangesetInsert;
 use changesets::ChangesetsRef;
+use commit_cloud::CommitCloudRef;
 use commit_graph::CommitGraphRef;
 use context::CoreContext;
 use edenapi_types::AnyId;
+use edenapi_types::GetReferencesParams;
+use edenapi_types::ReferencesData;
+use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadToken;
+use edenapi_types::WorkspaceData;
 use ephemeral_blobstore::Bubble;
 use ephemeral_blobstore::BubbleId;
 use ephemeral_blobstore::RepoEphemeralStore;
@@ -564,7 +569,7 @@ impl HgRepoContext {
     }
 
     /// This provides the same functionality as
-    /// `mononke_api::RepoContext::many_changeset_ids_to_locations`. It just translates to
+    /// `mononoke_api::RepoContext::many_changeset_ids_to_locations`. It just translates to
     /// and from Mercurial types.
     pub async fn many_changeset_ids_to_locations(
         &self,
@@ -1045,6 +1050,40 @@ impl HgRepoContext {
             .collect::<Result<Vec<_>, MononokeError>>()?;
 
         Ok(hg_parent_mapping)
+    }
+
+    pub async fn cloud_workspace(
+        &self,
+        workspace: &str,
+        reponame: &str,
+    ) -> Result<WorkspaceData, MononokeError> {
+        Ok(self
+            .blob_repo()
+            .commit_cloud()
+            .get_workspace(workspace, reponame)
+            .await?)
+    }
+
+    pub async fn cloud_references(
+        &self,
+        params: GetReferencesParams,
+    ) -> Result<ReferencesData, MononokeError> {
+        Ok(self
+            .blob_repo()
+            .commit_cloud()
+            .get_references(params)
+            .await?)
+    }
+
+    pub async fn cloud_update_references(
+        &self,
+        params: UpdateReferencesParams,
+    ) -> Result<ReferencesData, MononokeError> {
+        Ok(self
+            .blob_repo()
+            .commit_cloud()
+            .update_references(params)
+            .await?)
     }
 }
 

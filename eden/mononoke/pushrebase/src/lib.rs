@@ -64,6 +64,7 @@ use blobrepo_utils::convert_diff_result_into_file_change_for_diamond_merge;
 use blobstore::Loadable;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bookmarks::BookmarkKey;
+use bookmarks::BookmarkUpdateLogId;
 use bookmarks::BookmarkUpdateReason;
 use bookmarks::BookmarksRef;
 use changesets::ChangesetsRef;
@@ -232,7 +233,7 @@ pub struct PushrebaseOutcome {
     pub retry_num: PushrebaseRetryNum,
     pub rebased_changesets: Vec<PushrebaseChangesetPair>,
     pub pushrebase_distance: PushrebaseDistance,
-    pub log_id: u64,
+    pub log_id: BookmarkUpdateLogId,
 }
 
 pub trait Repo = BonsaiHgMappingRef
@@ -439,7 +440,14 @@ async fn do_rebase(
     onto_bookmark: &BookmarkKey,
     mut hooks: Vec<Box<dyn PushrebaseCommitHook>>,
     retry_num: PushrebaseRetryNum,
-) -> Result<Option<(ChangesetId, u64, Vec<PushrebaseChangesetPair>)>, PushrebaseError> {
+) -> Result<
+    Option<(
+        ChangesetId,
+        BookmarkUpdateLogId,
+        Vec<PushrebaseChangesetPair>,
+    )>,
+    PushrebaseError,
+> {
     let (new_head, rebased_changesets) = create_rebased_changesets(
         ctx,
         repo,
@@ -1187,7 +1195,14 @@ async fn try_move_bookmark(
     new_value: ChangesetId,
     rebased_changesets: RebasedChangesets,
     hooks: Vec<Box<dyn PushrebaseTransactionHook>>,
-) -> Result<Option<(ChangesetId, u64, Vec<PushrebaseChangesetPair>)>, PushrebaseError> {
+) -> Result<
+    Option<(
+        ChangesetId,
+        BookmarkUpdateLogId,
+        Vec<PushrebaseChangesetPair>,
+    )>,
+    PushrebaseError,
+> {
     let mut txn = repo.bookmarks().create_transaction(ctx);
 
     match old_value {
@@ -1217,7 +1232,10 @@ async fn try_move_bookmark(
         .boxed()
     };
 
-    let maybe_log_id = txn.commit_with_hook(Arc::new(sql_txn_hook)).await?;
+    let maybe_log_id = txn
+        .commit_with_hook(Arc::new(sql_txn_hook))
+        .await?
+        .map(BookmarkUpdateLogId::from);
 
     Ok(maybe_log_id.map(|log_id| {
         (
@@ -1527,7 +1545,7 @@ mod tests {
                 .await?;
 
             let hook: Box<dyn PushrebaseHook> = Box::new(Hook(repo.repo_identity().id()));
-            let hooks = vec![hook];
+            let hooks = [hook];
 
             do_pushrebase_bonsai(
                 &ctx,
@@ -1535,7 +1553,7 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![bcs.clone()],
-                &hooks[..],
+                &hooks,
             )
             .map_err(|err| format_err!("{:?}", err))
             .await?;
@@ -1556,7 +1574,7 @@ mod tests {
                 &Default::default(),
                 &book,
                 &hashset![bcs],
-                &hooks[..],
+                &hooks,
             )
             .map_err(|err| format_err!("{:?}", err))
             .await?;
@@ -3285,7 +3303,7 @@ mod tests {
             .await?;
 
         let hook: Box<dyn PushrebaseHook> = Box::new(InvalidPushrebaseHook {});
-        let hooks = vec![hook];
+        let hooks = [hook];
 
         let bcs_merge = bcs_id_merge.load(&ctx, repo.repo_blobstore()).await?;
 
@@ -3296,7 +3314,7 @@ mod tests {
             &Default::default(),
             &book,
             &hashset![bcs_merge.clone()],
-            &hooks[..],
+            &hooks,
         )
         .await;
 
