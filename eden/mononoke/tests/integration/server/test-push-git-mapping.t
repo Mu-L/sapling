@@ -7,7 +7,7 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 INFINITEPUSH_NAMESPACE_REGEX='^scratch/.+$' POPULATE_GIT_MAPPING=1 EMIT_OBSMARKERS=1 BLOB_TYPE="blob_files" default_setup
+  $ INFINITEPUSH_NAMESPACE_REGEX='^scratch/.+$' POPULATE_GIT_MAPPING=1 EMIT_OBSMARKERS=1 BLOB_TYPE="blob_files" NON_GIT_TYPES=1 default_setup
   hg repo
   o  C [draft;rev=2;26805aba1e60]
   │
@@ -32,7 +32,7 @@
 Push first commit to infiniepush
   $ touch file1
   $ hg ci -Aqm commit1 --extra hg-git-rename-source=git --extra convert_revision=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
-  $ sl push -q -r . --to "scratch/123" --create
+  $ hg push -q -r . --to "scratch/123" --create
 
 Check that mappings are empty
   $ get_bonsai_git_mapping | sort
@@ -40,7 +40,7 @@ Check that mappings are empty
 Push another commit to master
   $ touch file2
   $ hg ci -Aqm commit2 --extra hg-git-rename-source=git --extra convert_revision=2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b
-  $ sl push -q -r . --to master_bookmark --create
+  $ hg push -q -r . --to master_bookmark --create
 
 Check that mappings were populated
   $ get_bonsai_git_mapping | sort
@@ -50,13 +50,13 @@ Check that mappings were populated
 Push a commit to infinitepush, then move bookmark to it
   $ touch file3
   $ hg ci -Aqm commit1 --extra hg-git-rename-source=git --extra convert_revision=3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c
-  $ sl push -q -r . --to "scratch/123" --create
+  $ hg push -q -r . --to "scratch/123" --create
 
   $ get_bonsai_git_mapping | sort
   3CEE0520D115C5973E538AFDEB6985C1DF2CFC2C8E58CE465B855D73993EFBA1|1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A
   E37E13B17B5C2B37965B2A9591A64CB2C44A68FD10F1362A595DA8C6E4EEFA41|2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B
 
-  $ sl push -q -r . --to "master_bookmark"
+  $ hg push -q -r . --to "master_bookmark"
   $ get_bonsai_git_mapping | sort
   080A23640726489F849CF85B032DE1C47CBC78CE20A88F07F2DC031EBB8642FC|3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C
   3CEE0520D115C5973E538AFDEB6985C1DF2CFC2C8E58CE465B855D73993EFBA1|1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A
@@ -65,12 +65,11 @@ Push a commit to infinitepush, then move bookmark to it
 Now push a commit to infinitepush, then force it to be public and then move bookmark to it
   $ touch file4
   $ hg ci -Aqm commit1 --extra hg-git-rename-source=git --extra convert_revision=4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d
-  $ sl push -q -r . --to "scratch/123" --create
+  $ hg push -q -r . --to "scratch/123" --create
 
-  $ hg log -r . -T '{node}\n' > "$TESTTMP"/commits_to_make_public
-  $ mononoke_admin phases add-public "$TESTTMP"/commits_to_make_public &> /dev/null
+  $ mononoke_newadmin phases -R repo add-public -i $(hg log -r . -T '{node}\n') &> /dev/null
 
-  $ sl push -q -r . --to "master_bookmark"
+  $ hg push -q -r . --to "master_bookmark"
   $ get_bonsai_git_mapping | sort
   080A23640726489F849CF85B032DE1C47CBC78CE20A88F07F2DC031EBB8642FC|3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C
   3CEE0520D115C5973E538AFDEB6985C1DF2CFC2C8E58CE465B855D73993EFBA1|1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A

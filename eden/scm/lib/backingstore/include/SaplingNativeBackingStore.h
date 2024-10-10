@@ -15,7 +15,7 @@
 #include <string_view>
 
 #include "eden/fs/store/ObjectFetchContext.h"
-#include "eden/scm/lib/backingstore/src/ffi.rs.h" // @manual
+#include "eden/scm/lib/backingstore/src/ffi.rs.h"
 
 namespace folly {
 class IOBuf;
@@ -84,11 +84,11 @@ class SaplingNativeBackingStore {
       folly::FunctionRef<void(size_t, folly::Try<std::shared_ptr<Tree>>)>
           resolve);
 
-  folly::Try<std::shared_ptr<TreeAuxData>> getTreeMetadata(
+  folly::Try<std::shared_ptr<TreeAuxData>> getTreeAuxData(
       NodeId node,
       bool local);
 
-  void getTreeMetadataBatch(
+  void getTreeAuxDataBatch(
       SaplingRequestRange requests,
       sapling::FetchMode fetch_mode,
       folly::FunctionRef<void(size_t, folly::Try<std::shared_ptr<TreeAuxData>>)>
@@ -104,11 +104,11 @@ class SaplingNativeBackingStore {
       folly::FunctionRef<
           void(size_t, folly::Try<std::unique_ptr<folly::IOBuf>>)> resolve);
 
-  folly::Try<std::shared_ptr<FileAuxData>> getBlobMetadata(
+  folly::Try<std::shared_ptr<FileAuxData>> getBlobAuxData(
       NodeId node,
       bool local);
 
-  void getBlobMetadataBatch(
+  void getBlobAuxDataBatch(
       SaplingRequestRange requests,
       sapling::FetchMode fetch_mode,
       folly::FunctionRef<void(size_t, folly::Try<std::shared_ptr<FileAuxData>>)>

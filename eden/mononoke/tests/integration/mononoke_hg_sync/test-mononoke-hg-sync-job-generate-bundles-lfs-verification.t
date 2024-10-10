@@ -8,37 +8,25 @@
 
 Setup configuration
 
-  $ cat >> $HGRCPATH << EOF
-  > [extensions]
-  > lfs=
-  > [lfs]
-  > threshold=20B
-  > usercache=$TESTTMP/lfs-cache
-  > EOF
-
   $ LFS_THRESHOLD="20" setup_common_config blob_files
   $ REPOID=2 setup_mononoke_repo_config lfs_other
   $ cd "$TESTTMP"
 
 Setup destination repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo foo > a
   $ echo foo > b
   $ hg addremove && hg ci -m 'initial'
   adding a
   adding b
   $ enable_replay_verification_hook
-  $ cat >> .hg/hgrc <<EOF
-  > [treemanifest]
-  > treeonly=True
-  > EOF
   $ hg bookmark master_bookmark -r tip
   $ cd "$TESTTMP"
 
 Blobimport them into Mononoke storage and start Mononoke
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start mononoke and a LFS server
   $ mononoke
@@ -48,23 +36,21 @@ Start mononoke and a LFS server
   $ wait_for_mononoke
 
 Make client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client-push --noupdate
   $ cd client-push
 
-  $ setup_hg_client
   $ setup_hg_modern_lfs "$lfs_uri" 10B "$TESTTMP/lfs-cache1"
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q tip
 
   $ yes A 2>/dev/null | head -c 40 > long
   $ yes B 2>/dev/null | head -c 40 > long2
   $ hg commit -Aqm "add large files"
-  $ hgmn push -r . --to master_bookmark -v
-  pushing rev 2b6ce7b50f34 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v
+  pushing rev 2b6ce7b50f34 to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found
@@ -80,7 +66,7 @@ Make client repo
   $ cd "$TESTTMP"
 
 Two missing blobs that were uploaded
-  $ mononoke_hg_sync repo-hg 1 --verify-lfs-blob-presence "${lfs_uri_other}/objects/batch" 2>&1 | grep missing
+  $ mononoke_hg_sync repo 1 --verify-lfs-blob-presence "${lfs_uri_other}/objects/batch" 2>&1 | grep missing
   * missing * object, uploading* (glob)
   * missing * object, uploading* (glob)
 

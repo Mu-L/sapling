@@ -69,7 +69,7 @@ use mutable_counters::MutableCountersArc;
 use repo_blobstore::RepoBlobstore;
 use repo_derived_data::RepoDerivedData;
 use repo_identity::RepoIdentity;
-use repo_name::encode_repo_name;
+use repourl::encode_repo_name;
 use retry::retry_always;
 use retry::RetryAttemptsCount;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -95,7 +95,7 @@ const SCUBA_TABLE: &str = "mononoke_cas_sync";
 const JOB_NAME: &str = "mononoke_cas_sync_job";
 
 const DEFAULT_EXECUTION_RETRY_NUM: usize = 1;
-const DEFAULT_RETRY_DELAY_MS: u64 = 1000;
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_BATCH_SIZE: u64 = 10;
 
 #[derive(Copy, Clone)]
@@ -296,8 +296,8 @@ impl MononokeCasSyncProcessExecutor {
             self.ctx.logger(),
             "Initiating mononoke RE CAS sync command execution for repo {}", &self.repo_name,
         );
-        let base_retry_delay_ms = args::get_u64_opt(self.matches.as_ref(), "base-retry-delay-ms")
-            .unwrap_or(DEFAULT_RETRY_DELAY_MS);
+        let base_retry_delay = args::get_u64_opt(self.matches.as_ref(), "base-retry-delay-ms")
+            .map_or(DEFAULT_RETRY_DELAY, Duration::from_millis);
         let retry_num = args::get_usize(
             self.matches.as_ref(),
             "retry-num",
@@ -341,7 +341,7 @@ impl MononokeCasSyncProcessExecutor {
                 }
                 anyhow::Ok(())
             },
-            base_retry_delay_ms,
+            base_retry_delay,
             retry_num,
         )
         .await?;
@@ -518,8 +518,16 @@ async fn try_sync_single_combined_entry<'a>(
     repo: &'a Repo,
     ctx: &'a CoreContext,
     combined_entry: &'a CombinedBookmarkUpdateLogEntry,
+    main_bookmark: &'a str,
 ) -> Result<RetryAttemptsCount, Error> {
-    re_cas_sync::try_sync_single_combined_entry(re_cas_client, repo, ctx, combined_entry).await
+    re_cas_sync::try_sync_single_combined_entry(
+        re_cas_client,
+        repo,
+        ctx,
+        combined_entry,
+        main_bookmark,
+    )
+    .await
 }
 
 /// Logs to Scuba information about a single sync event
@@ -698,6 +706,7 @@ async fn run<'a>(
             )
         })?;
     let main_bookmark_to_sync = sync_config.main_bookmark_to_sync.as_str();
+    let sync_all_bookmarks = sync_config.sync_all_bookmarks;
 
     // Before beginning any actual processing, check if cancellation has been requested.
     // If yes, then lets return early.
@@ -769,7 +778,9 @@ async fn run<'a>(
                     components: entries
                         .into_iter()
                         .filter_map(|entry| {
-                            if entry.bookmark_name.as_str() == main_bookmark_to_sync {
+                            if sync_all_bookmarks
+                                || entry.bookmark_name.as_str() == main_bookmark_to_sync
+                            {
                                 Some(entry)
                             } else {
                                 None
@@ -778,11 +789,16 @@ async fn run<'a>(
                         .collect::<Vec<_>>(),
                 };
                 if can_continue() && !combined_entry.components.is_empty() {
-                    let (stats, res) =
-                        try_sync_single_combined_entry(re_cas_client, repo, ctx, &combined_entry)
-                            .watched(ctx.logger())
-                            .timed()
-                            .await;
+                    let (stats, res) = try_sync_single_combined_entry(
+                        re_cas_client,
+                        repo,
+                        ctx,
+                        &combined_entry,
+                        main_bookmark_to_sync,
+                    )
+                    .watched(ctx.logger())
+                    .timed()
+                    .await;
 
                     let res = bind_sync_result(&combined_entry.components, res);
                     let res = match res {

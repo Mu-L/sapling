@@ -1,9 +1,6 @@
-#modern-config-incompatible
-
 #require no-eden
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ configure modern
   $ newserver server1
   $ drawdag << 'EOS'
   > B
@@ -20,6 +17,8 @@
 
   $ hg doctor --config doctor.check-lag-threshold=1
   checking internal storage
+  revisionstore: repaired
+  revisionstore: repaired
   checking commit references
   checking irrelevant draft branches for the workspace 'user/test/default'
 
@@ -40,6 +39,7 @@ Cause "lag" by adding a commit:
 
   $ hg doctor --config doctor.check-lag-threshold=1
   checking internal storage
+  revisionstore: repaired
   checking commit references
   master might be lagging, running pull
   checking irrelevant draft branches for the workspace 'user/test/default'
@@ -57,8 +57,8 @@ Test too many names:
   $ hg log -r 'all()' -T '{desc}: {remotenames}.\n'
   A: .
   B: debugremote/name1 debugremote/name2 debugremote/name3.
-  D: remote/master.
   C: .
+  D: remote/master.
 
   $ hg doctor --config doctor.check-too-many-names-threshold=1
   checking internal storage
@@ -70,8 +70,8 @@ Test too many names:
   $ hg log -r 'all()' -T '{desc}: {remotenames}.\n'
   A: .
   B: .
-  D: remote/master.
   C: .
+  D: remote/master.
 
 Test less relevant branches:
 

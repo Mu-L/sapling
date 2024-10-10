@@ -63,6 +63,7 @@ _ignoreextensions = {
     "hiddenerror",
     "inotify",
     "interhg",
+    "lfs",
     "lz4revlog",
     "morecolors",
     "mq",
@@ -80,6 +81,7 @@ _ignoreextensions = {
     "releasenotes",
     "relink",
     "remoteid",
+    "simplecache",
     "stat",
     "strip",
     "treedirstate",
@@ -104,18 +106,21 @@ DEFAULT_EXTENSIONS = {
     "progressfile",
     "remotefilelog",
     "sampling",
+    "schemes",
     "tweakdefaults",
 }
 
 # Similar to DEFAULT_EXTENSIONS. But cannot be disabled.
-ALWAYS_ON_EXTENSIONS = ()
+ALWAYS_ON_EXTENSIONS = {
+    "treemanifest",
+}
 
 
 def isenabled(ui, name):
+    if name in ALWAYS_ON_EXTENSIONS:
+        return True
     for format in ["%s", "ext.%s"]:
         conf = ui.config("extensions", format % name)
-        if name in ALWAYS_ON_EXTENSIONS:
-            return True
         if conf is not None and not conf.startswith("!"):
             return True
         # Check DEFAULT_EXTENSIONS if no config for this extension was
@@ -141,7 +146,7 @@ def find(name):
     try:
         mod = _extensions[name]
     except KeyError:
-        for k, v in pycompat.iteritems(_extensions):
+        for k, v in _extensions.items():
             if k.endswith("." + name) or k.endswith("/" + name):
                 mod = v
                 break
@@ -291,7 +296,7 @@ _cmdfuncattrs = ("norepo", "optionalrepo", "inferrepo")
 
 def _validatecmdtable(ui, cmdtable):
     """Check if extension commands have required attributes"""
-    for c, e in pycompat.iteritems(cmdtable):
+    for c, e in cmdtable.items():
         f = e[0]
         if getattr(f, "_deprecatedregistrar", False):
             ui.deprecwarn(
@@ -680,7 +685,7 @@ def wrapcommand(table, command, wrapper, synopsis=None, docstring=None):
     '''
     assert callable(wrapper)
     aliases, entry = cmdutil.findcmd(command, table)
-    for alias, e in pycompat.iteritems(table):
+    for alias, e in table.items():
         if e is entry:
             key = alias
             break
@@ -873,7 +878,7 @@ def _disabledpaths(strip_init=False):
         if name in exts or name in _order or name == "__init__":
             continue
         exts[name] = path
-    for name, path in pycompat.iteritems(_disabledextensions):
+    for name, path in _disabledextensions.items():
         # If no path was provided for a disabled extension (e.g. "color=!"),
         # don't replace the path we already found by the scan above.
         if path:
@@ -938,7 +943,7 @@ def disabled():
 
         return dict(
             (name, gettext(desc))
-            for name, desc in pycompat.iteritems(__index__.docs)
+            for name, desc in __index__.docs.items()
             if name not in _order and name not in _exclude_list
         )
     except (ImportError, AttributeError):
@@ -949,7 +954,7 @@ def disabled():
         return {}
 
     exts = {}
-    for name, path in pycompat.iteritems(paths):
+    for name, path in paths.items():
         doc = _disabledhelp(path)
         if doc and name not in _exclude_list:
             exts[name] = doc.splitlines()[0]
@@ -1012,7 +1017,7 @@ def disabledcmd(ui, cmd):
         ext = findcmd(cmd, cmd, path)
     if not ext:
         # otherwise, interrogate each extension until there's a match
-        for name, path in pycompat.iteritems(paths):
+        for name, path in paths.items():
             ext = findcmd(cmd, name, path)
             if ext:
                 break
@@ -1036,7 +1041,7 @@ def enabled(shortname=True):
 
 def notloaded():
     """return short names of extensions that failed to load"""
-    return [name for name, mod in pycompat.iteritems(_extensions) if mod is None]
+    return [name for name, mod in _extensions.items() if mod is None]
 
 
 def moduleversion(module):

@@ -6,20 +6,16 @@
 
   $ . "${TEST_FIXTURES}/library.sh"
   $ REPOTYPE="blob_files"
-  $ ENABLED_DERIVED_DATA='["git_commits", "git_trees", "git_delta_manifests_v2", "unodes", "filenodes", "hgchangesets"]' INFINITEPUSH_ALLOW_WRITES=true setup_common_config $REPOTYPE
+  $ INFINITEPUSH_ALLOW_WRITES=true setup_common_config $REPOTYPE
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ BUNDLE_PATH="${TESTTMP}/repo_bundle.bundle"
   $ cat >> $HGRCPATH <<EOF
   > [extensions]
   > amend=
   > infinitepush=
   > commitcloud=
-  > EOF
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
   > EOF
 
 # Enable infinite push and commit cloud for the test
@@ -85,7 +81,7 @@
   $ start_and_wait_for_mononoke_server
 # Clone the repository
   $ cd "$TESTTMP"
-  $ hgmn_clone mononoke://$(mononoke_address)/repo "$HG_REPO"
+  $ hg clone -q mono:repo "$HG_REPO"
   $ cd "$HG_REPO"
 
 # Add more commits to the HG repo
@@ -103,7 +99,7 @@
   $ hg commit -q -m "Add file5"
 
 # Backup the created commits to commit cloud
-  $ sl cloud backup
+  $ hg cloud backup
   commitcloud: head 'c2e143a98b79' hasn't been uploaded yet
   edenapi: queue 3 commits for upload
   edenapi: queue 3 files for upload

@@ -6,12 +6,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 configmodel = { version = "0.1.0", path = "../config/model" }
 filetime = "0.2.9"
 fs-err = { version = "2.6.0", features = ["tokio"] }
 identity = { version = "0.1.0", path = "../identity" }
+pathmatcher-types = { version = "0.1.0", path = "../pathmatcher/types" }
 spawn-ext = { version = "0.1.0", path = "../spawn-ext" }
 tracing = { version = "0.1.40", features = ["attributes", "valuable"] }
 treestate = { version = "0.1.0", path = "../treestate" }
 types = { version = "0.1.0", path = "../types" }
+
+[dev-dependencies]
+tempfile = "3.8"

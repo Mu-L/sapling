@@ -10,9 +10,9 @@ use std::sync::Arc;
 use ::commits::DagCommits;
 use ::commits::GraphNode;
 use ::commits::HgCommit;
-use ::commits::HgCommits;
 use ::commits::HybridCommits;
-use ::commits::MemHgCommits;
+use ::commits::MemCommits;
+use ::commits::OnDiskCommits;
 use ::commits::RevlogCommits;
 use anyhow::format_err;
 use async_runtime::try_block_unless_interrupted as block_on;
@@ -39,6 +39,7 @@ use parking_lot::RwLock;
 use pyedenapi::PyClient;
 use pymetalog::metalog as PyMetaLog;
 use storemodel::ReadRootTreeIds;
+use storemodel::SerializationFormat;
 
 use crate::dagalgo::dagalgo;
 use crate::idmap;
@@ -144,13 +145,24 @@ py_class!(pub class commits |py| {
             Some(map) => map,
             None => self.inner(py).read().id_map_snapshot().map_pyerr(py)?,
         };
-        Ok(Spans(block_on(id_map.to_id_set(&set.0)).map_pyerr(py)?))
+        let id_set = block_on(id_map.to_id_set(&set.0)).map_pyerr(py)?;
+        Ok(Spans::from_id_set(id_set))
     }
 
+    /// tonodes(set, preserve_order=False)
     /// Convert IdSet to Set. For compatibility with legacy code only.
-    def tonodes(&self, set: Spans) -> PyResult<Names> {
+    def tonodes(&self, set: Spans, preserve_order: bool = false) -> PyResult<Names> {
         let inner = self.inner(py).read();
-        Ok(Names(inner.to_set(&set.0).map_pyerr(py)?))
+        let mut set = set;
+        if !preserve_order {
+            set.drop_order();
+        }
+        let set = if let Some(list) = set.maybe_as_id_list() {
+            inner.id_list_to_set(list)
+        } else {
+            inner.to_set(set.as_id_set())
+        }.map_pyerr(py)?;
+        Ok(Names(set))
     }
 
     /// Obtain the read-only dagalgo object that supports various DAG algorithms.
@@ -233,6 +245,18 @@ py_class!(pub class commits |py| {
         Ok(PyNone)
     }
 
+    /// import_external_reference(metalog, names: List[str])
+    ///
+    /// Import a single external reference to metalog. Optinally build up DAG
+    /// indexes. For Git, `name` is a full reference name, like
+    /// "refs/remotes/origin/foo".
+    def import_external_references(&self, metalog: PyMetaLog, names: Vec<String>) -> PyResult<PyNone> {
+        let meta = metalog.metalog_rwlock(py);
+        let mut inner = self.inner(py).write();
+        inner.import_external_references(&mut meta.write(), &names).map_pyerr(py)?;
+        Ok(PyNone)
+    }
+
     /// migratesparsesegments(src, dst, heads=[]).
     ///
     /// Load full Dag from src directory, migrate a subset of dag to dst directory.
@@ -263,15 +287,15 @@ py_class!(pub class commits |py| {
 
     /// Construct `commits` from a revlog (`00changelog.i` and `00changelog.d`).
     @staticmethod
-    def openrevlog(dir: &PyPath) -> PyResult<Self> {
-        let inner = RevlogCommits::new(dir.as_path()).map_pyerr(py)?;
+    def openrevlog(dir: &PyPath, format: Serde<SerializationFormat> = Serde(SerializationFormat::Hg)) -> PyResult<Self> {
+        let inner = RevlogCommits::new(dir.as_path(), format.0).map_pyerr(py)?;
         Self::from_commits(py, inner)
     }
 
     /// Construct `commits` from a segmented changelog + hgcommits directory.
     @staticmethod
-    def opensegments(segmentsdir: &PyPath, commitsdir: &PyPath) -> PyResult<Self> {
-        let inner = HgCommits::new(segmentsdir.as_path(), commitsdir.as_path()).map_pyerr(py)?;
+    def opensegments(segmentsdir: &PyPath, commitsdir: &PyPath, format: Serde<SerializationFormat> = Serde(SerializationFormat::Hg)) -> PyResult<Self> {
+        let inner = OnDiskCommits::new(segmentsdir.as_path(), commitsdir.as_path(), format.0).map_pyerr(py)?;
         Self::from_commits(py, inner)
     }
 
@@ -280,9 +304,9 @@ py_class!(pub class commits |py| {
     /// This does not migrate commit texts and therefore only useful for
     /// doublewrite backend.
     @staticmethod
-    def migraterevlogtosegments(revlogdir: &PyPath, segmentsdir: &PyPath, commitsdir: &PyPath, master: Names) -> PyResult<PyNone> {
-        let revlog = RevlogCommits::new(revlogdir.as_path()).map_pyerr(py)?;
-        let mut segments = HgCommits::new(segmentsdir.as_path(), commitsdir.as_path()).map_pyerr(py)?;
+    def migraterevlogtosegments(revlogdir: &PyPath, segmentsdir: &PyPath, commitsdir: &PyPath, master: Names, format: Serde<SerializationFormat> = Serde(SerializationFormat::Hg)) -> PyResult<PyNone> {
+        let revlog = RevlogCommits::new(revlogdir.as_path(), format.0).map_pyerr(py)?;
+        let mut segments = OnDiskCommits::new(segmentsdir.as_path(), commitsdir.as_path(), format.0).map_pyerr(py)?;
         py.allow_threads(|| block_on(segments.import_dag(revlog, master.0))).map_pyerr(py)?;
         Ok(PyNone)
     }
@@ -299,7 +323,8 @@ py_class!(pub class commits |py| {
     @staticmethod
     def openhybrid(
         revlogdir: Option<&PyPath>, segmentsdir: &PyPath, commitsdir: &PyPath, edenapi: PyClient,
-        lazyhash: bool = false, lazyhashdir: Option<&PyPath> = None
+        lazyhash: bool = false, lazyhashdir: Option<&PyPath> = None,
+        format: Serde<SerializationFormat> = Serde(SerializationFormat::Hg)
     ) -> PyResult<Self> {
         let client = edenapi.extract_inner(py);
         let mut inner = HybridCommits::new(
@@ -307,6 +332,7 @@ py_class!(pub class commits |py| {
             segmentsdir.as_path(),
             commitsdir.as_path(),
             client,
+            format.0,
         ).map_pyerr(py)?;
         if let Some(dir) = lazyhashdir {
             inner.enable_lazy_commit_hashes_from_local_segments( dir.as_path()).map_pyerr(py)?;
@@ -320,7 +346,7 @@ py_class!(pub class commits |py| {
     /// `flush` does nothing for this type of object.
     @staticmethod
     def openmemory() -> PyResult<Self> {
-        let inner = MemHgCommits::new().map_pyerr(py)?;
+        let inner = MemCommits::new().map_pyerr(py)?;
         Self::from_commits(py, inner)
     }
 });

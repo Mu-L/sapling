@@ -23,8 +23,8 @@ setup common configuration for these tests
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ touch a && hg addremove && hg ci -q -ma
   adding a
   $ hg log -T '{short(node)}\n'
@@ -36,12 +36,12 @@ create master bookmark
   $ cd $TESTTMP
 
 setup repo-push and repo-pull
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
 
 blobimport
 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
 
@@ -61,8 +61,8 @@ Do infinitepush (aka commit cloud) push
   $ echo new > newfile
   $ hg addremove -q
   $ hg ci -m new
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --bundle-store --debug --allow-anon
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --bundle-store --debug --allow-anon
+  pushing to mono:repo
   sending hello command
   sending clienttelemetry command
   query 1; heads
@@ -103,13 +103,13 @@ Do infinitepush (aka commit cloud) push
   > server=False
   > branchpattern=re:scratch/.+
   > EOF
-  $ hgmn pull -r 47da8b81097c
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 47da8b81097c
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  $ hgmn up -q 47da8b81097c
+  $ hg up -q 47da8b81097c
   $ cat newfile
   new
 
@@ -126,8 +126,8 @@ Do infinitepush (aka commit cloud) push, to a bookmark
   $ echo new2 > newfile2
   $ hg addremove -q
   $ hg ci -m new2
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --to "scratch/123"
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --to "scratch/123"
+  pushing to mono:repo
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -147,8 +147,8 @@ Do infinitepush (aka commit cloud) push, to a bookmark
   abort: unexpected EOL, expected netstring digit
   [255]
 
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --to "scratch/123" --create
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --to "scratch/123" --create
+  pushing to mono:repo
   searching for changes
   $ tglogp
   @  007299f6399f draft 'new2'
@@ -160,8 +160,8 @@ Do infinitepush (aka commit cloud) push, to a bookmark
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" 'SELECT name, hg_kind, HEX(changeset_id) FROM bookmarks;'
   master_bookmark|pull_default|E10EC6CD13B1CBCFE2384F64BD37FC71B4BF9CFE21487D2EAF5064C1B3C0B793
   scratch/123|scratch|58C64A8A96ADD9087220CA5B94CD892364562F40CBDA51ACFBBA2DAD8F5C979E
-  $ hgmn push mononoke://$(mononoke_address)/repo -r 3903775176ed --to "scratch/123"
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r 3903775176ed --to "scratch/123"
+  pushing to mono:repo
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -199,20 +199,20 @@ Do infinitepush (aka commit cloud) push, to a bookmark
   abort: unexpected EOL, expected netstring digit
   [255]
 
-  $ hgmn push mononoke://$(mononoke_address)/repo -r 3903775176ed --to "scratch/123" --force
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r 3903775176ed --to "scratch/123" --force
+  pushing to mono:repo
   searching for changes
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" 'SELECT name, hg_kind, HEX(changeset_id) FROM bookmarks;'
   master_bookmark|pull_default|E10EC6CD13B1CBCFE2384F64BD37FC71B4BF9CFE21487D2EAF5064C1B3C0B793
   scratch/123|scratch|E10EC6CD13B1CBCFE2384F64BD37FC71B4BF9CFE21487D2EAF5064C1B3C0B793
-  $ hgmn push mononoke://$(mononoke_address)/repo -r 007299f6399f --to "scratch/123"
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r 007299f6399f --to "scratch/123"
+  pushing to mono:repo
   searching for changes
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" 'SELECT name, hg_kind, HEX(changeset_id) FROM bookmarks;'
   master_bookmark|pull_default|E10EC6CD13B1CBCFE2384F64BD37FC71B4BF9CFE21487D2EAF5064C1B3C0B793
   scratch/123|scratch|58C64A8A96ADD9087220CA5B94CD892364562F40CBDA51ACFBBA2DAD8F5C979E
-  $ hgmn push mononoke://$(mononoke_address)/repo -r 007299f6399f --to "scratch/124" --create --config "infinitepush.branchpattern=foo"
-  pushing rev 007299f6399f to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark scratch/124
+  $ hg push -r 007299f6399f --to "scratch/124" --create --config "infinitepush.branchpattern=foo"
+  pushing rev 007299f6399f to destination mono:repo bookmark scratch/124
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -247,13 +247,13 @@ Do infinitepush (aka commit cloud) push, to a bookmark
 
 
   $ cd ../repo-pull
-  $ hgmn pull -B "scratch/123"
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -B "scratch/123"
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  $ hgmn up -q "007299f6399f"
+  $ hg up -q "007299f6399f"
   $ cat newfile2
   new2
 
@@ -272,7 +272,7 @@ Pushbackup also works
   $ cd ../repo-push
   $ echo aa > aa && hg addremove && hg ci -q -m newrepo
   adding aa
-  $ sl cloud backup --debug
+  $ hg cloud backup --debug
   commitcloud: head '2cfeca6399fd' hasn't been uploaded yet
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -286,7 +286,7 @@ Pushbackup to mononoke peer with compression enabled
 (a larger file is needed to repro problems with zstd compression)
   $ dd if=/dev/zero of=aa bs=4048 count=1024 2> /dev/null
   $ hg amend -m "xxx"
-  $ MONONOKE_DIRECT_PEER=1 sl cloud backup --config infinitepush.bundlecompression=ZS --config mononokepeer.compression=true
+  $ MONONOKE_DIRECT_PEER=1 hg cloud backup --config infinitepush.bundlecompression=ZS --config mononokepeer.compression=true
   commitcloud: head 'd88fdbcae092' hasn't been uploaded yet
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -311,13 +311,13 @@ Pushbackup to mononoke peer with compression enabled
   
 
   $ cd ../repo-pull
-  $ hgmn pull -r 2cfeca6399fd
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 2cfeca6399fd
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  $ hgmn up -q 2cfeca6399fd
+  $ hg up -q 2cfeca6399fd
   $ cat aa
   aa
 
@@ -334,7 +334,7 @@ Pushbackup to mononoke peer with compression enabled
 Pushbackup that does nothing, as only bookmarks have changed
   $ cd ../repo-push
   $ hg book newbook
-  $ sl cloud backup
+  $ hg cloud backup
   commitcloud: nothing to upload
 
   $ tglogp
@@ -348,8 +348,8 @@ Pushbackup that does nothing, as only bookmarks have changed
   
 
 Finally, try to push existing commit to a public bookmark
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 2cfeca6399fd to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 2cfeca6399fd to destination mono:repo bookmark master_bookmark
   searching for changes
   updating bookmark master_bookmark
 
@@ -366,8 +366,8 @@ Finally, try to push existing commit to a public bookmark
 
 Check phases on another side (for pull command and pull -r)
   $ cd ../repo-pull
-  $ hgmn pull -r 47da8b81097c
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 47da8b81097c
+  pulling from mono:repo
   no changes found
   adding changesets
   adding manifests
@@ -383,8 +383,8 @@ Check phases on another side (for pull command and pull -r)
   o  3903775176ed public 'a'
   
 
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   no changes found
   adding changesets
@@ -403,21 +403,21 @@ Check phases on another side (for pull command and pull -r)
 
 # Test phases a for stack that is partially public
   $ cd ../repo-push
-  $ hgmn up 3903775176ed
+  $ hg up 3903775176ed
   0 files updated, 0 files merged, 3 files removed, 0 files unresolved
   (leaving bookmark newbook)
   $ echo new > file1
   $ hg addremove -q
   $ hg ci -m "feature release"
 
-  $ hgmn push -r . --to "test_release_1.0.0"  --create # push this release (creating new remote bookmark)
-  pushing rev 500658c138a4 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark test_release_1.0.0
+  $ hg push -r . --to "test_release_1.0.0"  --create # push this release (creating new remote bookmark)
+  pushing rev 500658c138a4 to destination mono:repo bookmark test_release_1.0.0
   searching for changes
   exporting bookmark test_release_1.0.0
   $ echo new > file2
   $ hg addremove -q
   $ hg ci -m "change on top of the release"
-  $ sl cloud backup
+  $ hg cloud backup
   commitcloud: head 'eca836c7c651' hasn't been uploaded yet
   edenapi: queue 1 commit for upload
   edenapi: queue 0 files for upload
@@ -443,8 +443,8 @@ Check phases on another side (for pull command and pull -r)
   eca836c7c6519b769367cc438ce09d83b4a4e8e1
 
   $ cd ../repo-pull
-  $ hgmn pull -r eca836c7c651 # draft revision based on different public bookmark
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r eca836c7c651 # draft revision based on different public bookmark
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
@@ -464,8 +464,8 @@ Check phases on another side (for pull command and pull -r)
   o  3903775176ed public 'a'
   
 
-  $ hgmn pull -r test_release_1.0.0
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r test_release_1.0.0
+  pulling from mono:repo
   no changes found
   adding changesets
   adding manifests
@@ -496,8 +496,8 @@ Test phases with pushrebase
   $ echo new > filea
   $ hg addremove -q
   $ hg ci -m "new feature on top of master"
-  $ hgmn push -r . --to master_bookmark # push-rebase
-  pushing rev f9e4cd522499 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark # push-rebase
+  pushing rev f9e4cd522499 to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests
@@ -536,41 +536,41 @@ More sophisticated test for phases
   > pushrebase=!
   > EOF
 
-  $ hgmn up 1708c61178dd -q
+  $ hg up 1708c61178dd -q
   $ mkcommit ww
-  $ hgmn push -r . --to "release 1"  --create -q
+  $ hg push -r . --to "release 1"  --create -q
   $ mkcommit xx
   $ mkcommit yy
   $ mkcommit zz
 
-  $ hgmn up 1708c61178dd -q
+  $ hg up 1708c61178dd -q
   $ mkcommit www
   $ mkcommit xxx
-  $ hgmn push -r . --to "release 2"  --create -q
+  $ hg push -r . --to "release 2"  --create -q
   $ mkcommit yyy
   $ mkcommit zzz
 
-  $ hgmn up 1708c61178dd -q
+  $ hg up 1708c61178dd -q
   $ mkcommit wwww
   $ mkcommit xxxx
   $ mkcommit yyyy
-  $ hgmn push -r . --to "release 3"  --create -q
+  $ hg push -r . --to "release 3"  --create -q
   $ mkcommit zzzz
 
-  $ hgmn up 1708c61178dd -q
+  $ hg up 1708c61178dd -q
   $ mkcommit wwwww
   $ mkcommit xxxxx
   $ mkcommit yyyyy
   $ mkcommit zzzzz
-  $ hgmn push -r . --to "release 4"  --create -q
+  $ hg push -r . --to "release 4"  --create -q
 
-  $ sl cloud backup -q
+  $ hg cloud backup -q
 
-  $ sl cloud check -r 7d67c7248d48 --remote
+  $ hg cloud check -r 7d67c7248d48 --remote
   7d67c7248d486cb264270530ef906f1d09d6c650 backed up
-  $ sl cloud check -r bf677f20a49d --remote
+  $ hg cloud check -r bf677f20a49d --remote
   bf677f20a49dc5ac94946f3d91ad181f8a6fdbab backed up
-  $ sl cloud check -r 5e59ac0f4dd0 --remote
+  $ hg cloud check -r 5e59ac0f4dd0 --remote
   5e59ac0f4dd00fd4d751f9f3663be99df0f4765d backed up
 
   $ tglogp
@@ -621,8 +621,8 @@ More sophisticated test for phases
 
   $ cd ../repo-pull
 
-  $ hgmn pull -r b  # test ambiguous prefix
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r b  # test ambiguous prefix
+  pulling from mono:repo
   abort: ambiguous identifier
   suggestions are:
   
@@ -638,7 +638,7 @@ More sophisticated test for phases
   !
   [255]
 
-  $ hgmn pull -r 5e59ac0f4dd0 -r bf677f20a49d -r 7d67c7248d48 -r b9f080ea9500 -q
+  $ hg pull -r 5e59ac0f4dd0 -r bf677f20a49d -r 7d67c7248d48 -r b9f080ea9500 -q
 
   $ tglogpnr -r "::b9f080ea9500 - ::default/master_bookmark"
   o  b9f080ea9500 public 'zzzzz'  default/release 4

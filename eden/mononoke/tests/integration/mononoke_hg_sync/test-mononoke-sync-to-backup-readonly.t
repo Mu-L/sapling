@@ -34,9 +34,8 @@ setup configuration
   $ cd $TESTTMP
 
 setup repo
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
   $ echo s > smallfile
   $ hg commit -Aqm "add small file"
@@ -49,27 +48,23 @@ setup repo
   $ cd ..
 
 Blobimport the hg repo to Mononoke
-  $ REPOID=0 blobimport repo-hg/.hg orig
+  $ REPOID=0 blobimport repo/.hg orig
   $ REPONAME=orig
-  $ REPOID=1 blobimport repo-hg/.hg backup
+  $ REPOID=1 blobimport repo/.hg backup
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Push to Mononoke
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames=
+  $ hg clone -q mono:orig client-push --noupdate
   $ cd $TESTTMP/client-push
-  $ setup_hg_client
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
-  > [treemanifest]
-  > treeonly=True
   > EOF
   $ hg up -q tip
 
   $ mkcommit pushcommit
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Sync it to another client should fail, because of readonly repo
   $ cd $TESTTMP
@@ -83,9 +78,9 @@ Sync it to another client with bypass-readonly should success
   * successful sync of entries [2]* (glob)
 
 Check synced commit in backup repo
-  $ hgclone_treemanifest mononoke://$(mononoke_address)/backup backup --noupdate --config extensions.remotenames=
+  $ hg clone -q mono:backup backup --noupdate
   $ cd "$TESTTMP/backup"
   $ REPONAME=backup
-  $ hgmn pull -q
-  $ hgmn log -r master_bookmark -T '{node}\n'
+  $ hg pull -q
+  $ hg log -r master_bookmark -T '{node}\n'
   9fdce596be1b7052b777aa0bf7c5e87b00397a6f

@@ -204,7 +204,6 @@ partial subdir commit test
   HG: Leave message empty to abort commit.
   HG: --
   HG: user: test
-  HG: branch 'default'
   HG: added foo/foo
 
 
@@ -272,7 +271,6 @@ dot and subdir commit test
   HG: Leave message empty to abort commit.
   HG: --
   HG: user: test
-  HG: branch 'default'
   HG: added foo/plain-file
 
 
@@ -373,7 +371,6 @@ test commit message content
   HG: Leave message empty to abort commit.
   HG: --
   HG: user: test
-  HG: branch 'default'
   HG: bookmark 'activebookmark'
   HG: added added
   HG: changed changed
@@ -410,7 +407,6 @@ test saving last-message.txt
   HG: Leave message empty to abort commit.
   HG: --
   HG: user: test
-  HG: branch 'default'
   HG: bookmark 'activebookmark'
   HG: added .hgsub
   HG: added added
@@ -431,21 +427,21 @@ specific template keywords work well
   $ cat >> .hg/hgrc <<EOF
   > [committemplate]
   > changeset.commit.normal = 'HG: this is "commit.normal" template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     {if(activebookmark,
   >    "HG: bookmark '{activebookmark}' is activated\n",
   >    "HG: no bookmark is activated\n")}{subrepos %
   >    "HG: subrepo '{subrepo}' is changed\n"}'
   > 
   > changeset.commit = HG: this is "commit" template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     {if(activebookmark,
   >    "HG: bookmark '{activebookmark}' is activated\n",
   >    "HG: no bookmark is activated\n")}{subrepos %
   >    "HG: subrepo '{subrepo}' is changed\n"}
   > 
   > changeset = HG: this is customized commit template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     {if(activebookmark,
   >    "HG: bookmark '{activebookmark}' is activated\n",
   >    "HG: no bookmark is activated\n")}{subrepos %
@@ -727,7 +723,7 @@ verify pathauditor blocks evil filepaths
   > [committemplate]
   > changeset.commit = HI THIS IS NOT STRIPPED
   >     HG: this is customized commit template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     {if(activebookmark,
   >    "HG: bookmark '{activebookmark}' is activated\n",
   >    "HG: no bookmark is activated\n")}
@@ -757,7 +753,7 @@ test that text below the --- >8 --- special string is ignored
   > [committemplate]
   > changeset.commit = first LINE
   >     HG: this is customized commit template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     HG: ------------------------ >8 ------------------------
   >     {diff()}
   > EOF
@@ -787,7 +783,7 @@ a line
   > changeset.commit = first LINE2
   >     another line HG: ------------------------ >8 ------------------------
   >     HG: this is customized commit template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     HG: ------------------------ >8 ------------------------
   >     {diff()}
   > EOF
@@ -817,7 +813,7 @@ at the end
   >     HG: ------------------------ >8 ------------------------foobar
   >     second line
   >     HG: this is customized commit template
-  >     HG: {extramsg}
+  >     HG: Leave message empty to abort commit.
   >     HG: ------------------------ >8 ------------------------
   >     {diff()}
   > EOF
@@ -841,4 +837,3 @@ at the end
   second line
 
   $ cd ..
-

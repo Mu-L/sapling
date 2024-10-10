@@ -23,14 +23,14 @@ use mononoke_types::ChangesetId;
 use crate::errors::MononokeError;
 use crate::invalid_push_redirected_request;
 use crate::repo::RepoContext;
+use crate::MononokeRepo;
 
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     async fn create_bookmark_op<'a>(
         &self,
         bookmark: &'_ BookmarkKey,
         target: ChangesetId,
         pushvars: Option<&'a HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
     ) -> Result<CreateBookmarkOp<'a>, MononokeError> {
         self.start_write()?;
 
@@ -38,15 +38,10 @@ impl RepoContext {
             bookmark: &'_ BookmarkKey,
             target: ChangesetId,
             pushvars: Option<&'a HashMap<String, Bytes>>,
-            affected_changesets_limit: Option<usize>,
         ) -> CreateBookmarkOp<'a> {
-            let op = CreateBookmarkOp::new(
-                bookmark.clone(),
-                target,
-                BookmarkUpdateReason::ApiRequest,
-                affected_changesets_limit,
-            )
-            .with_pushvars(pushvars);
+            let op =
+                CreateBookmarkOp::new(bookmark.clone(), target, BookmarkUpdateReason::ApiRequest)
+                    .with_pushvars(pushvars);
             op.log_new_public_commits_to_scribe()
         }
         let create_op = if let Some(redirector) = self.push_redirector.as_ref() {
@@ -74,9 +69,9 @@ impl RepoContext {
                         target,
                     )
                 })?;
-            make_create_op(&large_bookmark, target, pushvars, affected_changesets_limit)
+            make_create_op(&large_bookmark, target, pushvars)
         } else {
-            make_create_op(bookmark, target, pushvars, affected_changesets_limit)
+            make_create_op(bookmark, target, pushvars)
         };
         Ok(create_op)
     }
@@ -87,18 +82,15 @@ impl RepoContext {
         bookmark: &BookmarkKey,
         target: ChangesetId,
         pushvars: Option<&HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
     ) -> Result<(), MononokeError> {
-        let create_op = self
-            .create_bookmark_op(bookmark, target, pushvars, affected_changesets_limit)
-            .await?;
+        let create_op = self.create_bookmark_op(bookmark, target, pushvars).await?;
         if let Some(redirector) = self.push_redirector.as_ref() {
             let ctx = self.ctx();
             let log_id = create_op
                 .run(
                     self.ctx(),
                     self.authorization_context(),
-                    redirector.repo.inner_repo(),
+                    &redirector.repo,
                     redirector.repo.hook_manager(),
                 )
                 .await?;
@@ -109,7 +101,7 @@ impl RepoContext {
                 .run(
                     self.ctx(),
                     self.authorization_context(),
-                    self.inner_repo(),
+                    self.repo(),
                     self.hook_manager().as_ref(),
                 )
                 .await?;
@@ -123,7 +115,6 @@ impl RepoContext {
         bookmark: &BookmarkKey,
         target: ChangesetId,
         pushvars: Option<&HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
         txn: Option<Box<dyn BookmarkTransaction>>,
         txn_hooks: Vec<BookmarkTransactionHook>,
     ) -> Result<BookmarkInfoTransaction, MononokeError> {
@@ -132,14 +123,12 @@ impl RepoContext {
                 "create_bookmark_with_transaction",
             ));
         }
-        let create_op = self
-            .create_bookmark_op(bookmark, target, pushvars, affected_changesets_limit)
-            .await?;
+        let create_op = self.create_bookmark_op(bookmark, target, pushvars).await?;
         let bookmark_info_transaction = create_op
             .run_with_transaction(
                 self.ctx(),
                 self.authorization_context(),
-                self.inner_repo(),
+                self.repo(),
                 self.hook_manager().as_ref(),
                 txn,
                 txn_hooks,

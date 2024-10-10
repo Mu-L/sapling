@@ -1,10 +1,4 @@
-#modern-config-incompatible
-
 #require no-eden
-
-  $ setconfig experimental.allowfilepeer=True
-
-  $ configure modern
 
   $ showgraph() {
   >    hg log -G -T "{desc}: {phase} {bookmarks} {remotenames}" -r "all()"

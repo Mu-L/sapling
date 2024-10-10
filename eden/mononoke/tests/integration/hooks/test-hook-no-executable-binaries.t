@@ -23,8 +23,8 @@ Ok file path - should work
 
   $ touch normal_file
   $ hg ci -Aqm 1
-  $ hgmn push -r . --to master_bookmark
-  pushing rev dd7648b00878 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev dd7648b00878 to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests
@@ -37,8 +37,8 @@ Executable script - should work
   $ touch script.sh
   $ chmod +x script.sh
   $ hg ci -Aqm 1
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 80f52f5bb249 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 80f52f5bb249 to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests
@@ -51,8 +51,8 @@ Executable binary - should fail
   $ echo -e "\x00\x12\x34\x56\x78" > binary_file.exe
   $ chmod +x binary_file.exe
   $ hg ci -Aqm 1
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 2738cc1d1b73 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 2738cc1d1b73 to destination mono:repo bookmark master_bookmark
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -73,8 +73,8 @@ Non-executable binary file - should work
   $ hg up -q "min(all())"
   $ echo -e "\x00\x12\x34\x56\x78" > binary_file
   $ hg ci -Aqm 1
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 93f08e97efc1 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 93f08e97efc1 to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests
@@ -89,8 +89,8 @@ Executable binary under specific directory - should fail
   $ echo -e "\x00\x12\x34\x56\x78" > some_dir/binary_file.exe
   $ chmod +x some_dir/binary_file.exe
   $ hg ci -Aqm 1
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 03e66567b425 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 03e66567b425 to destination mono:repo bookmark master_bookmark
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -112,18 +112,34 @@ Executable binary under specific directory - should fail
   >   cat <<CONF
   > config_json='''{
   >   "illegal_executable_binary_message": "Executable file \${filename} can't be committed.",
-  >   "allow_list_paths": ["some_dir"]
+  >   "allow_list_paths": ["some_dir"],
+  >   "allow_list_files": [["560a153deec1d4cda8481e96756e53c466f3c8eb2dabaf93f9e167c986bb77c4",3]]
   > }'''
   > CONF
   > )
-  abort: repository `$TESTTMP/repo-hg` already exists
+  abort: repository `$TESTTMP/repo` already exists
   abort: destination 'repo2' is not empty
   $ force_update_configerator
 
 Executable binary under allow-listed directory - should pass
 
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 03e66567b425 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 03e66567b425 to destination mono:repo bookmark master_bookmark
+  searching for changes
+  adding changesets
+  adding manifests
+  adding file changes
+  updating bookmark master_bookmark
+
+
+Executable binary allow-listed by sha256 and size that can be on any path -- should fail initially
+  $ hg up -q "min(all())"
+  $ mkdir some_dir
+  $ echo "3030384435460a" > foo
+  $ chmod +x foo
+  $ hg ci -Aqm 2
+  $ hg push -r . --to master_bookmark
+  pushing rev 8a7b81d5132c to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests

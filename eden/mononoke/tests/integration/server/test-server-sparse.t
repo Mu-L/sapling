@@ -19,9 +19,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ hg debugdrawdag <<EOF
   > C
   > |
@@ -36,16 +35,15 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ mononoke
   $ wait_for_mononoke $TESTTMP/repo
 
 Clone the repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ cat >> .hgsparse_profile <<EOF
   > [include]
   > foo

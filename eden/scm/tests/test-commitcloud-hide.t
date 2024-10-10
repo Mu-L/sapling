@@ -1,10 +1,4 @@
-#modern-config-incompatible
-
 #require no-eden
-
-  $ setconfig experimental.allowfilepeer=True
-
-  $ configure modern
 
   $ showgraph() {
   >    hg log -G -T "{desc}: {phase} {bookmarks} {remotenames}" -r "all()"
@@ -37,8 +31,7 @@ manually.
   $ clone server client1
   $ cd client1
   $ hg goto -q 'desc(Y)'
-  $ hg pull -B other
-  pulling from ssh://user@dummy/server
+  $ hg pull -qB other
   $ hg up -qC other
 
   $ drawdag <<EOS

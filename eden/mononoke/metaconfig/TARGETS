@@ -1,13 +1,14 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "metaconfig_types",
     srcs = glob(["types/src/**/*.rs"]),
     autocargo = {"cargo_toml_dir": "types"},
     deps = [
+        "fbsource//third-party/rust:abomonation",
+        "fbsource//third-party/rust:abomonation_derive",
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:ascii",
         "fbsource//third-party/rust:clap",
@@ -34,6 +35,7 @@ rust_library(
         "fbsource//third-party/rust:maplit",
         "fbsource//third-party/rust:pretty_assertions",
         "fbsource//third-party/rust:tempfile",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/mononoke_types:mononoke_types-mocks",
     ],
     deps = [
@@ -54,6 +56,6 @@ rust_library(
         "//configerator/structs/scm/mononoke/repos:repos-rust",
         "//eden/mononoke/bookmarks:bookmarks_types",
         "//eden/mononoke/mononoke_types:mononoke_types",
-        "//eden/scm/lib/repo_name:repo_name",
+        "//eden/scm/lib/repo/url:repourl",
     ],
 )

@@ -1,7 +1,7 @@
 load("@fbcode_macros//build_defs:thrift_library.bzl", "thrift_library")
 load("//common/automock:automock.bzl", "thrift_plugin_automock")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 thrift_library(
     name = "source_control",
@@ -23,7 +23,14 @@ thrift_library(
     py_base_module = "scm.service.thrift",
     rust_deps = [
         "fbsource//third-party/rust:bytes",
+        "fbsource//third-party/rust:faster-hex",
         "fbsource//third-party/rust:smallvec",
+    ],
+    rust_extra_srcs = [
+        "extra_thrift.rs",
+    ],
+    rust_include_srcs = [
+        "include_thrift.rs",
     ],
     thrift_cpp2_options = [
         "reflection",

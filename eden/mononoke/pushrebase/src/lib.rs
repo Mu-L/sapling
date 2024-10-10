@@ -94,7 +94,9 @@ use mononoke_types::check_case_conflicts;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
 use mononoke_types::DateTime;
+use mononoke_types::DerivableType;
 use mononoke_types::FileChange;
+use mononoke_types::FileType;
 use mononoke_types::GitLfs;
 use mononoke_types::Timestamp;
 use pushrebase_hook::PushrebaseCommitHook;
@@ -296,6 +298,18 @@ async fn check_filenodes_backfilled<'a>(
     head: &ChangesetId,
     limit: u64,
 ) -> Result<(), Error> {
+    let derives_filenodes = repo
+        .repo_derived_data()
+        .active_config()
+        .types
+        .contains(&DerivableType::FileNodes);
+
+    if !derives_filenodes {
+        // Repo doesn't have filenodes derivation enabled, so no need to check
+        // if they're backfilled
+        return Ok(());
+    }
+
     let underived = repo
         .repo_derived_data()
         .count_underived::<FilenodesOnlyPublic>(ctx, *head, Some(limit))
@@ -660,11 +674,7 @@ async fn find_changed_files_between_manifests(
 ) -> Result<Vec<NonRootMPath>, PushrebaseError> {
     let paths = find_bonsai_diff(ctx, repo, ancestor, descendant)
         .await?
-        .map_ok(|diff| match diff {
-            BonsaiDiffFileChange::Changed(path, ..)
-            | BonsaiDiffFileChange::ChangedReusedId(path, ..)
-            | BonsaiDiffFileChange::Deleted(path) => path,
-        })
+        .map_ok(|diff| diff.into_path())
         .try_collect()
         .await?;
 
@@ -676,7 +686,7 @@ pub async fn find_bonsai_diff(
     repo: &impl Repo,
     ancestor: ChangesetId,
     descendant: ChangesetId,
-) -> Result<impl TryStream<Ok = BonsaiDiffFileChange<HgFileNodeId>, Error = Error>> {
+) -> Result<impl TryStream<Ok = BonsaiDiffFileChange<(FileType, HgFileNodeId)>, Error = Error>> {
     let (d_mf, a_mf) = try_join(
         id_to_manifestid(ctx, repo, descendant),
         id_to_manifestid(ctx, repo, ancestor),
@@ -931,7 +941,7 @@ async fn create_rebased_changesets(
 }
 
 async fn rebase_changeset(
-    ctx: CoreContext, // TODO
+    ctx: CoreContext,
     bcs: BonsaiChangeset,
     remapping: &HashMap<ChangesetId, (ChangesetId, Timestamp)>,
     timestamp: Option<&Timestamp>,
@@ -954,9 +964,19 @@ async fn rebase_changeset(
 
     match timestamp {
         Some(timestamp) => {
-            let tz_offset_secs = bcs.author_date.tz_offset_secs();
-            let newdate = DateTime::from_timestamp(timestamp.timestamp_seconds(), tz_offset_secs)?;
-            bcs.author_date = newdate;
+            let author_tz = bcs.author_date.tz_offset_secs();
+            bcs.author_date = DateTime::from_timestamp(timestamp.timestamp_seconds(), author_tz)?;
+            if let Ok(true) = justknobs::eval(
+                "scm/mononoke:pushrebase_rewrite_committer_date",
+                None,
+                Some(repo.repo_identity().name()),
+            ) {
+                if let Some(committer_date) = &mut bcs.committer_date {
+                    let committer_tz = committer_date.tz_offset_secs();
+                    *committer_date =
+                        DateTime::from_timestamp(timestamp.timestamp_seconds(), committer_tz)?;
+                }
+            }
         }
         None => {}
     }
@@ -1106,15 +1126,7 @@ async fn generate_additional_bonsai_file_changes(
 
     let mut paths = vec![];
     for res in &bonsai_diff {
-        match res {
-            BonsaiDiffFileChange::Changed(path, ..)
-            | BonsaiDiffFileChange::ChangedReusedId(path, ..) => {
-                paths.push(path.clone());
-            }
-            BonsaiDiffFileChange::Deleted(path) => {
-                paths.push(path.clone());
-            }
-        }
+        paths.push(res.path().clone())
     }
 
     // If a file is not present in the parent, then no need to add it to the new_file_changes.
@@ -1153,14 +1165,8 @@ async fn generate_additional_bonsai_file_changes(
 
     let mut new_file_changes = vec![];
     for res in bonsai_diff {
-        match res {
-            BonsaiDiffFileChange::Changed(ref path, ..)
-            | BonsaiDiffFileChange::ChangedReusedId(ref path, ..)
-            | BonsaiDiffFileChange::Deleted(ref path) => {
-                if !stale_entries.contains(path) {
-                    continue;
-                }
-            }
+        if !stale_entries.contains(res.path()) {
+            continue;
         }
 
         new_file_changes.push(convert_diff_result_into_file_change_for_diamond_merge(
@@ -1276,6 +1282,7 @@ mod tests {
     use maplit::btreemap;
     use maplit::hashmap;
     use maplit::hashset;
+    use mononoke_macros::mononoke;
     use mononoke_types::BonsaiChangesetMut;
     use mononoke_types::FileType;
     use mononoke_types::GitLfs;
@@ -1293,6 +1300,7 @@ mod tests {
     use sql_ext::TransactionResult;
     use test_repo_factory::TestRepoFactory;
     use tests_utils::bookmark;
+    use tests_utils::drawdag::extend_from_dag_with_actions;
     use tests_utils::resolve_cs_id;
     use tests_utils::CreateCommitContext;
 
@@ -1435,12 +1443,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_one_commit(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let parents = vec!["2d7d4ba9ce0a6ffd222de7785b249ead9c51c536"];
             let bcs_id = CreateCommitContext::new(&ctx, &repo, parents)
@@ -1462,7 +1470,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_one_commit_transaction_hook(fb: FacebookInit) -> Result<(), Error> {
         #[derive(Copy, Clone)]
         struct Hook(RepositoryId);
@@ -1587,13 +1595,13 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_stack(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -1638,13 +1646,13 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_stack_with_renames(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -1690,7 +1698,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_multi_root(fb: FacebookInit) -> Result<(), Error> {
         //
         // master -> o
@@ -1710,7 +1718,7 @@ mod tests {
 
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let config = PushrebaseFlags::default();
 
             let root0 = repo
@@ -1813,13 +1821,13 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_conflict(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -1878,12 +1886,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_caseconflicting_rename(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -1927,12 +1935,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_caseconflicting_dirs(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -1973,12 +1981,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_recursion_limit(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -2053,73 +2061,89 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
-    fn pushrebase_rewritedates(fb: FacebookInit) -> Result<(), Error> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async move {
-            let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
-            let root = repo
-                .bonsai_hg_mapping()
-                .get_bonsai_from_hg(
-                    &ctx,
-                    HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?,
-                )
-                .await?
-                .ok_or_else(|| Error::msg("Root is missing"))?;
-            let book = master_bookmark();
-            let bcs = CreateCommitContext::new(&ctx, &repo, vec![root])
-                .add_file("file", "data")
-                .commit()
-                .await?;
-            let hgcss = hashset![repo.derive_hg_changeset(&ctx, bcs).await?];
+    #[mononoke::fbinit_test]
+    async fn pushrebase_rewritedates(fb: FacebookInit) -> Result<(), Error> {
+        let ctx = CoreContext::test_mock(fb);
+        let repo: PushrebaseTestRepo = test_repo_factory::build_empty(fb).await?;
+        let (commits, _dag) = extend_from_dag_with_actions(
+            &ctx,
+            &repo,
+            r#"
+                A-B-C
+                   \
+                    D
+                # author_date: D "2020-01-01 01:00:00+04:00"
+                # committer: D "Committer <committer@example.test>"
+                # committer_date: D "2020-01-01 09:00:00-02:00"
+                # bookmark: C keep
+                # bookmark: C rewrite
+            "#,
+        )
+        .await?;
 
-            set_bookmark(
-                ctx.clone(),
-                &repo,
-                &book,
-                "a5ffa77602a066db7d5cfb9fb5823a0895717c5a",
-            )
+        let config = PushrebaseFlags {
+            rewritedates: false,
+            ..Default::default()
+        };
+        let source = hashset![commits["D"].load(&ctx, repo.repo_blobstore()).await?];
+        let bcs_keep_date = do_pushrebase_bonsai(
+            &ctx,
+            &repo,
+            &config,
+            &BookmarkKey::new("keep")?,
+            &source,
+            &[],
+        )
+        .await?;
+
+        let config = PushrebaseFlags {
+            rewritedates: true,
+            ..Default::default()
+        };
+        let bcs_rewrite_date = do_pushrebase_bonsai(
+            &ctx,
+            &repo,
+            &config,
+            &BookmarkKey::new("rewrite")?,
+            &source,
+            &[],
+        )
+        .await?;
+
+        let bcs = commits["D"].load(&ctx, repo.repo_blobstore()).await?;
+        let bcs_keep_date = bcs_keep_date.head.load(&ctx, repo.repo_blobstore()).await?;
+        let bcs_rewrite_date = bcs_rewrite_date
+            .head
+            .load(&ctx, repo.repo_blobstore())
             .await?;
-            let config = PushrebaseFlags {
-                rewritedates: false,
-                ..Default::default()
-            };
-            let bcs_keep_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await?;
 
-            set_bookmark(
-                ctx.clone(),
-                &repo,
-                &book,
-                "a5ffa77602a066db7d5cfb9fb5823a0895717c5a",
-            )
-            .await?;
-            let config = PushrebaseFlags {
-                rewritedates: true,
-                ..Default::default()
-            };
-            let bcs_rewrite_date = do_pushrebase(&ctx, &repo, &config, &book, &hgcss).await?;
+        // For the keep variant, the time should not have changed.
+        assert_eq!(bcs.author_date(), bcs_keep_date.author_date());
+        assert_eq!(bcs.committer_date(), bcs_keep_date.committer_date());
 
-            let bcs = bcs.load(&ctx, repo.repo_blobstore()).await?;
-            let bcs_keep_date = bcs_keep_date.head.load(&ctx, repo.repo_blobstore()).await?;
-            let bcs_rewrite_date = bcs_rewrite_date
-                .head
-                .load(&ctx, repo.repo_blobstore())
-                .await?;
+        // For the rewrite variant, the time should be updated.
+        assert!(bcs.author_date() < bcs_rewrite_date.author_date());
+        assert!(bcs.committer_date() < bcs_rewrite_date.committer_date());
 
-            assert_eq!(bcs.author_date(), bcs_keep_date.author_date());
-            assert!(bcs.author_date() < bcs_rewrite_date.author_date());
+        // Timezone shouldn't have changed for either author or committer.
+        assert_eq!(
+            bcs.author_date().tz_offset_secs(),
+            bcs_rewrite_date.author_date().tz_offset_secs()
+        );
+        assert_eq!(
+            bcs.committer_date().unwrap().tz_offset_secs(),
+            bcs_rewrite_date.committer_date().unwrap().tz_offset_secs()
+        );
 
-            Ok(())
-        })
+        Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_case_conflict(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = ManyFilesDirs::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = ManyFilesDirs::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -2169,13 +2193,13 @@ mod tests {
             Ok(())
         })
     }
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
 
     fn pushrebase_case_conflict_exclusion(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = ManyFilesDirs::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = ManyFilesDirs::get_repo(fb).await;
             let root = repo
                 .bonsai_hg_mapping()
                 .get_bonsai_from_hg(
@@ -2265,7 +2289,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[mononoke::test]
     fn pushrebase_intersect_changed() -> Result<(), Error> {
         match intersect_changed_files(
             make_paths(&["a/b/c", "c", "a/b/d", "d/d", "b", "e/c"]),
@@ -2294,12 +2318,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_executable_bit_change(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             let path_1 = NonRootMPath::new("1")?;
 
             let root_hg = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
@@ -2470,13 +2494,13 @@ mod tests {
         }
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_simultaneously(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -2546,12 +2570,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_create_new_bookmark(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -2574,12 +2598,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_simultaneously_and_create_new(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -2639,12 +2663,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_one_commit_with_bundle_id(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
             // Bottom commit of the repo
             let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
             let p = repo
@@ -2675,67 +2699,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
-    fn pushrebase_timezone(fb: FacebookInit) -> Result<(), Error> {
-        // We shouldn't change timezone even if timestamp changes
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(async move {
-            let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
-            // Bottom commit of the repo
-            let root = HgChangesetId::from_str("2d7d4ba9ce0a6ffd222de7785b249ead9c51c536")?;
-            let p = repo
-                .bonsai_hg_mapping()
-                .get_bonsai_from_hg(&ctx, root)
-                .await?
-                .ok_or_else(|| Error::msg("Root is missing"))?;
-            let parents = vec![p];
-
-            let tz_offset_secs = 100;
-            let bcs_id = CreateCommitContext::new(&ctx, &repo, parents)
-                .add_file("file", "content")
-                .set_author_date(DateTime::from_timestamp(0, 100)?)
-                .commit()
-                .await?;
-            let hg_cs = repo.derive_hg_changeset(&ctx, bcs_id).await?;
-
-            let book = master_bookmark();
-            set_bookmark(
-                ctx.clone(),
-                &repo,
-                &book,
-                "a5ffa77602a066db7d5cfb9fb5823a0895717c5a",
-            )
-            .await?;
-
-            let config = PushrebaseFlags {
-                rewritedates: true,
-                ..Default::default()
-            };
-            let bcs_rewrite_date =
-                do_pushrebase(&ctx, &repo, &config, &book, &hashset![hg_cs]).await?;
-
-            let bcs_rewrite_date = bcs_rewrite_date
-                .head
-                .load(&ctx, repo.repo_blobstore())
-                .await?;
-
-            assert_eq!(
-                bcs_rewrite_date.author_date().tz_offset_secs(),
-                tz_offset_secs
-            );
-
-            Ok(())
-        })
-    }
-
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn forbid_p2_root_rebases(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
 
             let root = repo
                 .bonsai_hg_mapping()
@@ -2790,7 +2759,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_over_merge(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -2870,12 +2839,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_over_merge_even(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let ctx = CoreContext::test_mock(fb);
-            let repo: PushrebaseTestRepo = MergeEven::get_custom_test_repo(fb).await;
+            let repo: PushrebaseTestRepo = MergeEven::get_repo(fb).await;
 
             // 4dcf230cd2f20577cb3e88ba52b73b376a2b3f69 - is a merge commit,
             // 3cda5c78aa35f0f5b09780d971197b51cad4613a is one of the ancestors
@@ -2917,7 +2886,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_of_branch_merge(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -3000,7 +2969,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_of_branch_merge_with_removal(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -3073,7 +3042,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn pushrebase_of_branch_merge_with_rename(fb: FacebookInit) -> Result<(), Error> {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -3158,12 +3127,12 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_pushrebase_new_repo_merge_no_new_file_changes(
         fb: FacebookInit,
     ) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
 
         // First commit in the new repo
         let other_first_commit = CreateCommitContext::new_root(&ctx, &repo)
@@ -3220,7 +3189,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_commit_validation(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: PushrebaseTestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -3325,10 +3294,10 @@ mod tests {
         }
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn pushrebase_test_failpushrebase_extra(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: PushrebaseTestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: PushrebaseTestRepo = Linear::get_repo(fb).await;
 
         // Create one commit on top of latest commit in the linear repo
         let before_head_commit = "79a13814c5ce7330173ec04d279bf95ab3f652fb";

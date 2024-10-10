@@ -14,11 +14,12 @@ use dag::Set;
 use dag::Vertex;
 use futures::stream::BoxStream;
 use minibytes::Bytes;
+use storemodel::SerializationFormat;
 
 use crate::AppendCommits;
 use crate::DescribeBackend;
 use crate::HgCommit;
-use crate::HgCommits;
+use crate::OnDiskCommits;
 use crate::ParentlessHgCommit;
 use crate::ReadCommitText;
 use crate::Result;
@@ -32,13 +33,18 @@ use crate::StripCommits;
 /// Use revlog for fallback commit messages. Double writes to revlog.
 pub struct DoubleWriteCommits {
     revlog: RevlogCommits,
-    commits: HgCommits,
+    commits: OnDiskCommits,
 }
 
 impl DoubleWriteCommits {
-    pub fn new(revlog_dir: &Path, dag_path: &Path, commits_path: &Path) -> Result<Self> {
-        let commits = HgCommits::new(dag_path, commits_path)?;
-        let revlog = RevlogCommits::new(revlog_dir)?;
+    pub fn new(
+        revlog_dir: &Path,
+        dag_path: &Path,
+        commits_path: &Path,
+        format: SerializationFormat,
+    ) -> Result<Self> {
+        let commits = OnDiskCommits::new(dag_path, commits_path, format)?;
+        let revlog = RevlogCommits::new(revlog_dir, format)?;
         Ok(Self { revlog, commits })
     }
 }
@@ -61,6 +67,10 @@ impl AppendCommits for DoubleWriteCommits {
         self.revlog.flush_commit_data().await?;
         self.commits.flush_commit_data().await?;
         Ok(())
+    }
+
+    async fn update_virtual_nodes(&mut self, wdir_parents: Vec<Vertex>) -> Result<()> {
+        self.commits.update_virtual_nodes(wdir_parents).await
     }
 }
 

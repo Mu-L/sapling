@@ -87,8 +87,10 @@ export type DiffCommentReaction = {
 
 export type DiffComment = {
   author: string;
+  authorName?: string;
   authorAvatarUri?: string;
   html: string;
+  content?: string;
   created: Date;
   /** If it's an inline comment, this is the file path with the comment */
   filename?: string;
@@ -97,7 +99,10 @@ export type DiffComment = {
   reactions: Array<DiffCommentReaction>;
   /** Suggestion for how to change the code, as a patch */
   suggestedChange?: ParsedDiff;
+  codePatchSuggestedChange?: ParsedDiff;
   replies: Array<DiffComment>;
+  /** If this comment has been resolved. true => "resolved", false => "unresolved", null => the comment is not resolvable, don't show any UI for it */
+  isResolved?: boolean;
 };
 
 /**
@@ -204,7 +209,7 @@ export type CodeReviewSystem =
       path?: string;
     };
 
-export type PreferredSubmitCommand = 'pr' | 'ghstack';
+export type PreferredSubmitCommand = 'pr' | 'ghstack' | 'push';
 
 export type StableCommitMetadata = {
   value: string;
@@ -234,6 +239,13 @@ export type StableInfo = {
   /** If present, this is extra details that might be shown in a tooltip */
   info?: string;
   date: Date;
+};
+
+export type SlocInfo = {
+  /** Significant lines of code for commit */
+  sloc: number | undefined;
+  /** Significant lines of code for commit (filtering out test and markdown files) */
+  strictSloc: number | undefined;
 };
 
 export type CommitInfo = {
@@ -275,13 +287,25 @@ export type CommitInfo = {
    * This is only valid after the operation which creates this commit has completed.
    */
   optimisticRevset?: Revset;
-  /** only a subset of the total files for this commit */
-  filesSample: ReadonlyArray<ChangedFile>;
+  /** only a subset of the total changed file paths for this commit.
+   * File statuses must be fetched separately for performance.
+   */
+  filePathsSample: ReadonlyArray<RepoRelativePath>;
   totalFileCount: number;
   /** @see {@link DiffId} */
   diffId?: DiffId;
   isFollower?: boolean;
   stableCommitMetadata?: ReadonlyArray<StableCommitMetadata>;
+  /**
+   * Longest path prefix shared by all files in this commit.
+   * For example, if a commit changes files like `a/b/c` and `a/b/d`, this is `a/b/`.
+   * Note: this always acts on `/` delimited paths, and is done on complete subdir names,
+   * never on matching prefixes of directories. For example, `a/dir1/a` and `a/dir2/a`
+   * have `a/` as the common prefix, not `a/dir`.
+   * If no commonality is found (due to edits to top level files or multiple subdirs), this is empty string.
+   * This can be useful to determine if a commit is relevant to your cwd.
+   */
+  maxCommonPathPrefix: RepoRelativePath;
 };
 export type SuccessorInfo = {
   hash: string;
@@ -536,6 +560,18 @@ export type OperationProgressEvent = {type: 'operationProgress'} & OperationProg
 /** A line number starting from 1 */
 export type OneIndexedLineNumber = Exclude<number, 0>;
 
+export type DiagnosticSeverity = 'error' | 'warning' | 'info' | 'hint';
+
+export type Diagnostic = {
+  range: {startLine: number; startCol: number; endLine: number; endCol: number};
+  message: string;
+  severity: DiagnosticSeverity;
+  /** LSP providing this diagnostic, like "typescript" or "eslint" */
+  source?: string;
+  /** Code or name for this kind of diagnostic */
+  code?: string;
+};
+
 /* protocol */
 
 /**
@@ -546,7 +582,7 @@ export type PlatformSpecificClientToServerMessages =
   | {type: 'platform/openFile'; path: RepoRelativePath; options?: {line?: OneIndexedLineNumber}}
   | {
       type: 'platform/openFiles';
-      paths: Array<RepoRelativePath>;
+      paths: ReadonlyArray<RepoRelativePath>;
       options?: {line?: OneIndexedLineNumber};
     }
   | {type: 'platform/openContainingFolder'; path: RepoRelativePath}
@@ -557,13 +593,14 @@ export type PlatformSpecificClientToServerMessages =
   | {type: 'platform/subscribeToAvailableCwds'}
   | {type: 'platform/subscribeToUnsavedFiles'}
   | {type: 'platform/saveAllUnsavedFiles'}
-  | {type: 'platform/setPersistedState'; data?: string}
+  | {type: 'platform/setPersistedState'; key: string; data?: string}
   | {
       type: 'platform/setVSCodeConfig';
       config: string;
       value: Json | undefined;
       scope: 'workspace' | 'global';
     }
+  | {type: 'platform/checkForDiagnostics'; paths: Array<RepoRelativePath>}
   | {type: 'platform/executeVSCodeCommand'; command: string; args: Array<Json>}
   | {type: 'platform/subscribeToVSCodeConfig'; config: string};
 
@@ -583,6 +620,10 @@ export type PlatformSpecificServerToClientMessages =
   | {type: 'platform/unsavedFiles'; unsaved: Array<{path: RepoRelativePath; uri: string}>}
   | {type: 'platform/savedAllUnsavedFiles'; success: boolean}
   | {
+      type: 'platform/gotDiagnostics';
+      diagnostics: Map<RepoRelativePath, Array<Diagnostic>>;
+    }
+  | {
       type: 'platform/vscodeConfigChanged';
       config: string;
       value: Json | undefined;
@@ -591,6 +632,10 @@ export type PlatformSpecificServerToClientMessages =
 export type CodeReviewProviderSpecificClientToServerMessages =
   | never
   | InternalTypes['PhabricatorClientToServerMessages'];
+
+export type CodeReviewProviderSpecificServerToClientMessages =
+  | never
+  | InternalTypes['PhabricatorServerToClientMessages'];
 
 export type PageVisibility = 'focused' | 'visible' | 'hidden';
 
@@ -604,16 +649,6 @@ export type FileABugProgress =
   | {status: 'success'; taskNumber: string; taskLink: string}
   | {status: 'error'; error: Error};
 export type FileABugProgressMessage = {type: 'fileBugReportProgress'} & FileABugProgress;
-
-/**
- * Like ClientToServerMessage, but these messages will be followed
- * on the message bus by an additional binary ArrayBuffer payload message.
- */
-export type ClientToServerMessageWithPayload = {
-  type: 'uploadFile';
-  filename: string;
-  id: string;
-} & {hasBinaryPayload: true};
 
 export type SubscriptionKind = 'uncommittedChanges' | 'smartlogCommits' | 'mergeConflicts';
 
@@ -685,14 +720,20 @@ export type LocalStorageName =
   | 'isl.debug-react-tools'
   | 'isl.debug-redux-tools'
   | 'isl.condense-obsolete-stacks'
+  | 'isl.deemphasize-cwd-irrelevant-commits'
   | 'isl.split-suggestion-enabled'
   | 'isl.comparison-display-mode'
   | 'isl.expand-generated-files'
   | 'isl-color-theme'
-  | 'isl.auto-resolve-before-continue';
+  | 'isl.auto-resolve-before-continue'
+  | 'isl.warn-about-diagnostics'
+  | 'isl.hide-non-blocking-diagnostics'
+  // These keys are prefixes, with further dynamic keys appended afterwards
+  | 'isl.edited-commit-messages:';
 
 export type ClientToServerMessage =
   | {type: 'heartbeat'; id: string}
+  | {type: 'stress'; id: number; time: number; message: string}
   | {type: 'refresh'}
   | {type: 'getConfig'; name: ConfigName}
   | {type: 'setConfig'; name: SettableConfigName; value: string}
@@ -707,6 +748,12 @@ export type ClientToServerMessage =
   | {type: 'fetchShelvedChanges'}
   | {type: 'fetchLatestCommit'; revset: string}
   | {type: 'fetchCommitChangedFiles'; hash: Hash; limit: number}
+  | {
+      type: 'uploadFile';
+      filename: string;
+      id: string;
+      b64Content: string;
+    }
   | {type: 'renderMarkup'; markup: string; id: number}
   | {type: 'typeahead'; kind: TypeaheadKind; query: string; id: string}
   | {type: 'requestRepoInfo'}
@@ -743,16 +790,16 @@ export type ClientToServerMessage =
   | {type: 'fetchFeatureFlag'; name: string}
   | {type: 'fetchInternalUserInfo'}
   | {
-      type: 'generateAICommitMessage';
+      type: 'generateSuggestionWithAI';
       id: string;
-      title: string;
       comparison: Comparison;
+      fieldName: string;
+      title: string;
     }
   | {type: 'gotUiState'; state: string}
   | CodeReviewProviderSpecificClientToServerMessages
   | PlatformSpecificClientToServerMessages
   | {type: 'fetchSignificantLinesOfCode'; hash: Hash; excludedFiles: string[]}
-  | {type: 'fetchStrictSignificantLinesOfCode'; hash: Hash; excludedFiles: string[]}
   | {
       type: 'fetchPendingSignificantLinesOfCode';
       requestId: number;
@@ -760,19 +807,7 @@ export type ClientToServerMessage =
       includedFiles: string[];
     }
   | {
-      type: 'fetchPendingStrictSignificantLinesOfCode';
-      requestId: number;
-      hash: Hash;
-      includedFiles: string[];
-    }
-  | {
       type: 'fetchPendingAmendSignificantLinesOfCode';
-      requestId: number;
-      hash: Hash;
-      includedFiles: string[];
-    }
-  | {
-      type: 'fetchPendingAmendStrictSignificantLinesOfCode';
       requestId: number;
       hash: Hash;
       includedFiles: string[];
@@ -799,6 +834,7 @@ export type ServerToClientMessage =
   | BeganFetchingUncommittedChangesEvent
   | FileABugProgressMessage
   | {type: 'heartbeat'; id: string}
+  | {type: 'stress'; id: number; time: number; message: string}
   | {type: 'gotConfig'; name: ConfigName; value: string | undefined}
   | {
       type: 'fetchedGeneratedStatuses';
@@ -847,38 +883,30 @@ export type ServerToClientMessage =
   | {type: 'fetchedFeatureFlag'; name: string; passes: boolean}
   | {type: 'fetchedInternalUserInfo'; info: Serializable}
   | {
-      type: 'generatedAICommitMessage';
+      type: 'generatedSuggestionWithAI';
       message: Result<string>;
       id: string;
     }
   | {type: 'getUiState'}
   | OperationProgressEvent
   | PlatformSpecificServerToClientMessages
-  | {type: 'fetchedSignificantLinesOfCode'; hash: Hash; linesOfCode: Result<number>}
-  | {type: 'fetchedStrictSignificantLinesOfCode'; hash: Hash; linesOfCode: Result<number>}
+  | CodeReviewProviderSpecificServerToClientMessages
+  | {
+      type: 'fetchedSignificantLinesOfCode';
+      hash: Hash;
+      result: Result<{linesOfCode: number; strictLinesOfCode: number}>;
+    }
   | {
       type: 'fetchedPendingSignificantLinesOfCode';
       requestId: number;
       hash: Hash;
-      linesOfCode: Result<number>;
-    }
-  | {
-      type: 'fetchedPendingStrictSignificantLinesOfCode';
-      requestId: number;
-      hash: Hash;
-      linesOfCode: Result<number>;
+      result: Result<{linesOfCode: number; strictLinesOfCode: number}>;
     }
   | {
       type: 'fetchedPendingAmendSignificantLinesOfCode';
       requestId: number;
       hash: Hash;
-      linesOfCode: Result<number>;
-    }
-  | {
-      type: 'fetchedPendingAmendStrictSignificantLinesOfCode';
-      requestId: number;
-      hash: Hash;
-      linesOfCode: Result<number>;
+      result: Result<{linesOfCode: number; strictLinesOfCode: number}>;
     };
 export type Disposable = {
   dispose(): void;

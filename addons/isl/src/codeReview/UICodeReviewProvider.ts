@@ -50,6 +50,13 @@ export interface UICodeReviewProvider {
 
   RepoInfo(): JSX.Element | null;
 
+  getRemoteTrackingBranch(
+    allDiffSummaries?: Map<string, DiffSummary> | null,
+    diffId?: DiffId | null,
+  ): string | null;
+
+  getRemoteTrackingBranchFromDiffSummary(diff: DiffSummary | undefined | null): string | null;
+
   isDiffClosed(summary: DiffSummary): boolean;
 
   isDiffEligibleForCleanup(summary: DiffSummary): boolean;
@@ -66,6 +73,12 @@ export interface UICodeReviewProvider {
   supportSubmittingAsDraft: 'always' | 'newDiffsOnly';
   /** Whether this review provider allows attaching a short update message when resubmitting a diff. */
   supportsUpdateMessage: boolean;
+
+  /** This provider supports "branch" Diff creation, where an entire stack is one unit of code review. */
+  supportBranchingPrs: boolean;
+
+  /** Get the code review provider's branch corresponding to a remote bookmark */
+  branchNameForRemoteBookmark?: (remoteBookmark: string) => string;
 
   getSupportedStackActions(
     hash: Hash,
@@ -84,6 +97,8 @@ export interface UICodeReviewProvider {
     commits: Array<CommitInfo>,
     allDiffSummaries: Map<string, DiffSummary>,
   ): Array<CommitInfo>;
+
+  getUpdateDiffActions(summary: DiffSummary): Array<{label: ReactNode; onClick: () => void}>;
 
   commitMessageFieldsSchema: Array<FieldConfig>;
 

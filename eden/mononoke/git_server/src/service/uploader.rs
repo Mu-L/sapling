@@ -23,6 +23,7 @@ use import_tools::git_reader::GitReader;
 use import_tools::import_commit_contents;
 use import_tools::upload_git_tag;
 use import_tools::BackfillDerivation;
+use import_tools::GitImportLfs;
 use import_tools::GitimportAccumulator;
 use import_tools::GitimportPreferences;
 use import_tools::ReuploadCommits;
@@ -30,6 +31,7 @@ use mononoke_types::hash::GitSha1;
 use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
 use repo_identity::RepoIdentityRef;
+use slog::info;
 use topo_sort::sort_topological;
 
 use super::reader::GitObjectStore;
@@ -82,10 +84,6 @@ impl RefMap {
     fn insert_tag(&mut self, oid: &ObjectId, cs_id: ChangesetId) {
         self.tags_to_bonsai.insert(*oid, cs_id);
         self.bonsai_to_tags.insert(cs_id, *oid);
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.commits_to_bonsai.len() + self.tags_to_bonsai.len()
     }
 }
 
@@ -191,6 +189,7 @@ pub async fn upload_objects(
     repo: Arc<Repo>,
     object_store: Arc<GitObjectStore>,
     ref_updates: &[RefUpdate],
+    lfs: GitImportLfs,
 ) -> Result<RefMap> {
     let repo_name = repo.repo_identity().name().to_string();
     let uploader = Arc::new(DirectUploader::with_arc(
@@ -201,13 +200,19 @@ pub async fn upload_objects(
         backfill_derivation: BackfillDerivation::OnlySpecificTypes(vec![
             DerivableType::GitDeltaManifestsV2,
         ]),
+        concurrency: 100,
+        lfs,
         ..Default::default()
     };
     let acc = GitimportAccumulator::from_roots(HashMap::new());
+    info!(
+        ctx.logger(),
+        "Importing commit contexts for repo {}", repo_name
+    );
     // Import and store all the commits, trees and blobs that are pare of the push
     let git_bonsai_mappings = import_commit_contents(
         ctx,
-        repo_name,
+        repo_name.clone(),
         sorted_commits(&object_store)?,
         uploader.clone(),
         object_store.clone(),
@@ -231,6 +236,7 @@ pub async fn upload_objects(
             tag_metadata.name = Some(ref_name);
         });
     }
+    info!(ctx.logger(), "Uploading tags for repo {}", repo_name);
     // Upload the tags to the blobstore and also create bonsai mapping for it
     for (tag_id, tag_metadata) in tags {
         let TagMetadata {

@@ -32,7 +32,7 @@ namespace facebook::eden {
 
 class Hash20;
 class Hash32;
-class BlobMetadata;
+class BlobAuxData;
 class EdenMount;
 class EdenServer;
 class TreeInode;
@@ -151,6 +151,12 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
 
   folly::SemiFuture<std::unique_ptr<std::vector<Blake3Result>>>
   semifuture_getBlake3(
+      std::unique_ptr<std::string> mountPoint,
+      std::unique_ptr<std::vector<std::string>> paths,
+      std::unique_ptr<SyncBehavior> sync) override;
+
+  folly::SemiFuture<std::unique_ptr<std::vector<DigestHashResult>>>
+  semifuture_getDigestHash(
       std::unique_ptr<std::string> mountPoint,
       std::unique_ptr<std::vector<std::string>> paths,
       std::unique_ptr<SyncBehavior> sync) override;
@@ -409,6 +415,10 @@ class EdenServiceHandler : virtual public StreamingEdenServiceSvIf,
   void checkPrivHelper(PrivHelperInfo& result) override;
 
   int64_t getPid() override;
+
+  void getCheckoutProgressInfo(
+      CheckoutProgressInfoResponse& ret,
+      std::unique_ptr<CheckoutProgressInfoRequest> params) override;
 
   /**
    * A thrift client has requested that we shutdown.

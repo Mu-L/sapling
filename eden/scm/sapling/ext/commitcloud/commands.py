@@ -30,7 +30,6 @@ from . import (
     background,
     backuplock,
     backupstate,
-    dependencies,
     error as ccerror,
     interactivehistory,
     megarepoimport,
@@ -44,7 +43,6 @@ from . import (
     util as ccutil,
     workspace,
 )
-
 
 cmdtable = {}
 command = registrar.command(cmdtable)
@@ -133,7 +131,7 @@ subcmd = cloud.subcommand(
         ("Enable sharing for a cloud workspace", ["share"]),
         (
             "Manage commits and bookmarks in workspaces",
-            ["move", "copy", "hide", "archive"],
+            ["move", "copy", "hide"],
         ),
         (
             "Import workspaces from different repositories (requires megarepo support)",
@@ -660,29 +658,6 @@ def cloudsmartlog(ui, repo, templatealias="sl_cloud", **opts):
 def cloudsupersmartlog(ui, repo, **opts):
     """get super smartlog view for the given workspace"""
     cloudsmartlog(ui, repo, "ssl_cloud", **opts)
-
-
-ARCHIVE_WORKSPACE_NAME = "archive"
-
-
-@subcmd(
-    "archive",
-    move.moveopts + createopts,
-)
-def cloudarchive(ui, repo, *revs, **opts):
-    """move commits or bookmarks on side to a separate 'archive' workspace
-
-    The command would typically be used to tidy up the default workspace.
-    """
-
-    # doesn't ask for creation confirmation
-    opts.update(
-        {
-            "create": True,
-            "destination": ARCHIVE_WORKSPACE_NAME,
-        }
-    )
-    return cloudmove(ui, repo, *revs, **opts)
 
 
 @subcmd(
@@ -1718,6 +1693,12 @@ def cloudtidyup(ui, repo, **opts):
             "",
             _("repo associated with the workspace to import to"),
         ),
+        (
+            "",
+            "wipe-source",
+            None,
+            _("empty the source workspace after the import is complete (ADVANCED)"),
+        ),
     ]
     + move.srcdstworkspaceopts
     + pullopts,
@@ -1727,6 +1708,13 @@ def cloudimport(ui, repo, **opts):
     sourceworkspace, destinationworkspace, sourcerepo, destinationrepo = (
         megarepoimport.validateimportparams(ui, repo, opts)
     )
+
+    currentworkspace = workspace.currentworkspace(repo)
+    currentrepo = ccutil.getreponame(repo)
+    if currentrepo != destinationrepo or currentworkspace != destinationworkspace:
+        raise error.Abort(
+            "workspace import must be ran from destination repo and destination workspace"
+        )
     serv = service.get(ui, repo)
     megarepoimport.fetchworkspaces(
         ui,
@@ -1737,11 +1725,18 @@ def cloudimport(ui, repo, **opts):
         destinationrepo,
         serv,
     )
-    currentworkspace = workspace.currentworkspace(repo)
-    currentrepo = ccutil.getreponame(repo)
+
     start = util.timer()
-    # Translate heads and bookmarks
+
     full = opts.get("full")
+    cloudrefs = serv.getreferences(
+        sourcerepo,
+        sourceworkspace,
+        0,
+        clientinfo=service.makeclientinfo(
+            repo, syncstate.SyncState(repo, sourceworkspace)
+        ),
+    )
     newheads, newbookmarks = megarepoimport.translateandpull(
         ui,
         repo,
@@ -1753,28 +1748,48 @@ def cloudimport(ui, repo, **opts):
         destinationrepo,
         serv,
         full,
+        cloudrefs,
     )
-    # update the destination workspace
+
+    # verify we have the latest version of the destination workspace
     destcloudrefs = serv.getreferences(destinationrepo, destinationworkspace, 0)
+    state = syncstate.SyncState(repo, destinationworkspace)
+
+    if state.version != destcloudrefs.version:
+        cloudsync(ui, repo, workspace=currentworkspace)
+
     # Dedupe changes to avoid unnecessary updates
     uniquenewheads, uniquenewbookmarks, bookmarkstodelete = (
         megarepoimport.dedupechanges(
-            ui, destcloudrefs.heads, newheads, destcloudrefs.bookmarks, newbookmarks
+            ui, state.heads, newheads, state.bookmarks, newbookmarks
         )
     )
 
     serv.updatereferences(
         destinationrepo,
         destinationworkspace,
-        destcloudrefs.version,
+        state.version,
         newheads=uniquenewheads,
         newbookmarks=uniquenewbookmarks,
         oldbookmarks=bookmarkstodelete,
     )
 
-    # update local workspace
     if currentrepo == destinationrepo and currentworkspace == destinationworkspace:
         cloudsync(ui, repo, workspace=currentworkspace)
+
+    if opts.get("wipe_source"):
+        heads = cloudrefs.heads if cloudrefs.heads else []
+        bookmarks = list(cloudrefs.bookmarks.keys()) if cloudrefs.bookmarks else []
+        with progress.spinner(ui, _("wiping source workspace contents")):
+            synced, cloudrefs = serv.updatereferences(
+                sourcerepo,
+                sourceworkspace,
+                cloudrefs.version,
+                oldheads=heads,
+                newheads=None,
+                oldbookmarks=bookmarks,
+                newbookmarks=None,
+            )
 
     elapsed = util.timer() - start
     ui.status_err(_("finished in %0.2f sec\n") % elapsed)

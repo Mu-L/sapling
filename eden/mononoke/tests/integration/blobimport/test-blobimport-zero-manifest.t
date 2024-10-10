@@ -7,19 +7,9 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
 # setup repo, usefncache flag for forcing algo encoding run
-  $ hg init repo-hg --config format.usefncache=False
+  $ hginit_treemanifest repo --config format.usefncache=False
+  $ cd repo
 
-# Init treemanifest and remotefilelog
-  $ cd repo-hg
-  $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=!
-  > treemanifestserver=
-  > [treemanifest]
-  > server=True
-  > EOF
-
-EOF
 # Push single empty commit
   $ echo 1 > 1 && hg add 1 && hg ci -m 1
   $ hg rm 1
@@ -29,6 +19,6 @@ EOF
 
   $ setup_mononoke_config
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "select * from mutable_counters";
   0|highest-imported-gen-num|1

@@ -17,19 +17,21 @@ use git_types::GitError;
 use gix_hash::ObjectId;
 use gix_object::Tag;
 use gix_object::WriteTo;
+use mononoke_macros::mononoke;
 
+use crate::repo::Repo;
 use crate::CoreContext;
 use crate::RepoContext;
 
-async fn init_repo(ctx: &CoreContext) -> Result<RepoContext> {
-    let repo = test_repo_factory::build_empty(ctx.fb).await?;
+async fn init_repo(ctx: &CoreContext) -> Result<RepoContext<Repo>> {
+    let repo: Repo = test_repo_factory::build_empty(ctx.fb).await?;
     let repo_context = RepoContext::new_test(ctx.clone(), Arc::new(repo)).await?;
     Ok(repo_context)
 }
 
 /// upload_non_blob_git_object tests
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate the basic git upload object functionality works.
 async fn basic_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -53,7 +55,7 @@ async fn basic_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate that we get an error while trying to upload a git blob through this method.
 async fn blob_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -74,7 +76,7 @@ async fn blob_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate that we get an error while trying to upload invalid git bytes with this method.
 async fn invalid_bytes_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -101,7 +103,7 @@ async fn invalid_bytes_upload_non_blob_git_object(fb: FacebookInit) -> Result<()
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate that we get an error while trying to upload a git object with incorrect hash.
 async fn invalid_hash_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -127,7 +129,7 @@ async fn invalid_hash_upload_non_blob_git_object(fb: FacebookInit) -> Result<()>
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate that the git object stored in the blobstore is stored under the right key.
 async fn blobstore_check_upload_non_blob_git_object(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -155,7 +157,7 @@ async fn blobstore_check_upload_non_blob_git_object(fb: FacebookInit) -> Result<
 
 /// create_git_tree tests
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate the basic create git tree functionality works.
 async fn basic_create_git_tree(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
@@ -176,7 +178,7 @@ async fn basic_create_git_tree(fb: FacebookInit) -> Result<()> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 /// Validate the create git tree method fails when the tree doesn't exist in Mononoke store.
 async fn invalid_create_git_tree(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);

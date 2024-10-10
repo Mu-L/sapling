@@ -8,13 +8,9 @@
   $ ENABLED_DERIVED_DATA='["git_trees", "filenodes", "hgchangesets"]' setup_common_config
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ REPOTYPE="blob_files"
   $ setup_common_config $REPOTYPE
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
 # Setup git repository
   $ mkdir -p "$GIT_REPO_ORIGIN"
@@ -293,7 +289,7 @@
   $ start_and_wait_for_mononoke_server
 # Clone the repository
   $ cd "$TESTTMP"
-  $ hgmn_clone mononoke://$(mononoke_address)/repo "$HG_REPO"
+  $ hg clone -q mono:repo "$HG_REPO"
   $ cd "$HG_REPO"
   $ cat "file1"
   this is file1

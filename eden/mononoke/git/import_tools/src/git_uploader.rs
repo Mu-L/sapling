@@ -5,18 +5,21 @@
  * GNU General Public License version 2.
  */
 
+use std::time::Duration;
+
 use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Error;
 use async_trait::async_trait;
 use auto_impl::auto_impl;
-use blobrepo::save_bonsai_changesets;
 use bonsai_git_mapping::BonsaiGitMappingEntry;
 use bonsai_git_mapping::BonsaiGitMappingRef;
 use bonsai_git_mapping::BonsaisOrGitShas;
 use bonsai_tag_mapping::BonsaiTagMappingRef;
+use borrowed::borrowed;
 use bulk_derivation::BulkDerivation;
 use bytes::Bytes;
+use changesets_creation::save_changesets;
 use cloned::cloned;
 use commit_graph::CommitGraphRef;
 use commit_graph::CommitGraphWriterRef;
@@ -39,6 +42,8 @@ use mononoke_types::NonRootMPath;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentityRef;
+use retry::retry_always;
+use retry::RetryAttemptsCount;
 use slog::debug;
 use slog::info;
 use sorted_vector_map::SortedVectorMap;
@@ -51,6 +56,9 @@ use crate::TagMetadata;
 use crate::HGGIT_COMMIT_ID_EXTRA;
 use crate::HGGIT_MARKER_EXTRA;
 use crate::HGGIT_MARKER_VALUE;
+
+const BASE_RETRY_DELAY: Duration = Duration::from_secs(1);
+const RETRY_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ReuploadCommits {
@@ -230,11 +238,11 @@ pub async fn upload_file(
     oid: ObjectId,
     git_bytes: Bytes,
 ) -> Result<FileChange, Error> {
-    let meta = if ty == FileType::GitSubmodule {
+    let (meta, git_lfs) = if ty == FileType::GitSubmodule {
         // The file is a git submodule.  In Mononoke, we store the commit
         // id of the submodule as the content of the file.
         let oid_bytes = Bytes::copy_from_slice(oid.as_slice());
-        filestore::store(
+        let meta = filestore::store(
             repo.repo_blobstore(),
             *repo.filestore_config(),
             ctx,
@@ -242,31 +250,62 @@ pub async fn upload_file(
             stream::once(async move { Ok(oid_bytes) }),
         )
         .await
-        .context("filestore (upload submodule)")?
-    } else if let Some(lfs_meta) = lfs.is_lfs_file(&git_bytes, oid) {
+        .context("filestore (upload submodule)")?;
+        (meta, GitLfs::FullContent)
+    } else if let Some(lfs_pointer_data) = lfs.is_lfs_file(&git_bytes, oid) {
         let blobstore = repo.repo_blobstore();
         let filestore_config = *repo.filestore_config();
-        cloned!(ctx, lfs, blobstore, path);
-        lfs.with(
-            ctx,
-            lfs_meta,
-            move |ctx, lfs_meta, req, bstream| async move {
-                info!(
-                    ctx.logger(),
-                    "Uploading LFS {} sha256:{} size:{}",
-                    path,
-                    lfs_meta.sha256.to_brief(),
-                    lfs_meta.size,
-                );
-                filestore::store(&blobstore, filestore_config, &ctx, &req, bstream)
-                    .await
-                    .context("filestore (lfs)")
-            },
-        )
-        .await?
+        cloned!(lfs, blobstore, path);
+        // We want to store both:
+        // 1. actual file the pointer is pointing at
+        let (meta, fetch_result) = lfs
+            .with(ctx.clone(), lfs_pointer_data.clone(), {
+                move |ctx, lfs_pointer_data, req, bstream, fetch_result| async move {
+                    info!(
+                        ctx.logger(),
+                        "Uploading LFS {} sha256:{} size:{}",
+                        path,
+                        lfs_pointer_data.sha256.to_brief(),
+                        lfs_pointer_data.size,
+                    );
+                    Ok((
+                        filestore::store(&blobstore, filestore_config, &ctx, &req, bstream)
+                            .await
+                            .context("filestore (lfs contents)")?,
+                        fetch_result,
+                    ))
+                }
+            })
+            .await?;
+
+        if fetch_result.is_not_found() {
+            // In case the pointer wasn't found (and we allow that), mark the pointer as full
+            // content.
+            (meta, GitLfs::FullContent)
+        } else {
+            // 3. Upload the Git LFS pointer itself
+            let (req, bstream) =
+                git_store_request(ctx, oid, git_bytes).context("git_store_request")?;
+            let pointer_meta = filestore::store(
+                repo.repo_blobstore(),
+                *repo.filestore_config(),
+                ctx,
+                &req,
+                bstream,
+            )
+            .await
+            .context("filestore (lfs pointer)")?;
+            // and return the contents of the actual file
+            let pointer = if lfs_pointer_data.is_canonical {
+                GitLfs::canonical_pointer()
+            } else {
+                GitLfs::non_canonical_pointer(pointer_meta.content_id)
+            };
+            (meta, pointer)
+        }
     } else {
         let (req, bstream) = git_store_request(ctx, oid, git_bytes).context("git_store_request")?;
-        filestore::store(
+        let meta = filestore::store(
             repo.repo_blobstore(),
             *repo.filestore_config(),
             ctx,
@@ -274,7 +313,8 @@ pub async fn upload_file(
             bstream,
         )
         .await
-        .context("filestore (upload regular)")?
+        .context("filestore (upload regular)")?;
+        (meta, GitLfs::FullContent)
     };
     debug!(
         ctx.logger(),
@@ -287,7 +327,7 @@ pub async fn upload_file(
         ty,
         meta.total_size,
         None,
-        GitLfs::FullContent,
+        git_lfs,
     ))
 }
 
@@ -337,28 +377,40 @@ pub async fn finalize_batch(
         .iter()
         .map(|(git_sha1, bcs)| BonsaiGitMappingEntry::new(*git_sha1, bcs.get_changeset_id()))
         .collect::<Vec<BonsaiGitMappingEntry>>();
-    let vbcs = changesets.into_iter().map(|(_, bcsid)| bcsid).collect();
+    let vbcs = changesets
+        .into_iter()
+        .map(|(_, bcsid)| bcsid)
+        .collect::<Vec<_>>();
     let ret = oid_to_bcsid
         .iter()
         .map(|entry| (entry.git_sha1, entry.bcs_id))
         .collect();
 
-    // We know that the commits are in order (this is guaranteed by the Walk), so we
-    // can insert them as-is, one by one, without extra dependency / ordering checks.
-    let (stats, ()) = save_bonsai_changesets(vbcs, ctx.clone(), repo)
-        .try_timed()
-        .await?;
-    debug!(
-        ctx.logger(),
-        "save_bonsai_changesets for {} commits in {:?}",
-        oid_to_bcsid.len(),
-        stats.completion_time
-    );
-
     if dry_run {
         // Short circuit the steps that write
         return Ok(ret);
     }
+
+    // We know that the commits are in order (this is guaranteed by the Walk), so we
+    // can insert them as-is, one by one, without extra dependency / ordering checks.
+    let ((stats, ()), RetryAttemptsCount(num_retries)) = retry_always(
+        ctx.logger(),
+        |_| {
+            cloned!(vbcs);
+            async move { save_changesets(ctx, repo, vbcs).try_timed().await }
+        },
+        BASE_RETRY_DELAY,
+        RETRY_ATTEMPTS,
+    )
+    .await?;
+
+    debug!(
+        ctx.logger(),
+        "save_changesets for {} commits in {:?} after {} retries",
+        oid_to_bcsid.len(),
+        stats.completion_time,
+        num_retries
+    );
 
     let csids = oid_to_bcsid
         .iter()
@@ -389,9 +441,16 @@ pub async fn finalize_batch(
     // it is safe to proceed from there.
     // We can't actually do it last as it must be done before deriving `GitDeltaManifest`
     // since that depends on git commits.
-    repo.bonsai_git_mapping()
-        .bulk_add(ctx, &oid_to_bcsid)
-        .await?;
+    retry_always(
+        ctx.logger(),
+        |_| {
+            borrowed!(oid_to_bcsid);
+            async move { repo.bonsai_git_mapping().bulk_add(ctx, oid_to_bcsid).await }
+        },
+        BASE_RETRY_DELAY,
+        RETRY_ATTEMPTS,
+    )
+    .await?;
     // derive git delta manifests: note: GitCommit don't need to be explicitly
     // derived as they were already imported
     let delta_manifests = backfill_derivation
@@ -448,8 +507,8 @@ fn generate_bonsai_changeset(
         git_extra_headers,
         git_tree_hash: None,
         file_changes,
-        is_snapshot: false,
         git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
 }

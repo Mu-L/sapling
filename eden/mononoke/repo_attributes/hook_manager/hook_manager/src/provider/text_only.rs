@@ -13,6 +13,7 @@ use bookmarks_types::BookmarkKey;
 use bytes::Bytes;
 use changeset_info::ChangesetInfo;
 use context::CoreContext;
+use mononoke_types::hash::GitSha1;
 use mononoke_types::ChangesetId;
 use mononoke_types::ContentId;
 use mononoke_types::ContentMetadataV2;
@@ -21,7 +22,7 @@ use mononoke_types::NonRootMPath;
 
 use crate::errors::HookStateProviderError;
 use crate::provider::BookmarkState;
-use crate::provider::FileChange;
+use crate::provider::FileChangeType;
 use crate::provider::HookStateProvider;
 use crate::provider::PathContent;
 use crate::provider::TagType;
@@ -77,12 +78,23 @@ impl<T: HookStateProvider + 'static> HookStateProvider for TextOnlyHookStateProv
         self.inner.find_content(ctx, bookmark, paths).await
     }
 
+    async fn find_content_by_changeset_id<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        changeset_id: ChangesetId,
+        paths: Vec<NonRootMPath>,
+    ) -> Result<HashMap<NonRootMPath, PathContent>, HookStateProviderError> {
+        self.inner
+            .find_content_by_changeset_id(ctx, changeset_id, paths)
+            .await
+    }
+
     async fn file_changes<'a>(
         &'a self,
         ctx: &'a CoreContext,
         new_cs_id: ChangesetId,
         old_cs_id: ChangesetId,
-    ) -> Result<Vec<(NonRootMPath, FileChange)>, HookStateProviderError> {
+    ) -> Result<Vec<(NonRootMPath, FileChangeType)>, HookStateProviderError> {
         self.inner.file_changes(ctx, new_cs_id, old_cs_id).await
     }
 
@@ -119,18 +131,27 @@ impl<T: HookStateProvider + 'static> HookStateProvider for TextOnlyHookStateProv
     ) -> Result<TagType, HookStateProviderError> {
         self.inner.get_tag_type(ctx, bookmark).await
     }
+
+    async fn get_git_commit<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        bonsai_commit_id: ChangesetId,
+    ) -> Result<Option<GitSha1>, HookStateProviderError> {
+        self.inner.get_git_commit(ctx, bonsai_commit_id).await
+    }
 }
 
 #[cfg(test)]
 mod test {
     use fbinit::FacebookInit;
+    use mononoke_macros::mononoke;
     use mononoke_types_mocks::contentid::ONES_CTID;
     use tokio::runtime::Runtime;
 
     use super::*;
     use crate::InMemoryHookStateProvider;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_acceptable_file(fb: FacebookInit) {
         let rt = Runtime::new().unwrap();
         let ctx = CoreContext::test_mock(fb);
@@ -148,7 +169,7 @@ mod test {
         assert_eq!(ret, 6);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_elide_large_file(fb: FacebookInit) {
         let rt = Runtime::new().unwrap();
         let ctx = CoreContext::test_mock(fb);
@@ -167,7 +188,7 @@ mod test {
         assert_eq!(ret, 6);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_elide_binary_file(fb: FacebookInit) {
         let rt = Runtime::new().unwrap();
         let ctx = CoreContext::test_mock(fb);

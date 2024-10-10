@@ -6,6 +6,8 @@
  */
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -53,19 +55,18 @@ pub fn make_tree_manifest_from_meta(
 }
 
 /// An in memory `Store` implementation backed by HashMaps. Primarily intended for tests.
+#[derive(Default)]
 pub struct TestStore {
     entries: RwLock<HashMap<RepoPathBuf, HashMap<HgId, Bytes>>>,
     pub prefetched: Mutex<Vec<Vec<Key>>>,
     format: SerializationFormat,
+    key_fetch_count: AtomicU64,
+    insert_count: AtomicU64,
 }
 
 impl TestStore {
     pub fn new() -> Self {
-        TestStore {
-            entries: RwLock::new(HashMap::new()),
-            prefetched: Mutex::new(Vec::new()),
-            format: SerializationFormat::Hg,
-        }
+        Self::default()
     }
 
     pub fn with_format(mut self, format: SerializationFormat) -> Self {
@@ -76,6 +77,14 @@ impl TestStore {
     #[allow(unused)]
     pub fn fetches(&self) -> Vec<Vec<Key>> {
         self.prefetched.lock().clone()
+    }
+
+    pub fn key_fetch_count(&self) -> u64 {
+        self.key_fetch_count.load(Ordering::Relaxed)
+    }
+
+    pub fn insert_count(&self) -> u64 {
+        self.insert_count.load(Ordering::Relaxed)
     }
 }
 
@@ -88,6 +97,7 @@ fn compute_sha1(content: &[u8]) -> HgId {
 
 impl KeyStore for TestStore {
     fn get_local_content(&self, path: &RepoPath, hgid: HgId) -> anyhow::Result<Option<Bytes>> {
+        self.key_fetch_count.fetch_add(1, Ordering::Relaxed);
         let underlying = self.entries.read();
         let result = underlying
             .get(path)
@@ -97,6 +107,7 @@ impl KeyStore for TestStore {
     }
 
     fn insert_data(&self, opts: InsertOpts, path: &RepoPath, data: &[u8]) -> anyhow::Result<HgId> {
+        self.insert_count.fetch_add(1, Ordering::Relaxed);
         let mut underlying = self.entries.write();
         let hgid = match opts.forced_id {
             Some(id) => *id,
@@ -110,6 +121,8 @@ impl KeyStore for TestStore {
     }
 
     fn prefetch(&self, keys: Vec<Key>) -> Result<()> {
+        self.key_fetch_count
+            .fetch_add(keys.len() as u64, Ordering::Relaxed);
         self.prefetched.lock().push(keys);
         Ok(())
     }

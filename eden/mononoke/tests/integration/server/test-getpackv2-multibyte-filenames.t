@@ -7,7 +7,7 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ DIR='dir-multibyte-€'
   $ NAME='file-multibyte-€'
   $ BOOKMARK='book'
@@ -44,9 +44,9 @@
 # because that breaks over utf-8 characters as well.
 
   $ cd "$TESTTMP"
-  $ hgmn_clone mononoke://$(mononoke_address)/repo "$HG_REPO" --noupdate --config extensions.remotenames=
+  $ hg clone -q mono:repo "$HG_REPO" --noupdate
   $ cd "$HG_REPO"
-  $ hgmn cat -r "$BOOKMARK" "$NAME"
+  $ hg cat -r "$BOOKMARK" "$NAME"
   foo
-  $ hgmn cat -r "$BOOKMARK" "$DIR/$NAME"
+  $ hg cat -r "$BOOKMARK" "$DIR/$NAME"
   bar

@@ -3,7 +3,6 @@
 #require no-eden
 
 
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
 
@@ -15,10 +14,6 @@ Set up the server
   > [extensions]
   > pushrebase=
   > remotenames=
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [treemanifest]
-  > server=true
-  > treeonly=true
   > [remotefilelog]
   > server=true
   > shallowtrees=true
@@ -29,7 +24,7 @@ Set up the server
 
 Create client
   $ cd ..
-  $ hgcloneshallow ssh://user@dummy/master client -q --config extensions.treemanifest= --config treemanifest.treeonly=true
+  $ hgcloneshallow ssh://user@dummy/master client -q
   1 files fetched over 1 fetches - (1 misses, 0.00% hit ratio) over * (glob) (?)
   $ cd client
   $ cat >> .hg/hgrc <<EOF
@@ -37,11 +32,6 @@ Create client
   > amend=
   > pushrebase=
   > remotenames=
-  > treemanifest=
-  > [treemanifest]
-  > treeonly=true
-  > sendtrees=true
-  > useruststore=true
   > EOF
 
 Create a commit, and then amend the message twice.  All three should share a manifest.

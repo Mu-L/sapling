@@ -12,9 +12,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ echo "test content" > test.txt
@@ -32,7 +31,7 @@ Populate test repo
 
 Blobimport test repo.
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ start_and_wait_for_mononoke_server
@@ -44,7 +43,7 @@ Create and send file data request.
   > ]
   > EOF
 
-  $ sl debugapi -e history -f req --sort
+  $ hg debugapi mono:repo -e history -f req --sort
   [{"key": {"node": bin("17b8d4e3bafd4ec4812ad7c930aace9bf07ab033"),
             "path": "copy.txt"},
     "nodeinfo": {"parents": [{"node": bin("186cafa3319c24956783383dc44c5cbc68c5a0ca"),

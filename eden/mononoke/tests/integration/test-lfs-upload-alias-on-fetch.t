@@ -15,9 +15,8 @@
   $ cd $TESTTMP
 
 # 1. Setup nolfs hg repo, create several commit to it
-  $ hginit_treemanifest repo-hg-nolfs
-  $ cd repo-hg-nolfs
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 # Commit small file
   $ echo s > smallfile
@@ -33,7 +32,7 @@
 #   2.b Motivation: For blob_files storage, is because we need to run Mononoke and Mononoke API server.
 #       We cannot have 2 processes for 1 RocksDB repo, as RocksDb does not allows us to do that.
 #   2.c Still Mononoke config is blobimported to Rocks DB. As Api server and Mononoke server are using them separately.
-  $ blobimport repo-hg-nolfs/.hg repo
+  $ blobimport repo/.hg repo
 
 # 3. Setup Mononoke. Introduce LFS_THRESHOLD into Mononoke server config.
   $ start_and_wait_for_mononoke_server
@@ -41,27 +40,25 @@
   $ lfs_uri="$(lfs_server)/repo"
 
 # 5. Clone hg nolfs repo to lfs client hg repo. Setup small threshold for large file size.
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg-nolfs repo-hg-lfs --noupdate --config extensions.remotenames=
-  $ cd repo-hg-lfs
-  $ setup_hg_client
+  $ hg clone -q mono:repo repo-lfs --noupdate
+  $ cd repo-lfs
   $ setup_hg_modern_lfs "$lfs_uri" 1000B "$TESTTMP/lfs-cache1"
 
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
 # get smallfile
-  $ hgmn pull -q
-  $ hgmn update -r master_bookmark -q
+  $ hg pull -q
+  $ hg update -r master_bookmark -q
 
 # 6. Hg push from hg client repo.
   $ LONG=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
   $ echo $LONG > lfs-largefile
   $ hg commit -Aqm "add lfs-large file"
-  $ hgmn push -r . --to master_bookmark -v
-  pushing rev 0db8825b9792 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v
+  pushing rev 0db8825b9792 to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found
@@ -86,22 +83,21 @@
 
   $ cd ..
 7. Hg pull from hg client repo.
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg-nolfs repo-hg-lfs2 --noupdate --config extensions.remotenames=
-  $ cd repo-hg-lfs2
-  $ setup_hg_client
+  $ hg clone -q mono:repo repo-lfs2 --noupdate
+  $ cd repo-lfs2
   $ setup_hg_modern_lfs "$lfs_uri" 1000B $TESTTMP/lfs-cache2
 
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > [remotefilelog]
   > getpackversion = 2
   > EOF
 
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
+  no changes found
   adding changesets
   adding manifests
   adding file changes
@@ -109,7 +105,7 @@
   $ ls $TESTTMP/blobstore/blobs | grep "alias.content" | wc -l
   0
 
-  $ hgmn update -r master_bookmark -v
+  $ hg update -r master_bookmark -v
   resolving manifests
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 

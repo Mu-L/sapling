@@ -12,10 +12,10 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client --noupdate
+  $ hginit_treemanifest repo
+  $ hg clone -q mono:repo client --noupdate
 
-  $ cd repo-hg
+  $ cd repo
   $ touch a
   $ hg add a
   $ hg ci -ma
@@ -46,13 +46,13 @@ verify content
    (re)
 
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
   $ start_and_wait_for_mononoke_server
   $ cd client
   $ echo 'remotefilelog' >> .hg/requires
-  $ hgmn pull --config ui.disable-stream-clone=true -q
+  $ hg pull --config ui.disable-stream-clone=true -q
   warning: stream clone is disabled
-  $ hgmn up c201a1696ba0db28be95eedf0949329fa8c44478 -q
+  $ hg up c201a1696ba0db28be95eedf0949329fa8c44478 -q
   $ cat a
   $ cat b
   b

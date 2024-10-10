@@ -69,7 +69,7 @@ enum FetchType {
     Tree,
 }
 
-pub fn run(ctx: ReqCtx<DebugScmStoreOpts>, repo: &mut Repo) -> Result<u8> {
+pub fn run(ctx: ReqCtx<DebugScmStoreOpts>, repo: &Repo) -> Result<u8> {
     let mode = match ctx.opts.mode.as_ref() {
         "file" => FetchType::File,
         "tree" => FetchType::Tree,
@@ -85,7 +85,8 @@ pub fn run(ctx: ReqCtx<DebugScmStoreOpts>, repo: &mut Repo) -> Result<u8> {
         block_on_stream(block_on(file_to_async_key_stream(path.into()))?).collect()
     } else {
         let wc = repo.working_copy()?;
-        let commit = repo.resolve_commit(Some(&wc.treestate().lock()), &ctx.opts.rev.unwrap())?;
+        let commit =
+            repo.resolve_commit(Some(&wc.read().treestate().lock()), &ctx.opts.rev.unwrap())?;
         let manifest = repo.tree_resolver()?.get(&commit)?;
         ctx.opts
             .args

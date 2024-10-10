@@ -18,6 +18,7 @@
 use std::io;
 use std::sync::Arc;
 
+use anyhow::bail;
 use dag::errors::NotFoundError;
 use dag::ops::CheckIntegrity;
 use dag::ops::IdConvert;
@@ -139,6 +140,23 @@ pub trait AppendCommits: Send + Sync {
         let _ = metalog;
         Ok(())
     }
+
+    /// Import external (e.g. git) references to metalog and import related
+    /// commits to the dag index.
+    ///
+    /// This can be useful to pick up changes made by external program
+    /// (e.g. `git fetch`) explicitly.
+    fn import_external_references(
+        &mut self,
+        _metalog: &mut MetaLog,
+        _names: &[String],
+    ) -> Result<()> {
+        bail!("This commit backend does not support 'import_external_reference'");
+    }
+
+    /// Update virtual nodes like `wdir()` and `null()`.
+    /// `null()` and `wdir()` will have Id mapped to the first 2 ids in the virtual group.
+    async fn update_virtual_nodes(&mut self, wdir_parents: Vec<Vertex>) -> Result<()>;
 }
 
 pub trait DescribeBackend {

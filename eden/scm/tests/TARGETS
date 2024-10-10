@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_command_alias", "buck_filegroup")
 load("@fbcode_macros//build_defs:python_binary.bzl", "python_binary")
 load("@fbcode_macros//build_defs:python_unittest.bzl", "python_unittest")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load("//eden:defs.bzl", "get_integration_test_env_and_deps")
 load("//eden/scm/tests:targets.bzl", "get_blocklist", "get_hg_edenfs_watchman_run_tests_included", "get_hg_run_tests_excluded", "get_hg_watchman_run_tests_excluded")
 
@@ -69,8 +68,8 @@ ENV = {
     "RUNTESTDIR": "$(location :test_files)",
     "HGTEST_DUMMYSSH": "$(location :dummyssh3)",
     "HGTEST_GETDB_SH": "$(location //eden/scm/fb/tests:getdb_sh)",
-    "HGTEST_HG": "$(location //eden/scm:hg)",
-    "HGEXECUTABLEPATH": "$(location //eden/scm:hg)",
+    "HGTEST_HG": "$(location //eden/scm:hg_test)",
+    "HGEXECUTABLEPATH": "$(location //eden/scm:hg_test)",
     "URLENCODE": "$(location //eden/mononoke/tests/integration:urlencode)",
     "HGTEST_NORMAL_LAYOUT": "0",
     "HGRUNTEST_SKIP_ENV": "1",
@@ -94,8 +93,8 @@ python_unittest(
     env = ENV,
     resources = {
         "//eden/scm/tests:dummyssh3": "dummyssh3.par",
-        "//eden/scm:hg": "hg.sh",
-        "//eden/scm:hgpython": "hgpython.sh",
+        "//eden/scm:hg_test": "hg.sh",
+        "//eden/scm:hgpython_test": "hgpython.sh",
     },
     supports_static_listing = False,
     runtime_deps = [
@@ -120,8 +119,8 @@ python_unittest(
     env = W_ENV,
     resources = {
         "//eden/scm/tests:dummyssh3": "dummyssh3.par",
-        "//eden/scm:hg": "hg.sh",
-        "//eden/scm:hgpython": "hgpython.sh",
+        "//eden/scm:hg_test": "hg.sh",
+        "//eden/scm:hgpython_test": "hgpython.sh",
         "//watchman:watchman": "watchman",
     },
     supports_static_listing = False,
@@ -146,8 +145,8 @@ python_unittest(
     env = E_ENV,
     resources = {
         "//eden/scm/tests:dummyssh3": "dummyssh3.par",
-        "//eden/scm:hg": "hg.sh",
-        "//eden/scm:hgpython": "hgpython.sh",
+        "//eden/scm:hg_test": "hg.sh",
+        "//eden/scm:hgpython_test": "hgpython.sh",
     },
     supports_static_listing = False,
     runtime_deps = artifacts["deps"],
@@ -169,8 +168,8 @@ python_unittest(
     env = EW_ENV,
     resources = {
         "//eden/scm/tests:dummyssh3": "dummyssh3.par",
-        "//eden/scm:hg": "hg.sh",
-        "//eden/scm:hgpython": "hgpython.sh",
+        "//eden/scm:hg_test": "hg.sh",
+        "//eden/scm:hgpython_test": "hgpython.sh",
         "//watchman:watchman": "watchman",
     },
     supports_static_listing = False,
@@ -206,6 +205,8 @@ M_ENV["HGTEST_INCLUDED"] = "test_(fb_ext_remotefilelog_(log|getpackv2|worker|rus
 
 M_ENV["TEST_FIXTURES"] = "$(location //eden/mononoke/tests/integration:test_fixtures)"
 
+M_ENV["JUST_KNOBS_DEFAULTS"] = "$(location //eden/mononoke/mononoke_macros:just_knobs_defaults)"
+
 M_ENV["FB_TEST_FIXTURES"] = "$(location //eden/mononoke/tests/integration/facebook:facebook_test_fixtures)"
 
 python_unittest(
@@ -220,8 +221,8 @@ python_unittest(
         "//eden/mononoke/tests/integration:get_free_socket": "get_free_socket.par",
         "//eden/mononoke:mononoke": "mononoke",
         "//eden/scm/tests:dummyssh3": "dummyssh3.par",
-        "//eden/scm:hg": "hg.sh",
-        "//eden/scm:hgpython": "hgpython.sh",
+        "//eden/scm:hg_test": "hg.sh",
+        "//eden/scm:hgpython_test": "hgpython.sh",
         "//watchman:watchman": "watchman",
     },
     supports_static_listing = False,

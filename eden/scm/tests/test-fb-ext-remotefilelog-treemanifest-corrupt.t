@@ -9,13 +9,8 @@
 
   $ cd master
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
   > [remotefilelog]
   > server=True
-  > [treemanifest]
-  > server=True
-  > treeonly=True
   > EOF
   $ echo x > x
   $ hg commit -qAm x1
@@ -26,14 +21,8 @@ Populate the second repository
 
   $ cd sane
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [extensions]
   > [remotefilelog]
   > server=True
-  > [treemanifest]
-  > server=True
-  > treeonly=True
   > EOF
   $ echo x > x
   $ hg commit -qAm x1

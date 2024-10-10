@@ -1,5 +1,4 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("sapling")
 
@@ -36,6 +35,5 @@ rust_library(
     ],
     deps = [
         "fbsource//third-party/rust:bitflags",
-        "fbsource//third-party/rust:itertools",
     ],
 )

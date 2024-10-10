@@ -42,7 +42,6 @@ from . import (
     workspace,
 )
 
-
 # Sync status file.  Contains whether the previous sync was successful or not.
 _syncstatusfile = "commitcloudsyncstatus"
 
@@ -223,11 +222,9 @@ def _sync(
     with repo.ui.configoverride(
         {("treemanifest", "prefetchdraftparents"): False}, "cloudsync"
     ), repo.wlock(), repo.lock():
-
         synced = False
         attempt = 0
         while not synced:
-
             if attempt >= 3:
                 raise ccerror.SynchronizationError(
                     ui, _("failed to sync after %s attempts") % attempt
@@ -235,7 +232,6 @@ def _sync(
             attempt += 1
 
             with repo.transaction("cloudsync") as tr:
-
                 if besteffort and _hashrepostate(repo) != origrepostate:
                     # Another transaction changed the repository while we were backing
                     # up commits. This may have introduced new commits that also need
@@ -273,7 +269,6 @@ def _sync(
             # We committed the transaction so that data downloaded from the cloud is
             # committed.  Start a new transaction for uploading the local changes.
             with repo.transaction("cloudsync") as tr:
-
                 # Send updates to the cloud.  If this fails then we have lost the race
                 # to update the server and must start again.
                 synced, cloudrefs = _submitlocalchanges(
@@ -729,14 +724,16 @@ def _processremotebookmarks(repo, cloudremotebooks, lastsyncstate):
             # Use the local node
             updates[remotename] = localnode
 
+    scratchmatcher = ccutil.scratchbranchmatcher(repo.ui)
+
     def ispublic(name):
         remote, name = bookmarks.splitremotename(name)
-        return not repo._scratchbranchmatcher.match(name)
+        return not scratchmatcher.match(name)
 
     unfi = repo
     newnames = {
         name: node
-        for name, node in pycompat.iteritems(updates)
+        for name, node in updates.items()
         if node != nodemod.nullhex and node not in unfi and ispublic(name)
     }
     return (updates, newnames)
@@ -752,7 +749,7 @@ def _updateremotebookmarks(repo, tr, updates):
 
     # Filter out any deletions of default names.  These are protected and shouldn't
     # be deleted if this is the default remote
-    for remotename, node in pycompat.iteritems(updates):
+    for remotename, node in updates.items():
         remote, name = bookmarks.splitremotename(remotename)
         if node == nodemod.nullhex and remotename in protectednames:
             newremotebookmarks[remotename] = oldremotebookmarks.get(

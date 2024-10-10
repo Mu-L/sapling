@@ -209,7 +209,9 @@ Metrics can be printed if devel.print-metrics is set:
   $ hg log -r null -T '.\n' --config extensions.gauge=$TESTTMP/a.py --config devel.print-metrics= --config devel.skip-metrics=scmstore,watchman
   .
   atexit handler executed
-  { metrics : { test : { bar : 2,  foo : { a : 1,  b : 5}}}}
+  test_bar: 2
+  test_foo_a: 1
+  test_foo_b: 5
 
 Metrics is logged to blackbox:
 
@@ -219,9 +221,9 @@ Metrics is logged to blackbox:
   atexit handler executed
   $ hg blackbox --no-timestamp --no-sid --pattern '{"legacy_log":{"service":"metrics"}}' | grep foo
   atexit handler executed
-  [legacy][metrics] {'metrics':*'test': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}} (glob)
-  [legacy][metrics] {'metrics':*'test': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}} (glob)
-  [legacy][metrics] {'metrics':*'test': {'bar': 2, 'foo': {'a': 1, 'b': 5}}}} (glob)
+  [legacy][metrics] {"metrics":*,"test":{"bar":2,"foo":{"a":1,"b":5}}}} (glob)
+  [legacy][metrics] {"metrics":*,"test":{"bar":2,"foo":{"a":1,"b":5}}}} (glob)
+  [legacy][metrics] {"metrics":*,"test":{"bar":2,"foo":{"a":1,"b":5}}}} (glob)
 
 Invalid format strings don't crash Mercurial
 

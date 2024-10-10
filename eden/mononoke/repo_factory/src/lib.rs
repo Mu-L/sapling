@@ -67,8 +67,8 @@ use cacheblob::LeaseOps;
 use cacheblob::MemcacheOps;
 use caching_commit_graph_storage::CachingCommitGraphStorage;
 use caching_ext::CacheHandlerFactory;
-use changesets::ArcChangesets;
-use changesets_impl::SqlChangesetsBuilder;
+use clientinfo::ClientEntryPoint;
+use clientinfo::ClientInfo;
 use commit_cloud::sql::builder::SqlCommitCloudBuilder;
 use commit_cloud::ArcCommitCloud;
 use commit_cloud::CommitCloud;
@@ -76,7 +76,6 @@ use commit_graph::ArcCommitGraph;
 use commit_graph::ArcCommitGraphWriter;
 use commit_graph::BaseCommitGraphWriter;
 use commit_graph::CommitGraph;
-use commit_graph::CompatCommitGraphWriter;
 use commit_graph::LoggingCommitGraphWriter;
 use commit_graph_types::storage::CommitGraphStorage;
 use context::CoreContext;
@@ -107,8 +106,8 @@ use filenodes::ArcFilenodes;
 use filestore::ArcFilestoreConfig;
 use filestore::FilestoreConfig;
 use futures_watchdog::WatchdogExt;
-use git_push_redirect::ArcGitPushRedirectConfig;
-use git_push_redirect::SqlGitPushRedirectConfigBuilder;
+use git_source_of_truth::ArcGitSourceOfTruthConfig;
+use git_source_of_truth::SqlGitSourceOfTruthConfigBuilder;
 use git_symbolic_refs::ArcGitSymbolicRefs;
 use git_symbolic_refs::SqlGitSymbolicRefsBuilder;
 use hook_manager::manager::ArcHookManager;
@@ -129,6 +128,8 @@ use metaconfig_types::MetadataDatabaseConfig;
 use metaconfig_types::Redaction;
 use metaconfig_types::RepoConfig;
 use metaconfig_types::RepoReadOnly;
+#[cfg(fbcode_build)]
+use metaconfig_types::ZelosConfig;
 use mutable_counters::ArcMutableCounters;
 use mutable_counters::SqlMutableCountersBuilder;
 use mutable_renames::ArcMutableRenames;
@@ -174,22 +175,25 @@ use repo_sparse_profiles::RepoSparseProfiles;
 use repo_sparse_profiles::SqlSparseProfilesSizes;
 use repo_stats_logger::ArcRepoStatsLogger;
 use repo_stats_logger::RepoStatsLogger;
-use requests_table::ArcLongRunningRequestsQueue;
-use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
+use slog::debug;
+use slog::error;
 use slog::o;
 use sql_commit_graph_storage::ArcCommitGraphBulkFetcher;
 use sql_commit_graph_storage::CommitGraphBulkFetcher;
 use sql_commit_graph_storage::SqlCommitGraphStorageBuilder;
 use sql_construct::SqlConstructFromDatabaseConfig;
 use sql_construct::SqlConstructFromMetadataDatabaseConfig;
+use sql_construct::SqlShardableConstructFromMetadataDatabaseConfig;
 use sql_query_config::ArcSqlQueryConfig;
 use sql_query_config::SqlQueryConfig;
 use sqlphases::SqlPhasesBuilder;
+use stats::prelude::*;
 use streaming_clone::ArcStreamingClone;
 use streaming_clone::StreamingCloneBuilder;
 use synced_commit_mapping::ArcSyncedCommitMapping;
-use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::CachingSyncedCommitMapping;
+use synced_commit_mapping::SqlSyncedCommitMappingBuilder;
 use thiserror::Error;
 use virtually_sharded_blobstore::VirtuallyShardedBlobstore;
 use warm_bookmarks_cache::NoopBookmarksCache;
@@ -204,17 +208,42 @@ use wireproto_handler::RepoHandlerBase;
 use wireproto_handler::TargetRepoDbs;
 #[cfg(fbcode_build)]
 use zelos_queue::zelos_derivation_queues;
+#[cfg(fbcode_build)]
+use zeus_client::zeus_cpp_client::ZeusCppClient;
+#[cfg(fbcode_build)]
+use zeus_client::ZeusClient;
 
 const DERIVED_DATA_LEASE: &str = "derived-data-lease";
+const ZEUS_CLIENT_ID: &str = "mononoke";
+
+define_stats! {
+    prefix = "mononoke.repo_factory";
+    cache_hit: dynamic_singleton_counter(
+        "cache.{}.hit",
+        (cache_name: String)
+    ),
+    cache_init_error: dynamic_singleton_counter(
+        "cache.{}.init.error",
+        (cache_name: String)
+    ),
+    cache_miss: dynamic_singleton_counter(
+        "cache.{}.miss",
+        (cache_name: String)
+    ),
+}
 
 #[derive(Clone)]
 struct RepoFactoryCache<K: Clone + Eq + Hash, V: Clone> {
+    fb: FacebookInit,
+    name: String,
     cache: Arc<Mutex<HashMap<K, Arc<AsyncOnceCell<V>>>>>,
 }
 
 impl<K: Clone + Eq + Hash, V: Clone> RepoFactoryCache<K, V> {
-    fn new() -> Self {
+    fn new(fb: FacebookInit, name: &str) -> Self {
         RepoFactoryCache {
+            fb,
+            name: name.to_string(),
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -229,19 +258,26 @@ impl<K: Clone + Eq + Hash, V: Clone> RepoFactoryCache<K, V> {
             match cache.get(key) {
                 Some(cell) => {
                     if let Some(value) = cell.get() {
+                        STATS::cache_hit.increment_value(self.fb, 1, (self.name.clone(),));
                         return Ok(value.clone());
                     }
                     cell.clone()
                 }
                 None => {
+                    STATS::cache_miss.increment_value(self.fb, 1, (self.name.clone(),));
                     let cell = Arc::new(AsyncOnceCell::new());
                     cache.insert(key.clone(), cell.clone());
                     cell
                 }
             }
         };
-        let value = cell.get_or_try_init(init).await?;
-        Ok(value.clone())
+        match cell.get_or_try_init(init).await {
+            Ok(value) => Ok(value.clone()),
+            Err(e) => {
+                STATS::cache_init_error.increment_value(self.fb, 1, (self.name.clone(),));
+                Err(e)
+            }
+        }
     }
 }
 
@@ -253,6 +289,8 @@ pub struct RepoFactory {
     sql_factories: RepoFactoryCache<MetadataDatabaseConfig, Arc<MetadataSqlFactory>>,
     blobstores: RepoFactoryCache<BlobConfig, Arc<dyn Blobstore>>,
     redacted_blobs: RepoFactoryCache<MetadataDatabaseConfig, Arc<RedactedBlobs>>,
+    #[cfg(fbcode_build)]
+    zelos_clients: RepoFactoryCache<ZelosConfig, Arc<dyn ZeusClient>>,
     blobstore_override: Option<Arc<dyn RepoFactoryOverride<Arc<dyn Blobstore>>>>,
     lease_override: Option<Arc<dyn RepoFactoryOverride<Arc<dyn LeaseOps>>>>,
     scrub_handler: Arc<dyn ScrubHandler>,
@@ -263,9 +301,11 @@ pub struct RepoFactory {
 impl RepoFactory {
     pub fn new(env: Arc<MononokeEnvironment>) -> RepoFactory {
         RepoFactory {
-            sql_factories: RepoFactoryCache::new(),
-            blobstores: RepoFactoryCache::new(),
-            redacted_blobs: RepoFactoryCache::new(),
+            sql_factories: RepoFactoryCache::new(env.fb, "sql_factories"),
+            blobstores: RepoFactoryCache::new(env.fb, "blobstore"),
+            redacted_blobs: RepoFactoryCache::new(env.fb, "redacted_blobs"),
+            #[cfg(fbcode_build)]
+            zelos_clients: RepoFactoryCache::new(env.fb, "zelos_clients"),
             blobstore_override: None,
             lease_override: None,
             scrub_handler: default_scrub_handler(),
@@ -322,7 +362,22 @@ impl RepoFactory {
                     self.env.readonly_storage,
                 )
                 .watched(&self.env.logger)
-                .await?;
+                .await
+                .inspect_err(|e| {
+                    error!(
+                        self.env.logger,
+                        "initializing DB connection failed for config: {:?}: {}", config, e
+                    )
+                })
+                .context("initializing DB connection")?;
+
+                if justknobs::eval("scm/mononoke:log_sql_factory_init", None, None).unwrap_or(false)
+                {
+                    debug!(
+                        self.env.logger,
+                        "initializing DB connection succeeded for config: {:?}", config
+                    )
+                }
                 Ok(Arc::new(sql_factory))
             })
             .await
@@ -334,6 +389,15 @@ impl RepoFactory {
     ) -> Result<T> {
         let sql_factory = self.sql_factory(&config.storage_config.metadata).await?;
         sql_factory.open::<T>().await
+    }
+
+    async fn open_sql_shardable<T: SqlShardableConstructFromMetadataDatabaseConfig>(
+        &self,
+        config: &RepoConfig,
+    ) -> Result<(Arc<MetadataSqlFactory>, T)> {
+        let sql_factory = self.sql_factory(&config.storage_config.metadata).await?;
+        let db = sql_factory.open_shardable::<T>().await?;
+        Ok((sql_factory, db))
     }
 
     async fn blobstore_no_cache(&self, config: &BlobConfig) -> Result<Arc<dyn Blobstore>> {
@@ -479,6 +543,33 @@ impl RepoFactory {
             .await
     }
 
+    #[cfg(fbcode_build)]
+    async fn zelos_client(&self, config: &ZelosConfig) -> Result<Arc<dyn ZeusClient>> {
+        self.zelos_clients
+            .get_or_try_init(config, || async move {
+                let zelos_client = match config {
+                    ZelosConfig::Local { port } => {
+                        ZeusCppClient::zelos_client_for_local_ensemble_reconnecting(*port)
+                            .with_context(|| {
+                                format!("Error creating Local Zeus client on port {}", port)
+                            })?
+                    }
+                    ZelosConfig::Remote { tier } => {
+                        ZeusCppClient::new_reconnecting(self.env.fb, ZEUS_CLIENT_ID, tier)
+                            .with_context(|| {
+                                format!(
+                                    "Error creating Zeus client to {} with client id {}",
+                                    tier, ZEUS_CLIENT_ID
+                                )
+                            })?
+                    }
+                };
+                let zelos_client: Arc<dyn ZeusClient> = Arc::new(zelos_client);
+                Ok(zelos_client)
+            })
+            .await
+    }
+
     fn lease_init(
         fb: FacebookInit,
         caching: Caching,
@@ -556,6 +647,14 @@ impl RepoFactory {
     }
 
     fn ctx(&self, repo_identity: Option<&ArcRepoIdentity>) -> CoreContext {
+        self.ctx_with_client_entry_point(repo_identity, None)
+    }
+
+    fn ctx_with_client_entry_point(
+        &self,
+        repo_identity: Option<&ArcRepoIdentity>,
+        client_entry_point: Option<ClientEntryPoint>,
+    ) -> CoreContext {
         let logger = repo_identity.map_or_else(
             || self.env.logger.new(o!()),
             |id| {
@@ -563,7 +662,14 @@ impl RepoFactory {
                 self.env.logger.new(o!("repo" => repo_name))
             },
         );
-        let session = SessionContainer::new_with_defaults(self.env.fb);
+        let session = if let Some(client_entry_point) = client_entry_point {
+            SessionContainer::new_with_client_info(
+                self.env.fb,
+                ClientInfo::default_with_entry_point(client_entry_point),
+            )
+        } else {
+            SessionContainer::new_with_defaults(self.env.fb)
+        };
         session.new_context(logger, self.env.scuba_sample_builder.clone())
     }
 
@@ -652,9 +758,6 @@ pub fn cachelib_blobstore<B: Blobstore + 'static>(
 
 #[derive(Debug, Error)]
 pub enum RepoFactoryError {
-    #[error("Error opening changesets")]
-    Changesets,
-
     #[error("Error opening bookmarks")]
     Bookmarks,
 
@@ -683,7 +786,7 @@ pub enum RepoFactoryError {
     RepoMetadataCheckpoint,
 
     #[error("Error opening git-push-redirect-config")]
-    GitPushRedirectConfig,
+    GitSourceOfTruthConfig,
 
     #[error("Error opening pushrebase mutation mapping")]
     PushrebaseMutationMapping,
@@ -756,20 +859,6 @@ impl RepoFactory {
 
     pub fn caching(&self) -> Caching {
         self.env.caching
-    }
-
-    pub async fn changesets(
-        &self,
-        repo_identity: &ArcRepoIdentity,
-        repo_config: &ArcRepoConfig,
-    ) -> Result<ArcChangesets> {
-        let builder = self
-            .open_sql::<SqlChangesetsBuilder>(repo_config)
-            .await
-            .context(RepoFactoryError::Changesets)?;
-        let changesets = builder.build(self.env.rendezvous_options, repo_identity.id());
-
-        Ok(Arc::new(changesets))
     }
 
     pub async fn repo_stats_logger(
@@ -887,17 +976,6 @@ impl RepoFactory {
         }
     }
 
-    pub async fn long_running_requests_queue(
-        &self,
-        repo_config: &ArcRepoConfig,
-    ) -> Result<ArcLongRunningRequestsQueue> {
-        let long_running_requests_queue = self
-            .open_sql::<SqlLongRunningRequestsQueue>(repo_config)
-            .await
-            .context(RepoFactoryError::LongRunningRequestsQueue)?;
-        Ok(Arc::new(long_running_requests_queue))
-    }
-
     pub async fn bonsai_globalrev_mapping(
         &self,
         repo_config: &ArcRepoConfig,
@@ -981,16 +1059,16 @@ impl RepoFactory {
         Ok(Arc::new(repo_metadata_info))
     }
 
-    pub async fn git_push_redirect_config(
+    pub async fn git_source_of_truth_config(
         &self,
         repo_config: &ArcRepoConfig,
-    ) -> Result<ArcGitPushRedirectConfig> {
-        let git_push_redirect_config = self
-            .open_sql::<SqlGitPushRedirectConfigBuilder>(repo_config)
+    ) -> Result<ArcGitSourceOfTruthConfig> {
+        let git_source_of_truth_config = self
+            .open_sql::<SqlGitSourceOfTruthConfigBuilder>(repo_config)
             .await
-            .context(RepoFactoryError::GitPushRedirectConfig)?
+            .context(RepoFactoryError::GitSourceOfTruthConfig)?
             .build();
-        Ok(Arc::new(git_push_redirect_config))
+        Ok(Arc::new(git_source_of_truth_config))
     }
 
     pub async fn pushrebase_mutation_mapping(
@@ -1042,11 +1120,8 @@ impl RepoFactory {
         repo_config: &ArcRepoConfig,
         repo_identity: &ArcRepoIdentity,
     ) -> Result<ArcFilenodes> {
-        let sql_factory = self
-            .sql_factory(&repo_config.storage_config.metadata)
-            .await?;
-        let mut filenodes_builder = sql_factory
-            .open_shardable::<NewFilenodesBuilder>()
+        let (sql_factory, mut filenodes_builder) = self
+            .open_sql_shardable::<NewFilenodesBuilder>(repo_config)
             .await
             .context(RepoFactoryError::Filenodes)?;
         if let (Some(filenodes_cache_handler_factory), Some(history_cache_handler_factory)) = (
@@ -1257,20 +1332,32 @@ impl RepoFactory {
         #[cfg(fbcode_build)]
         {
             let config = repo_config.derived_data_config.clone();
-            let zelos_config = repo_config.zelos_config.as_ref().ok_or_else(|| {
-                anyhow!("Missing zelos config while trying to construct repo_derivation_queues")
-            })?;
             let lease = self.lease(DERIVED_DATA_LEASE)?;
             let derived_data_scuba = build_scuba(
                 self.env.fb,
                 config.scuba_table.clone(),
                 repo_identity.name(),
             )?;
+            let zelos_config = repo_config.zelos_config.as_ref().ok_or_else(|| {
+                anyhow!("Missing zelos config while trying to construct repo_derivation_queues")
+            })?;
+            let zelos_client = self.zelos_client(zelos_config).await?;
+
+            let scuba_table = repo_config
+                .derived_data_config
+                .derivation_queue_scuba_table
+                .as_deref();
+            let scuba = match scuba_table {
+                Some(scuba_table) => MononokeScubaSampleBuilder::new(self.env.fb, scuba_table)
+                    .with_context(|| "Couldn't create derivation queue scuba sample builder")?,
+                None => MononokeScubaSampleBuilder::with_discard(),
+            };
+
             anyhow::Ok(Arc::new(
                 zelos_derivation_queues(
-                    self.env.fb,
                     repo_identity.id(),
                     repo_identity.name().to_string(),
+                    scuba,
                     commit_graph.clone(),
                     bonsai_hg_mapping.clone(),
                     bonsai_git_mapping.clone(),
@@ -1280,7 +1367,7 @@ impl RepoFactory {
                     lease,
                     derived_data_scuba,
                     config,
-                    zelos_config,
+                    zelos_client,
                 )
                 .await?,
             ))
@@ -1292,34 +1379,44 @@ impl RepoFactory {
         &self,
         repo_config: &ArcRepoConfig,
     ) -> Result<ArcSyncedCommitMapping> {
-        Ok(Arc::new(
-            self.open_sql::<SqlSyncedCommitMapping>(repo_config).await?,
-        ))
+        let sql_mapping = Arc::new(
+            self.open_sql::<SqlSyncedCommitMappingBuilder>(repo_config)
+                .await?
+                .build(self.env.rendezvous_options),
+        );
+        let maybe_cached_mapping: ArcSyncedCommitMapping = if let Some(cache_handler_factory) =
+            self.cache_handler_factory("synced_commit_mapping")?
+        {
+            Arc::new(CachingSyncedCommitMapping::new(
+                sql_mapping,
+                cache_handler_factory,
+            )?)
+        } else {
+            sql_mapping
+        };
+        Ok(maybe_cached_mapping)
     }
 
     /// Cross-repo sync manager for this repo
     pub async fn repo_cross_repo(
         &self,
-        repo_identity: &ArcRepoIdentity,
         synced_commit_mapping: &ArcSyncedCommitMapping,
         push_redirection_config: &ArcPushRedirectionConfig,
+        repo_identity: &ArcRepoIdentity,
     ) -> Result<ArcRepoCrossRepo> {
         let sync_lease = create_commit_syncer_lease(self.env.fb, self.env.caching)?;
-        let logger = self
-            .env
-            .logger
-            .new(o!("repo" => repo_identity.name().to_string()));
-        let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new_with_xdb(
-            &logger,
+        let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new(
             &self.env.config_store,
             push_redirection_config.clone(),
         )?);
-
-        Ok(Arc::new(RepoCrossRepo::new(
+        let repo_xrepo = RepoCrossRepo::new(
             synced_commit_mapping.clone(),
             live_commit_sync_config,
             sync_lease,
-        )))
+            repo_identity.id(),
+        )
+        .await?;
+        Ok(Arc::new(repo_xrepo))
     }
 
     pub async fn mutable_counters(
@@ -1351,6 +1448,8 @@ impl RepoFactory {
         bookmarks: &ArcBookmarks,
         repo_blobstore: &ArcRepoBlobstore,
         bonsai_tag_mapping: &ArcBonsaiTagMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
+        permission_checker: &ArcRepoPermissionChecker,
     ) -> Result<ArcHookManager> {
         let name = repo_identity.name();
 
@@ -1381,6 +1480,7 @@ impl RepoFactory {
                     repo_blobstore.clone(),
                     repo_derived_data.clone(),
                     bonsai_tag_mapping.clone(),
+                    bonsai_git_mapping.clone(),
                 ),
                 repo_config.hook_max_file_size,
             ));
@@ -1390,6 +1490,7 @@ impl RepoFactory {
                 self.env.acl_provider.as_ref(),
                 content_provider,
                 repo_config.hook_manager_params.clone().unwrap_or_default(),
+                permission_checker.clone(),
                 hooks_scuba,
                 name.to_string(),
             )
@@ -1488,7 +1589,10 @@ impl RepoFactory {
                 let scuba_sample_builder =
                     self.env.warm_bookmarks_cache_scuba_sample_builder.clone();
                 let ctx = self
-                    .ctx(Some(repo_identity))
+                    .ctx_with_client_entry_point(
+                        Some(repo_identity),
+                        Some(self.env.client_entry_point_for_service),
+                    )
                     .with_mutated_scuba(|_| scuba_sample_builder);
 
                 let mut wbc_builder = WarmBookmarksCacheBuilder::new(
@@ -1504,6 +1608,9 @@ impl RepoFactory {
                     }
                     BookmarkCacheDerivedData::GitOnly => {
                         wbc_builder.add_git_warmers(repo_derived_data, phases)?;
+                    }
+                    BookmarkCacheDerivedData::HgAndGit => {
+                        wbc_builder.add_hg_and_git_warmers(repo_derived_data, phases)?;
                     }
                     BookmarkCacheDerivedData::AllKinds => {
                         wbc_builder.add_all_warmers(repo_derived_data, phases)?;
@@ -1653,7 +1760,9 @@ impl RepoFactory {
             .commit_graph_config
             .preloaded_commit_graph_blobstore_key
         {
-            Some(preloaded_commit_graph_key) => {
+            Some(preloaded_commit_graph_key)
+                if !self.env.commit_graph_options.skip_preloading_commit_graph =>
+            {
                 let blobstore_without_cache = self
                     .repo_blobstore_from_blobstore(
                         repo_identity,
@@ -1676,7 +1785,7 @@ impl RepoFactory {
 
                 Ok(Arc::new(CommitGraph::new(preloaded_commit_graph_storage)))
             }
-            None => Ok(Arc::new(CommitGraph::new(maybe_cached_storage))),
+            _ => Ok(Arc::new(CommitGraph::new(maybe_cached_storage))),
         }
     }
 
@@ -1685,7 +1794,6 @@ impl RepoFactory {
         repo_identity: &ArcRepoIdentity,
         repo_config: &ArcRepoConfig,
         commit_graph: &CommitGraph,
-        changesets: &ArcChangesets,
     ) -> Result<ArcCommitGraphWriter> {
         let scuba_table = repo_config.commit_graph_config.scuba_table.as_deref();
         let scuba = match scuba_table {
@@ -1698,21 +1806,8 @@ impl RepoFactory {
 
         let base_writer = Arc::new(BaseCommitGraphWriter::new(commit_graph.clone()));
 
-        let writer: ArcCommitGraphWriter = if justknobs::eval(
-            "scm/mononoke:disable_double_writing_to_changesets_table",
-            None,
-            None,
-        )? {
-            base_writer
-        } else {
-            Arc::new(CompatCommitGraphWriter::new(
-                base_writer,
-                changesets.clone(),
-            ))
-        };
-
         Ok(Arc::new(LoggingCommitGraphWriter::new(
-            writer,
+            base_writer,
             scuba,
             repo_identity.name().to_string(),
         )))
@@ -1735,11 +1830,8 @@ impl RepoFactory {
         &self,
         repo_config: &ArcRepoConfig,
     ) -> Result<ArcBonsaiBlobMapping> {
-        let sql_factory = self
-            .sql_factory(&repo_config.storage_config.metadata)
-            .await?;
-        let sql_bonsai_blob_mapping = sql_factory
-            .open_shardable::<SqlBonsaiBlobMapping>()
+        let (_, sql_bonsai_blob_mapping) = self
+            .open_sql_shardable::<SqlBonsaiBlobMapping>(repo_config)
             .await
             .context(RepoFactoryError::BonsaiBlobMapping)?;
         Ok(Arc::new(BonsaiBlobMapping {

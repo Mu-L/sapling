@@ -19,13 +19,11 @@ use std::sync::Arc;
 use checkout::BookmarkAction;
 use checkout::CheckoutMode;
 use checkout::ReportMode;
-use configmodel::config::ConfigExt;
 use context::CoreContext;
 use cpython::*;
 use cpython_ext::convert::ImplInto;
 use cpython_ext::convert::Serde;
 use cpython_ext::error::ResultPyErrExt;
-use cpython_ext::ExtractInner;
 use cpython_ext::PyNone;
 use cpython_ext::PyPathBuf;
 use parking_lot::RwLock;
@@ -35,10 +33,8 @@ use pyeagerepo::EagerRepoStore as PyEagerRepoStore;
 use pyedenapi::PyClient as PySaplingRemoteApi;
 use pymetalog::metalog as PyMetaLog;
 use pyrevisionstore::filescmstore as PyFileScmStore;
-use pyrevisionstore::pyremotestore as PyRemoteStore;
 use pyrevisionstore::treescmstore as PyTreeScmStore;
 use pyworkingcopy::workingcopy as PyWorkingCopy;
-use revisionstore::ContentStoreBuilder;
 use rsrepo::repo::Repo;
 use rsworkingcopy::workingcopy::WorkingCopy;
 use types::HgId;
@@ -48,6 +44,7 @@ pub fn init_module(py: Python, package: &str) -> PyResult<PyModule> {
     let m = PyModule::new(py, &name)?;
     m.add_class::<repo>(py)?;
     m.add_class::<repolock>(py)?;
+
     Ok(m)
 }
 
@@ -72,7 +69,7 @@ py_class!(pub class repo |py| {
         let mut wc_option = self.inner_wc(py).borrow_mut();
         if wc_option.is_none() {
             let repo = self.inner(py).write();
-            wc_option.replace(Arc::new(RwLock::new(repo.working_copy().map_pyerr(py)?)));
+            wc_option.replace(repo.working_copy().map_pyerr(py)?);
         }
         PyWorkingCopy::create_instance(py, wc_option.as_ref().unwrap().clone())
     }
@@ -81,8 +78,7 @@ py_class!(pub class repo |py| {
         let wc_option = self.inner_wc(py).borrow_mut();
         if wc_option.is_some() {
             let repo = self.inner(py).write();
-            let mut wc = wc_option.as_ref().unwrap().write();
-            *wc = repo.working_copy().map_pyerr(py)?;
+            repo.invalidate_working_copy().map_pyerr(py)?;
         }
         Ok(PyNone)
     }
@@ -134,58 +130,22 @@ py_class!(pub class repo |py| {
         }
     }
 
-    def filescmstore(&self, remote: PyRemoteStore) -> PyResult<PyFileScmStore> {
+    def filescmstore(&self) -> PyResult<PyFileScmStore> {
         let repo = self.inner(py).write();
         let _ = repo.file_store().map_pyerr(py)?;
-        let mut file_scm_store = repo.file_scm_store().unwrap();
+        let file_scm_store = repo.file_scm_store().unwrap();
 
-        let mut builder = ContentStoreBuilder::new(repo.config())
-            .remotestore(remote.extract_inner(py))
-            .local_path(repo.store_path());
-
-        if let Some(indexedlog_local) = file_scm_store.indexedlog_local() {
-            builder = builder.shared_indexedlog_local(indexedlog_local);
-        }
-
-        if let Some(cache) = file_scm_store.indexedlog_cache() {
-            builder = builder.shared_indexedlog_shared(cache);
-        }
-
-        let contentstore = Arc::new(builder.build().map_pyerr(py)?);
-
-        if repo.config().get_or_default("scmstore", "contentstorefallback").map_pyerr(py)? {
-            file_scm_store = Arc::new(file_scm_store.with_content_store(contentstore.clone()));
-        }
-
-        PyFileScmStore::create_instance(py, file_scm_store, contentstore)
+        PyFileScmStore::create_instance(py, file_scm_store)
     }
 
-    def treescmstore(&self, remote: PyRemoteStore) -> PyResult<PyTreeScmStore> {
+    def treescmstore(&self) -> PyResult<PyTreeScmStore> {
         let repo = self.inner(py).write();
         let _ = repo.tree_store().map_pyerr(py)?;
-        let mut tree_scm_store = repo.tree_scm_store().unwrap();
+        let tree_scm_store = repo.tree_scm_store().unwrap();
 
-        let mut builder = ContentStoreBuilder::new(repo.config())
-            .remotestore(remote.extract_inner(py))
-            .local_path(repo.store_path())
-            .suffix("manifests");
+        let caching_store = Some(repo.caching_tree_store().map_pyerr(py)?);
 
-        if let Some(indexedlog_local) = tree_scm_store.indexedlog_local.clone() {
-            builder = builder.shared_indexedlog_local(indexedlog_local);
-        }
-
-        if let Some(cache) = tree_scm_store.indexedlog_cache.clone() {
-            builder = builder.shared_indexedlog_shared(cache);
-        }
-
-        let contentstore = Arc::new(builder.build().map_pyerr(py)?);
-
-        if repo.config().get_or_default("scmstore", "contentstorefallback").map_pyerr(py)? {
-            tree_scm_store = Arc::new(tree_scm_store.with_content_store(contentstore.clone()));
-        }
-
-
-        PyTreeScmStore::create_instance(py, tree_scm_store, contentstore)
+        PyTreeScmStore::create_instance(py, tree_scm_store, caching_store)
     }
 
     def changelog(&self) -> PyResult<PyCommits> {

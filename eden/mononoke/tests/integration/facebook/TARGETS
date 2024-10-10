@@ -1,13 +1,12 @@
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_filegroup", "buck_sh_binary")
 load("@fbcode_macros//build_defs:python_binary.bzl", "python_binary")
 load("@fbcode_macros//build_defs:python_library.bzl", "python_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load(
     "//eden/mononoke/tests/integration/facebook:fb_manifest_deps.bzl",
     "dott_test",
 )
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 python_library(
     name = "lib_buck",
@@ -32,6 +31,7 @@ buck_filegroup(
     name = "facebook_test_fixtures",
     srcs = [
         "fb_library.sh",
+        "git_pushrebase/library-git-pushrebase.sh",
         "verify_integrity_mocked_diff_info.json",
     ],
 )
@@ -61,7 +61,7 @@ dott_test(
         "//eden/mononoke/facebook/derived_data_service:derivation_worker",
         "//eden/mononoke/facebook/derived_data_service:derived_data_service",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/facebook/backfill_bonsai_blob_mapping:backfill_bonsai_blob_mapping",
         "//eden/mononoke/tools/testtool:testtool",
@@ -118,7 +118,7 @@ dott_test(
         "//eden/mononoke/git/gitimport:gitimport",
         "//eden/mononoke/lfs_server:lfs_server",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
     ],
 )
@@ -248,8 +248,12 @@ dott_test(
     disable_all_network_access_target = False,
     dott_files = glob(
         ["test-scs*.t"],
-        exclude = ["test-scs-git*.t"],
+        exclude = [
+            "test-scs-git*.t",
+            "test-scs-land-service*.t",
+        ],
     ),
+    enable_async_requests_worker = True,
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:backfill_mapping",
@@ -258,7 +262,7 @@ dott_test(
         "//eden/mononoke/commit_rewriting/backsyncer:backsyncer_cmd",
         "//eden/mononoke/mononoke_hg_sync_job:mononoke_hg_sync_job",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/testtool:testtool",
     ],
@@ -272,7 +276,23 @@ dott_test(
         "//eden/mononoke:mononoke",
         "//eden/mononoke/git/gitimport:gitimport",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
+        "//eden/mononoke/tools/admin:newadmin",
+        "//eden/mononoke/tools/testtool:testtool",
+    ],
+)
+
+dott_test(
+    name = "scs-land-service",
+    disable_all_network_access_target = False,
+    dott_files = glob(["test-scs-land-service*.t"]),
+    deps = [
+        "//eden/mononoke:admin",
+        "//eden/mononoke:mononoke",
+        "//eden/mononoke/commit_rewriting/backsyncer:backsyncer_cmd",
+        "//eden/mononoke/land_service/facebook/server:land_service",
+        "//eden/mononoke/scs/client:scsc",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/testtool:testtool",
     ],
@@ -304,7 +324,7 @@ dott_test(
         "//eden/mononoke:blobimport",
         "//eden/mononoke:mononoke",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/testtool:testtool",
     ],
@@ -339,7 +359,7 @@ dott_test(
         "//eden/mononoke/git/gitimport:gitimport",
         "//eden/mononoke/lfs_server:lfs_server",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
     ],
 )
@@ -347,7 +367,9 @@ dott_test(
 dott_test(
     name = "cross-repo-and-scs",
     disable_all_network_access_target = False,
-    dott_files = glob(["test-cross-repo-and-scs-*.t"]),
+    dott_files = glob([
+        "test-cross-repo-and-scs-*.t",
+    ]),
     deps = [
         "//eden/mononoke:admin",
         "//eden/mononoke:blobimport",
@@ -357,9 +379,10 @@ dott_test(
         "//eden/mononoke/commit_rewriting/megarepo:megarepotool",
         "//eden/mononoke/commit_rewriting/mononoke_x_repo_sync_job:mononoke_x_repo_sync_job",
         "//eden/mononoke/git/gitimport:gitimport",
+        "//eden/mononoke/git_server:git_server",
         "//eden/mononoke/mononoke_hg_sync_job:mononoke_hg_sync_job",
         "//eden/mononoke/scs/client:scsc",
-        "//eden/mononoke/scs_server:scs_server",
+        "//eden/mononoke/scs/scs_server:scs_server",
         "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/testtool:testtool",
     ],
@@ -395,21 +418,6 @@ dott_test(
     dott_files = glob(["test-repo-metadata-logger-*.t"]),
     deps = [
         "//eden/mononoke/tools/facebook/repo_metadata_logger:repo_metadata_logger",
-        "//eden/mononoke/tools/testtool:testtool",
-    ],
-)
-
-dott_test(
-    name = "edenapi",
-    dott_files =
-        glob([
-            "test-edenapi-*.t",
-        ]),
-    deps = [
-        "//eden/mononoke:admin",
-        "//eden/mononoke:blobimport",
-        "//eden/mononoke:mononoke",
-        "//eden/mononoke/tools/admin:newadmin",
         "//eden/mononoke/tools/testtool:testtool",
     ],
 )

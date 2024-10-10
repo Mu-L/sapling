@@ -8,15 +8,19 @@
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
+use bookmarks::BookmarkKey;
+use bookmarks::BookmarksRef;
 use cas_client::build_mononoke_cas_client;
 use changesets_uploader::CasChangesetsUploader;
 use changesets_uploader::PriorLookupPolicy;
 use changesets_uploader::UploadPolicy;
 use clap::Args;
 use context::CoreContext;
+use mercurial_derivation::RootHgAugmentedManifestId;
 use mercurial_types::HgChangesetId;
 use mononoke_types::ChangesetId;
 use mononoke_types::MPath;
+use repo_derived_data::RepoDerivedDataRef;
 use slog::info;
 
 use super::Repo;
@@ -31,6 +35,9 @@ pub struct CasStoreUploadArgs {
     /// Hg changeset id that needs to be uploaded into the cas store.
     #[clap(long)]
     hg_id: Option<HgChangesetId>,
+    /// Bookmark pointing to the changeset that needs to be uploaded into the cas store.
+    #[clap(long, short = 'B')]
+    bookmark: Option<BookmarkKey>,
     /// Upload the entire changeset's working copy data recursively.
     #[clap(long)]
     full: bool,
@@ -59,6 +66,8 @@ pub async fn cas_store_upload(
         repo.repo_identity.name(),
         args.verbose,
     )?);
+
+    // Resolve the changeset id
     let changeset_id = match args.changeset_id {
         Some(changeset_id) => Ok(changeset_id),
         None => match args.hg_id {
@@ -67,9 +76,21 @@ pub async fn cas_store_upload(
                 .get_bonsai_from_hg(ctx, hg_id)
                 .await?
                 .ok_or(anyhow!("No bonsai changeset found for hg id {}", hg_id)),
-            None => Err(anyhow!(
-                "No changeset id provided. Either hg or bonsai changeset id must be provided."
-            )),
+            None => {
+                if let Some(bookmark) = args.bookmark {
+                    repo.bookmarks()
+                        .get(ctx.clone(), &bookmark)
+                        .await?
+                        .ok_or(anyhow!(
+                            "No changeset found for bookmark {}",
+                            bookmark.name()
+                        ))
+                } else {
+                    Err(anyhow!(
+                        "No changeset id provided. Either hg or bonsai changeset id must be provided or a bookmark name to point to the changeset."
+                    ))
+                }
+            }
         },
     }?;
 
@@ -85,6 +106,11 @@ pub async fn cas_store_upload(
     if let Some(ref spath) = args.path {
         path = Some(MPath::new(spath).with_context(|| anyhow!("Invalid path: {}", spath))?);
     }
+
+    // Derive augmented manifest for this changeset if not yet derived.
+    repo.repo_derived_data()
+        .derive::<RootHgAugmentedManifestId>(ctx, changeset_id)
+        .await?;
 
     let stats = if args.full {
         cas_changesets_uploader

@@ -22,6 +22,8 @@ use bytes::Bytes;
 use context::CoreContext;
 use derived_data_manager::DerivableType;
 use encoding_rs::Encoding;
+use futures::stream;
+use futures::stream::BoxStream;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
@@ -41,6 +43,7 @@ use mononoke_types::ChangesetId;
 use mononoke_types::DateTime;
 use mononoke_types::FileType;
 use mononoke_types::MPathElement;
+use mononoke_types::SortedVectorTrieMap;
 use slog::debug;
 use slog::Logger;
 use smallvec::SmallVec;
@@ -76,16 +79,41 @@ pub struct GitManifest<const SUBMODULES: bool>(
     HashMap<MPathElement, Entry<GitTree<SUBMODULES>, (FileType, GitLeaf)>>,
 );
 
-impl<const SUBMODULES: bool> Manifest for GitManifest<SUBMODULES> {
+#[async_trait]
+impl<const SUBMODULES: bool, Store: Send + Sync> Manifest<Store> for GitManifest<SUBMODULES> {
     type TreeId = GitTree<SUBMODULES>;
-    type LeafId = (FileType, GitLeaf);
+    type Leaf = (FileType, GitLeaf);
+    type TrieMapType = SortedVectorTrieMap<Entry<GitTree<SUBMODULES>, (FileType, GitLeaf)>>;
 
-    fn lookup(&self, name: &MPathElement) -> Option<Entry<Self::TreeId, Self::LeafId>> {
-        self.0.get(name).cloned()
+    async fn lookup(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+        name: &MPathElement,
+    ) -> Result<Option<Entry<Self::TreeId, Self::Leaf>>> {
+        Ok(self.0.get(name).cloned())
     }
 
-    fn list(&self) -> Box<dyn Iterator<Item = (MPathElement, Entry<Self::TreeId, Self::LeafId>)>> {
-        Box::new(self.0.clone().into_iter())
+    async fn list(
+        &self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+    ) -> Result<BoxStream<'async_trait, Result<(MPathElement, Entry<Self::TreeId, Self::Leaf>)>>>
+    {
+        Ok(stream::iter(self.0.clone().into_iter()).map(Ok).boxed())
+    }
+
+    async fn into_trie_map(
+        self,
+        _ctx: &CoreContext,
+        _blobstore: &Store,
+    ) -> Result<Self::TrieMapType> {
+        let entries = self
+            .0
+            .iter()
+            .map(|(k, v)| (k.clone().to_smallvec(), v.clone()))
+            .collect();
+        Ok(SortedVectorTrieMap::new(entries))
     }
 }
 
@@ -109,24 +137,24 @@ async fn load_git_tree<const SUBMODULES: bool, Reader: GitReader>(
                     Err(e) => return Some(Err(e)),
                 };
 
-                let r = match mode {
-                    tree::EntryMode::Blob => {
+                let r = match mode.into() {
+                    tree::EntryKind::Blob => {
                         Some((name, Entry::Leaf((FileType::Regular, GitLeaf(oid)))))
                     }
-                    tree::EntryMode::BlobExecutable => {
+                    tree::EntryKind::BlobExecutable => {
                         Some((name, Entry::Leaf((FileType::Executable, GitLeaf(oid)))))
                     }
-                    tree::EntryMode::Link => {
+                    tree::EntryKind::Link => {
                         Some((name, Entry::Leaf((FileType::Symlink, GitLeaf(oid)))))
                     }
-                    tree::EntryMode::Tree => Some((name, Entry::Tree(GitTree(oid)))),
+                    tree::EntryKind::Tree => Some((name, Entry::Tree(GitTree(oid)))),
 
                     // Git submodules are represented as ObjectType::Commit inside the tree.
                     //
                     // Depending on the repository configuration, we may or may not wish to
                     // include submodules in the imported manifest.  Generate a leaf on the
                     // basis of the SUBMODULES parameter.
-                    tree::EntryMode::Commit => {
+                    tree::EntryKind::Commit => {
                         if SUBMODULES {
                             Some((name, Entry::Leaf((FileType::GitSubmodule, GitLeaf(oid)))))
                         } else {
@@ -169,6 +197,9 @@ pub struct GitimportPreferences {
     pub concurrency: usize,
     /// Whether submodules should be imported instead of dropped.
     pub submodules: bool,
+    /// Flag for controlling whether we should stream changed trees per commit. In case of deep-nested
+    /// trees, gitimport can hang without making progress. Disable this flag to avoid that issue.
+    pub stream_for_changed_trees: bool,
     pub lfs: GitImportLfs,
     pub git_command_path: PathBuf,
     pub backfill_derivation: BackfillDerivation,
@@ -184,6 +215,7 @@ impl Default for GitimportPreferences {
             lfs: GitImportLfs::default(),
             git_command_path: PathBuf::from("/usr/bin/git.real"),
             backfill_derivation: BackfillDerivation::No,
+            stream_for_changed_trees: true,
         }
     }
 }
@@ -499,7 +531,7 @@ impl ExtractedCommit {
         &self,
         ctx: &CoreContext,
         reader: &Reader,
-    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<(FileType, GitLeaf)>, Error>> {
         let tree = GitTree::<SUBMODULES>(self.tree_oid);
         let parent_trees = self
             .parent_tree_oids
@@ -517,7 +549,7 @@ impl ExtractedCommit {
         ctx: &CoreContext,
         reader: &Reader,
         submodules: bool,
-    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<(FileType, GitLeaf)>, Error>> {
         if submodules {
             self.diff_for_submodules::<true, Reader>(ctx, reader)
                 .left_stream()
@@ -559,7 +591,7 @@ impl ExtractedCommit {
         &self,
         ctx: &CoreContext,
         reader: &GitRepoReader,
-    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<(FileType, GitLeaf)>, Error>> {
         let tree = GitTree::<SUBMODULES>(self.tree_oid);
         bonsai_diff(ctx.clone(), reader.clone(), tree, HashSet::new())
     }
@@ -571,7 +603,7 @@ impl ExtractedCommit {
         ctx: &CoreContext,
         reader: &GitRepoReader,
         submodules: bool,
-    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<GitLeaf>, Error>> {
+    ) -> impl Stream<Item = Result<BonsaiDiffFileChange<(FileType, GitLeaf)>, Error>> {
         if submodules {
             self.diff_root_for_submodules::<true>(ctx, reader)
                 .left_stream()
@@ -605,6 +637,7 @@ impl BackfillDerivation {
 
 #[cfg(test)]
 mod tests {
+    use mononoke_macros::mononoke;
     use slog::o;
 
     use super::decode_message;
@@ -625,20 +658,20 @@ mod tests {
         assert!(m.is_err());
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_invalid_encoding_should_fail() {
         should_fail_to_decode(
             b"Hello, World!",
             &Some(BString::from("not a valid encoding label")),
         );
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_ascii_as_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
             should_decode_into(b"Hello, World!", &encoding, "Hello, World!");
         }
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_valid_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
             should_decode_into(
@@ -653,7 +686,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_malformed_utf8() {
         for encoding in [None, Some(BString::from("utf-8"))] {
             should_decode_into(
@@ -664,7 +697,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_valid_latin1() {
         should_decode_into(
             b"Hello, R\xe9mi-\xc9tienne!",      // Latin 1 encoded
@@ -672,7 +705,7 @@ mod tests {
             "Hello, Rémi-Étienne!",             // We decode just fine into legible UTF-8
         );
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_commit_message_given_malformed_latin1() {
         should_decode_into(
             b"Hello, R\xc3\xa9mi-\xc3\x89tienne!".as_slice(), // UTF-8 encoded
@@ -680,7 +713,7 @@ mod tests {
             "Hello, RÃ©mi-Ã‰tienne!", // Broken decoding, this is the best we can do
         );
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_utf8_with_bom() {
         // We can sniff the UTF-8 BOM mark
         assert_eq!(
@@ -695,7 +728,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_non_utf8_with_bom() {
         // We can sniff the UTF-16BE BOM mark
         assert_eq!(
@@ -715,7 +748,7 @@ mod tests {
             &Some(BString::from("utf-8")),
         );
     }
-    #[test]
+    #[mononoke::test]
     fn test_decode_gb18030_with_bom_shows_the_limits_of_our_implementation() {
         // b"\x84\x31\x95\x33" is the BOM mark that indicates a GB18030 encoding. An encoding for
         // chinese characters.

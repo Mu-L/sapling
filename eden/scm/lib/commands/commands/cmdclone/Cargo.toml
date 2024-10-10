@@ -6,7 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-runtime = { version = "0.1.0", path = "../../../async-runtime" }
 clidispatch = { version = "0.1.0", path = "../../../clidispatch" }
 clone = { version = "0.1.0", path = "../../../clone" }
@@ -22,8 +22,8 @@ identity = { version = "0.1.0", path = "../../../identity" }
 metalog = { version = "0.1.0", path = "../../../metalog" }
 migration = { version = "0.1.0", path = "../../../migration" }
 repo = { version = "0.1.0", path = "../../../repo" }
-repo_name = { version = "0.1.0", path = "../../../repo_name" }
+repourl = { version = "0.1.0", path = "../../../repo/url" }
 tracing = { version = "0.1.40", features = ["attributes", "valuable"] }
 types = { version = "0.1.0", path = "../../../types" }
-url = "2.2.2"
+url = "2.5.2"
 util = { version = "0.1.0", path = "../../../util" }

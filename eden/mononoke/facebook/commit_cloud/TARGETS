@@ -1,6 +1,6 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "commit_cloud_intern_utils",
@@ -9,6 +9,7 @@ rust_library(
     ]),
     test_deps = [
         "//common/rust/shed/fbinit:fbinit-tokio",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
     ],
     deps = [
         "fbsource//third-party/rust:anyhow",
@@ -20,8 +21,8 @@ rust_library(
         "//configerator/structs/infrasec/if:acl-rust",
         "//crypto/cat/rust:cryptocat",
         "//eden/mononoke/commit_cloud/helpers:commit_cloud_helpers",
+        "//eden/mononoke/commit_cloud/types:commit_cloud_types",
         "//eden/mononoke/facebook/employee_service:employee_service",
         "//eden/mononoke/permission_checker:permission_checker",
-        "//eden/scm/lib/edenapi/types:edenapi_types",
     ],
 )

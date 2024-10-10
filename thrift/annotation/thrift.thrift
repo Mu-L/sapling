@@ -191,21 +191,6 @@ struct BitmaskEnum {}
 struct ExceptionMessage {}
 
 /**
- * Generates a const of type schema. Struct containing the schema of the
- * annotated type. Optionally specify name to override default
- * schema<structName>.
- */
-@scope.Structured
-@scope.Service
-@scope.Const
-@scope.Enum
-@scope.Typedef
-@Experimental
-struct GenerateRuntimeSchema {
-  1: string name;
-}
-
-/**
  * Indicates that a field's value should never be stored on the stack, and that
  * identical values can be shared in immutable contexts.
  */
@@ -252,11 +237,16 @@ struct DeprecatedUnvalidatedAnnotations {
 
 /**
 * In addition to reserved words, Thrift reserves all identifiers
-* that contain the case-insensitive substring fbthrift.
+* that contain the case-insensitive substring fbthrift preceded
+* by one or more underscores.
 * The use of such identifiers requires users to explicitly annotate
-* the usage with `@thrift.AllowReservedIdentifierName`,
+* the usage with
+*   `@thrift.AllowReservedFilename` for filenames
+*   `@thrift.AllowReservedIdentifier` for all other identifiers
 * and may result in undefined behavior.
 */
-@scope.Program
 @scope.Definition
-struct AllowReservedIdentifierName {}
+struct AllowReservedIdentifier {}
+
+@scope.Program
+struct AllowReservedFilename {}

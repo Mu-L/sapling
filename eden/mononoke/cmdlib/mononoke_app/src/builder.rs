@@ -29,11 +29,13 @@ use clap::Args;
 use clap::Command;
 use clap::CommandFactory;
 use clap::FromArgMatches;
+use clientinfo::ClientEntryPoint;
 use cmdlib_caching::init_cachelib;
 use cmdlib_caching::CachelibArgs;
 use cmdlib_caching::CachelibSettings;
 use cmdlib_logging::LoggingArgs;
 use cmdlib_logging::ScubaLoggingArgs;
+use commit_graph_types::environment::CommitGraphArgs;
 use derived_data_remote::RemoteDerivationArgs;
 use environment::BookmarkCacheOptions;
 use environment::MononokeEnvironment;
@@ -77,6 +79,7 @@ pub struct MononokeAppBuilder {
     default_scuba_dataset: Option<String>,
     defaults: HashMap<&'static str, String>,
     bookmark_cache_options: BookmarkCacheOptions,
+    client_entry_point_for_service: ClientEntryPoint,
 }
 
 #[derive(Args, Debug)]
@@ -123,6 +126,9 @@ pub struct EnvironmentArgs {
 
     #[clap(flatten, next_help_heading = "GFLAGS")]
     gflags_args: GFlagsArgs,
+
+    #[clap(flatten, next_help_heading = "COMMIT GRAPH OPTIONS")]
+    commit_graph_args: CommitGraphArgs,
 }
 
 impl MononokeAppBuilder {
@@ -135,6 +141,7 @@ impl MononokeAppBuilder {
             default_scuba_dataset: None,
             defaults: HashMap::new(),
             bookmark_cache_options: Default::default(),
+            client_entry_point_for_service: Default::default(),
         }
     }
 
@@ -150,6 +157,13 @@ impl MononokeAppBuilder {
 
     pub fn with_bookmarks_cache(mut self, bookmark_cache_options: BookmarkCacheOptions) -> Self {
         self.bookmark_cache_options = bookmark_cache_options;
+        self
+    }
+
+    /// Method for setting the service level client entry point that is not specific to any
+    /// particular request
+    pub fn with_entry_point(mut self, entry_point: ClientEntryPoint) -> Self {
+        self.client_entry_point_for_service = entry_point;
         self
     }
 
@@ -286,6 +300,7 @@ impl MononokeAppBuilder {
             rendezvous_args,
             just_knobs_args,
             gflags_args,
+            commit_graph_args,
         } = env_args;
 
         gflags_args.propagate(self.fb)?;
@@ -354,6 +369,8 @@ impl MononokeAppBuilder {
         let acl_provider =
             create_acl_provider(self.fb, &acl_args).context("Failed to create ACL provider")?;
 
+        let commit_graph_options = commit_graph_args.into();
+
         init_just_knobs_worker(
             &just_knobs_args,
             &config_store,
@@ -380,6 +397,8 @@ impl MononokeAppBuilder {
             disabled_hooks: HashMap::new(),
             bookmark_cache_options: self.bookmark_cache_options.clone(),
             filter_repos: None,
+            commit_graph_options,
+            client_entry_point_for_service: self.client_entry_point_for_service,
         })
     }
 }

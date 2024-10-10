@@ -2,10 +2,8 @@
 #require no-eden
 
   $ eagerepo
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
-  $ setconfig remotefilelog.write-hgcache-to-indexedlog=False remotefilelog.write-local-to-indexedlog=False
 
   $ newserver master
   $ clone master shallow

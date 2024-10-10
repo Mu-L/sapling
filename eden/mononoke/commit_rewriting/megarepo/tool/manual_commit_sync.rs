@@ -16,7 +16,6 @@ use cross_repo_sync::CommitSyncer;
 use cross_repo_sync::Repo as CrossRepo;
 use metaconfig_types::CommitSyncConfigVersion;
 use mononoke_types::ChangesetId;
-use synced_commit_mapping::SyncedCommitMapping;
 
 /// This operation is useful immediately after a small repo is merged into a large repo.
 /// See example below
@@ -35,9 +34,9 @@ use synced_commit_mapping::SyncedCommitMapping;
 /// commit A.
 /// The function below can be used to achieve exactly that.
 /// ```
-pub async fn manual_commit_sync<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
+pub async fn manual_commit_sync<R: CrossRepo>(
     ctx: &CoreContext,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
     source_cs_id: ChangesetId,
     target_repo_parents: Option<Vec<ChangesetId>>,
     mapping_version: CommitSyncConfigVersion,
@@ -85,8 +84,10 @@ pub async fn manual_commit_sync<M: SyncedCommitMapping + Clone + 'static, R: Cro
 mod test {
     use cross_repo_sync_test_utils::init_small_large_repo;
     use cross_repo_sync_test_utils::xrepo_mapping_version_with_small_repo;
+    use cross_repo_sync_test_utils::TestRepo;
     use fbinit::FacebookInit;
     use maplit::hashmap;
+    use mononoke_macros::mononoke;
     use mononoke_types::NonRootMPath;
     use tests_utils::list_working_copy_utf8;
     use tests_utils::resolve_cs_id;
@@ -94,7 +95,7 @@ mod test {
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_manual_commit_sync(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
 
@@ -117,7 +118,7 @@ mod test {
         // |
         // O <- file: "content"
 
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = syncers.small_to_large;
         let small_repo = small_to_large.get_source_repo();
         let large_repo = small_to_large.get_target_repo();
@@ -155,7 +156,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_manual_commit_sync_select_parents_automatically(
         fb: FacebookInit,
     ) -> Result<(), Error> {
@@ -180,7 +181,7 @@ mod test {
         // |
         // O <- file: "content"
 
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let large_to_small = syncers.large_to_small;
         let large_repo = large_to_small.get_source_repo();
         let small_repo = large_to_small.get_target_repo();

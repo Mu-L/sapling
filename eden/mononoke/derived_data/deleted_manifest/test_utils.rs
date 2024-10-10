@@ -86,26 +86,27 @@ macro_rules! impl_deleted_manifest_tests {
         mod tests {
             use ::anyhow::Result;
             use ::fbinit::FacebookInit;
+            use ::mononoke_macros::mononoke;
 
             use super::*;
 
-            #[fbinit::test]
+            #[mononoke::fbinit_test]
             async fn linear_test(fb: FacebookInit) -> Result<(), Error> {
                 $crate::test_utils::linear_test::<$manifest>(fb).await
             }
-            #[fbinit::test]
+            #[mononoke::fbinit_test]
             async fn many_file_dirs_test(fb: FacebookInit) -> Result<(), Error> {
                 $crate::test_utils::many_file_dirs_test::<$manifest>(fb).await
             }
-            #[fbinit::test]
+            #[mononoke::fbinit_test]
             async fn merged_history_test(fb: FacebookInit) -> Result<()> {
                 $crate::test_utils::merged_history_test::<$manifest>(fb).await
             }
-            #[fbinit::test]
+            #[mononoke::fbinit_test]
             async fn test_find_entries(fb: FacebookInit) -> Result<(), Error> {
                 $crate::test_utils::test_find_entries::<$manifest>(fb).await
             }
-            #[fbinit::test]
+            #[mononoke::fbinit_test]
             async fn test_list_all_entries(fb: FacebookInit) -> Result<(), Error> {
                 $crate::test_utils::test_list_all_entries::<$manifest>(fb).await
             }
@@ -853,15 +854,9 @@ async fn create_bonsai_changeset(
         parents,
         author: "author".to_string(),
         author_date: DateTime::now(),
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
         file_changes,
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap();

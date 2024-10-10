@@ -16,7 +16,6 @@ use anyhow::format_err;
 use anyhow::Error;
 use bitflags::bitflags;
 use blame::RootBlameV2;
-use blobrepo::BlobRepo;
 use blobstore_factory::SqlTierInfo;
 use bookmarks::BookmarkKey;
 use changeset_info::ChangesetInfo;
@@ -81,6 +80,7 @@ use skeleton_manifest::RootSkeletonManifestId;
 use thiserror::Error;
 use unodes::RootUnodeManifestId;
 
+use crate::detail::repo::Repo;
 use crate::detail::walk::OutgoingEdge;
 
 #[derive(Error, Debug)]
@@ -1050,7 +1050,7 @@ impl Node {
     pub fn validate_hash(
         &self,
         ctx: CoreContext,
-        repo: BlobRepo,
+        repo: Repo,
         node_data: &NodeData,
     ) -> BoxFuture<Result<(), HashValidationError>> {
         match (&self, node_data) {
@@ -1106,18 +1106,19 @@ mod tests {
     use std::collections::HashSet;
     use std::mem::size_of;
 
+    use mononoke_macros::mononoke;
     use strum::EnumCount;
     use strum::IntoEnumIterator;
 
     use super::*;
 
-    #[test]
+    #[mononoke::test]
     fn test_node_size() {
         // Node size is important as we have lots of them, add a test to check for accidental changes
         assert_eq!(40, size_of::<Node>());
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_node_type_max_ordinal() {
         // Check the macros worked consistently
         for t in NodeType::iter() {
@@ -1125,7 +1126,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_small_graphs() -> Result<(), Error> {
         create_graph!(
             Test1NodeType,
@@ -1165,9 +1166,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_all_derived_data_types_supported() {
-        // All types blobrepo can support
+        // All enabled types for the repo
         let a = test_repo_factory::default_test_repo_config()
             .derived_data_config
             .get_active_config()
@@ -1199,7 +1200,9 @@ mod tests {
             DerivableType::TestManifests,
             DerivableType::TestShardedManifests,
             DerivableType::BssmV3,
+            DerivableType::Ccsm,
             DerivableType::HgAugmentedManifests,
+            DerivableType::SkeletonManifestsV2,
         ]);
         let mut missing = HashSet::new();
         for t in a {
@@ -1215,7 +1218,7 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "blobrepo derived data types {:?} not supported by walker graph",
+            "Derived data types {:?} not supported by walker graph",
             missing,
         );
     }

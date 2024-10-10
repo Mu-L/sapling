@@ -3,7 +3,6 @@
 #require no-eden
 
 #inprocess-hg-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ hg init test
   $ cd test
@@ -16,7 +15,7 @@
   warning: verify does not actually check anything in this repo
 
   $ hg clone . ../branch
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd ../branch
   $ hg co tip

@@ -1,5 +1,4 @@
-#chg-compatible
-#debugruntest-incompatible
+#require git no-eden
 
 test rust clone
 
@@ -37,7 +36,7 @@ Test that nonsupported options fallback to python:
   $ hg clone --git "$TESTTMP/git-source" $TESTTMP/git-clone
 
 Test rust clone
-  $ hg clone -Uq test:e1 $TESTTMP/rust-clone --config remotenames.selectivepulldefault='master, stable' --shallow
+  $ hg clone -Uq test:e1 $TESTTMP/rust-clone --config remotenames.selectivepulldefault='master, stable'
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -75,7 +74,7 @@ Check basic operations
 
 Test cloning with default destination
   $ cd $TESTTMP
-  $ hg clone -Uq test:e1 --shallow
+  $ hg clone -Uq test:e1
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -90,7 +89,7 @@ Test cloning with default destination
 Test cloning failures
 
   $ cd $TESTTMP
-  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone --shallow
+  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -103,7 +102,7 @@ Test cloning failures
 
 Check that preexisting directory is not removed in failure case
   $ mkdir failure-clone
-  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone --shallow
+  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/failure-clone
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -125,7 +124,7 @@ Check that prexisting repo is not modified
   $ [ -d $TESTTMP/failure-clone/.hg ]
 
 Test default-destination-dir
-  $ hg clone -Uq test:e1 --config clone.default-destination-dir="$TESTTMP/manually-set-dir" --shallow
+  $ hg clone -Uq test:e1 --config clone.default-destination-dir="$TESTTMP/manually-set-dir"
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -140,7 +139,7 @@ Test that we get an error when not specifying a destination directory and runnin
   $ HGPLAIN=1 hg clone -Uq test:e1
   abort: DEST must be specified because HGPLAIN is enabled
   [255]
-  $ HGPLAINEXCEPT=default_clone_dir hg clone -Uq test:e1 --config remotefilelog.reponame=test-repo-notquite --shallow
+  $ HGPLAINEXCEPT=default_clone_dir hg clone -Uq test:e1 --config remotefilelog.reponame=test-repo-notquite
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo-notquite"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo-notquite"}: cmdclone: fetching lazy commit data and bookmarks
@@ -150,7 +149,7 @@ Test that we get an error when not specifying a destination directory and runnin
    INFO get_update_target: cmdclone: exit
 
 Not an error for bookmarks to not exist
-  $ hg clone -Uq test:e1 $TESTTMP/no-bookmarks --config remotenames.selectivepulldefault=banana --shallow
+  $ hg clone -Uq test:e1 $TESTTMP/no-bookmarks --config remotenames.selectivepulldefault=banana
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -163,7 +162,7 @@ remotenames.selectivepulldefault gets persisted
   banana
 
 Can specify selectivepull branch via URL fragment:
-  $ hg clone -Uq test:e1#banana $TESTTMP/fragment --shallow
+  $ hg clone -Uq test:e1#banana $TESTTMP/fragment
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
   TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
@@ -180,9 +179,6 @@ Test various --eden errors:
   $ hg clone -Uq test:e1 --eden-backing-repo /foo/bar
   abort: --eden-backing-repo requires --eden
   [255]
-  $ hg clone -q test:e1 --eden --enable-profile foo
-  abort: --enable-profile is not compatible with --eden
-  [255]
   $ hg clone -q test:e1 -u foo --eden
   abort: some specified options are not compatible with --eden
   [255]
@@ -194,13 +190,13 @@ Test various --eden errors:
   [255]
 
 Don't delete repo on error if --debug:
-  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/debug-failure --debug --shallow &>/dev/null
+  $ FAILPOINTS=run::clone=return hg clone -Uq test:e1 $TESTTMP/debug-failure --debug 2>/dev/null
   [255]
   $ ls $TESTTMP/debug-failure
 
 Can clone eagerepo without scheme:
   $ cd
-  $ hg clone --shallow ./e1 no_scheme
+  $ hg clone ./e1 no_scheme
   Cloning test-repo into $TESTTMP/no_scheme
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
@@ -218,7 +214,7 @@ Make sure we wrote out the absolute path.
   $TESTTMP/e1
 
 Can clone non-shallow:
-  $ hg clone ./e1 non_shallow
+  $ hg clone ./e1 non_shallow --no-shallow
   Cloning test-repo into $TESTTMP/non_shallow
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
@@ -232,7 +228,7 @@ Can clone non-shallow:
   eagerepo
 
 Can pick bookmark or commit using -u:
-  $ hg clone -u $D test:e1 d_clone --config experimental.rust-clone-updaterev=true --shallow
+  $ hg clone -u $D test:e1 d_clone --config experimental.rust-clone-updaterev=true
   Cloning test-repo into $TESTTMP/d_clone
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
@@ -246,7 +242,7 @@ Can pick bookmark or commit using -u:
   $ hg whereami -R d_clone
   f585351a92f85104bff7c284233c338b10eb1df7
 
-  $ hg clone -u stable test:e1 stable_clone --config remotenames.selectivepulldefault='master, stable' --config experimental.rust-clone-updaterev=true --shallow
+  $ hg clone -u stable test:e1 stable_clone --config remotenames.selectivepulldefault='master, stable' --config experimental.rust-clone-updaterev=true
   Cloning test-repo into $TESTTMP/stable_clone
   TRACE cmdclone: performing rust clone
    INFO clone_metadata{repo="test-repo"}: cmdclone: enter
@@ -277,6 +273,22 @@ Default to "tip" if selectivepulldefault not available.
 Don't perform any queries for null commit id.
   $ LOG= hg clone -Uq ./e1 no_workingcopy
   $ cd no_workingcopy
-  $ LOG=trace hg status -m 2>trace
+  $ LOG=dag::protocol=trace hg status -m 2>trace
   $ grep 0000000000000000000000000000000000000000 trace
   [1]
+
+
+Can clone legacy repo using Rust clone
+  $ newrepo legacy --config format.use-eager-repo=false
+  $ drawdag <<EOS
+  > A # bookmark master = A
+  > EOS
+  $ cd
+  $ hg clone -q ssh://user@dummy/legacy legacy_client
+  TRACE cmdclone: performing rust clone
+   INFO clone_metadata{repo="test-repo"}: cmdclone: enter
+  TRACE clone_metadata{repo="test-repo"}: cmdclone: fetching lazy commit data and bookmarks
+   INFO clone_metadata{repo="test-repo"}: cmdclone: exit
+   INFO get_update_target: cmdclone: enter
+   INFO get_update_target: cmdclone: return=Some((HgId("426bada5c67598ca65036d57d9e4b64b0c1ce7a0"), "master"))
+   INFO get_update_target: cmdclone: exit

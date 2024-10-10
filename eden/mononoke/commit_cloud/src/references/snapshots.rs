@@ -6,7 +6,7 @@
  */
 
 use clientinfo::ClientRequestInfo;
-use edenapi_types::HgId;
+use commit_cloud_types::WorkspaceSnapshot;
 use mercurial_types::HgChangesetId;
 use sql::Transaction;
 
@@ -16,25 +16,17 @@ use crate::sql::snapshots_ops::DeleteArgs;
 use crate::CommitCloudContext;
 use crate::SqlCommitCloud;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkspaceSnapshot {
-    pub commit: HgChangesetId,
-}
-
 pub async fn update_snapshots(
     sql_commit_cloud: &SqlCommitCloud,
     mut txn: Transaction,
     cri: Option<&ClientRequestInfo>,
     ctx: &CommitCloudContext,
-    new_snapshots: Vec<HgId>,
-    removed_snapshots: Vec<HgId>,
+    new_snapshots: Vec<HgChangesetId>,
+    removed_snapshots: Vec<HgChangesetId>,
 ) -> anyhow::Result<Transaction> {
     if !removed_snapshots.is_empty() {
         let delete_args = DeleteArgs {
-            removed_commits: removed_snapshots
-                .into_iter()
-                .map(|id| id.into())
-                .collect::<Vec<HgChangesetId>>(),
+            removed_commits: removed_snapshots,
         };
 
         txn = Delete::<WorkspaceSnapshot>::delete(
@@ -54,9 +46,7 @@ pub async fn update_snapshots(
             cri,
             ctx.reponame.clone(),
             ctx.workspace.clone(),
-            WorkspaceSnapshot {
-                commit: snapshot.into(),
-            },
+            WorkspaceSnapshot { commit: snapshot },
         )
         .await?;
     }

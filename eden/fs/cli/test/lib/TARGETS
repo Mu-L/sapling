@@ -1,5 +1,4 @@
 load("@fbcode_macros//build_defs:python_library.bzl", "python_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("scm_client_infra")
 
@@ -9,6 +8,5 @@ python_library(
     deps = [
         "//eden/fs/cli:lib",
         "//eden/fs/cli:proc_utils",
-        "//eden/fs/py/eden/thrift:legacy",
     ],
 )

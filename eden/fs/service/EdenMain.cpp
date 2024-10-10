@@ -44,7 +44,8 @@
 #include "eden/fs/store/FilteredBackingStore.h"
 #include "eden/fs/store/filter/HgSparseFilter.h"
 #include "eden/fs/store/hg/SaplingBackingStore.h"
-#include "eden/fs/telemetry/IHiveLogger.h"
+#include "eden/fs/telemetry/IFileAccessLogger.h"
+#include "eden/fs/telemetry/IScribeLogger.h"
 #include "eden/fs/telemetry/LogEvent.h"
 #include "eden/fs/utils/WinStackTrace.h"
 
@@ -94,7 +95,8 @@ void DefaultBackingStoreFactory::registerFactory(
     DefaultBackingStoreFactory::Factory factory) {
   auto [it, inserted] = registered_.emplace(type, std::move(factory));
   if (!inserted) {
-    EDEN_BUG() << "attempted to register BackingStore " << type << " twice";
+    EDEN_BUG() << "attempted to register BackingStore "
+               << toBackingStoreString(type) << " twice";
   }
 }
 
@@ -226,10 +228,16 @@ ActivityRecorderFactory DefaultEdenMain::getActivityRecorderFactory() {
   };
 }
 
-std::shared_ptr<IHiveLogger> DefaultEdenMain::getHiveLogger(
+std::shared_ptr<IFileAccessLogger> DefaultEdenMain::getFileAccessLogger(
     SessionInfo /*sessionInfo*/,
     std::shared_ptr<EdenConfig> /*edenConfig*/) {
-  return std::make_shared<NullHiveLogger>();
+  return std::make_shared<NullFileAccessLogger>();
+}
+
+std::shared_ptr<IScribeLogger> DefaultEdenMain::getScribeLogger(
+    SessionInfo /*sessionInfo*/,
+    std::shared_ptr<EdenConfig> /*edenConfig*/) {
+  return std::make_shared<NullScribeLogger>();
 }
 
 int runEdenMain(EdenMain&& main, int argc, char** argv) {
@@ -360,7 +368,8 @@ int runEdenMain(EdenMain&& main, int argc, char** argv) {
     auto sessionInfo = makeSessionInfo(
         identity, main.getLocalHostname(), main.getEdenfsVersion());
 
-    auto hiveLogger = main.getHiveLogger(sessionInfo, edenConfig);
+    auto fileAccessLogger = main.getFileAccessLogger(sessionInfo, edenConfig);
+    auto scribeLogger = main.getScribeLogger(sessionInfo, edenConfig);
 
     server.emplace(
         std::move(originalCommandLine),
@@ -371,7 +380,8 @@ int runEdenMain(EdenMain&& main, int argc, char** argv) {
         std::move(edenConfig),
         main.getActivityRecorderFactory(),
         main.getBackingStoreFactory(),
-        std::move(hiveLogger),
+        std::move(fileAccessLogger),
+        std::move(scribeLogger),
         std::move(startupStatusChannel),
         main.getEdenfsVersion());
 

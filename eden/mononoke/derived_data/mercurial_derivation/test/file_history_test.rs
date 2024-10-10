@@ -9,7 +9,6 @@ use std::str::FromStr;
 
 use anyhow::anyhow;
 use anyhow::Error;
-use blobrepo::BlobRepo;
 use blobrepo_hg::file_history::get_file_history;
 use blobstore::Loadable;
 use context::CoreContext;
@@ -19,15 +18,18 @@ use fixtures::Linear;
 use fixtures::TestRepoFixture;
 use manifest::ManifestOps;
 use mercurial_types::HgChangesetId;
+use mononoke_macros::mononoke;
 use mononoke_types::NonRootMPath;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedDataRef;
 use tests_utils::resolve_cs_id;
 
-#[fbinit::test]
+use crate::Repo;
+
+#[mononoke::fbinit_test]
 async fn test_linear_get_file_history(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = Linear::getrepo(fb).await;
+    let repo: Repo = Linear::get_repo(fb).await;
 
     let master_cs_id = resolve_cs_id(&ctx, &repo, "master").await?;
     repo.repo_derived_data()
@@ -90,7 +92,7 @@ async fn test_linear_get_file_history(fb: FacebookInit) -> Result<(), Error> {
 
 async fn assert_linknodes(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     expected_linknodes: Vec<HgChangesetId>,
     start_from: HgChangesetId,
     path: NonRootMPath,

@@ -21,13 +21,19 @@ use bounded_traversal::OrderedTraversal;
 use context::CoreContext;
 use derivative::Derivative;
 use futures::stream;
+use futures::stream::FuturesUnordered;
 use futures::stream::Stream;
+use futures::try_join;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use itertools::Either;
+use itertools::Itertools;
 use nonzero_ext::nonzero;
+use quickcheck::Arbitrary;
+use quickcheck::Gen;
 use smallvec::SmallVec;
+use sorted_vector_map::sorted_vector_map;
 use sorted_vector_map::SortedVectorMap;
 
 use crate::blob::Blob;
@@ -118,6 +124,13 @@ impl<Value: ShardedMapV2Value> ShardedMapV2StoredNode<Value> {
             rollup_data: self.rollup_data.into_bytes(),
         }
     }
+}
+
+/// Returns longest common prefix of a and b.
+fn common_prefix<'a>(a: &'a [u8], b: &'a [u8]) -> &'a [u8] {
+    let lcp = a.iter().zip(b.iter()).take_while(|(a, b)| a == b).count();
+    // Panic safety: lcp is at most a.len()
+    &a[..lcp]
 }
 
 impl<Value: ShardedMapV2Value> LoadableShardedMapV2Node<Value> {
@@ -244,6 +257,34 @@ impl<Value: ShardedMapV2Value> LoadableShardedMapV2Node<Value> {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
+/// The kind of lookup to perform on when using get_entries_and_partial_maps method.
+pub enum LookupKind {
+    Entry,
+    PartialMap,
+}
+
+impl Arbitrary for LookupKind {
+    fn arbitrary(g: &mut Gen) -> Self {
+        if bool::arbitrary(g) {
+            LookupKind::Entry
+        } else {
+            LookupKind::PartialMap
+        }
+    }
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+        Box::new(std::iter::empty())
+    }
+}
+
+/// An item in the stream returned by `ShardedMapV2Node::difference_stream` method.
+pub struct DifferenceStreamItem<V> {
+    /// Value of the key in the map.
+    pub current_value: V,
+    /// Values of the key in `other_maps`.
+    pub previous_values: Vec<V>,
+}
+
 impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
     pub fn weight(&self) -> usize {
         *self.weight.get_or_init(|| {
@@ -258,7 +299,7 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         })
     }
 
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         *self.size.get_or_init(|| {
             self.value.iter().len()
                 + self
@@ -440,35 +481,37 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         }
     }
 
-    /// Returns the value corresponding to the given key, or None if there's no value
-    /// corresponding to it.
+    /// Returns a map containing all key-value pairs in this map for which the key
+    /// starts with the given key_prefix, with key_prefix stripped from the keys.
+    ///
+    /// Returns None if no key in the map starts with the given key_prefix.
     #[async_recursion]
     pub async fn get_partial_map(
         &self,
         ctx: &CoreContext,
         blobstore: &impl Blobstore,
-        key: &[u8],
+        key_prefix: &[u8],
     ) -> Result<Option<LoadableShardedMapV2Node<Value>>> {
-        if let Some(remaining_prefix) = self.prefix.strip_prefix(key) {
-            // If the key is a prefix of this node, then the partial map corresponding
-            // to the key is this node itself (possibly with the prefix adjusted).
+        if let Some(remaining_prefix) = self.prefix.strip_prefix(key_prefix) {
+            // If key_prefix is a prefix of this node, then the partial map corresponding
+            // to the key_prefix is this node itself (possibly with the prefix adjusted).
             let mut node = self.clone();
             node.prefix = remaining_prefix.into();
             return Ok(Some(LoadableShardedMapV2Node::Inlined(node)));
         }
 
-        // If the key starts with the prefix of this node then strip it, otherwise
-        // there's no value corresponding to this key.
-        let key = match key.strip_prefix(self.prefix.as_ref()) {
+        // If key_prefix starts with the prefix of this node then strip it, otherwise
+        // there's no value corresponding to this key_prefix.
+        let key_prefix = match key_prefix.strip_prefix(self.prefix.as_ref()) {
             None => {
                 return Ok(None);
             }
-            Some(key) => key,
+            Some(stripped_key_prefix) => stripped_key_prefix,
         };
 
-        // The key should not be empty, as we would have returned an exact match above.
-        debug_assert!(!key.is_empty());
-        let (first, rest) = key.split_first().expect("No exact match possible");
+        // The key_prefix should not be empty, as we would have returned an exact match above.
+        debug_assert!(!key_prefix.is_empty());
+        let (first, rest) = key_prefix.split_first().expect("No exact match possible");
 
         let child = match self.children.get(first) {
             None => {
@@ -488,6 +531,98 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
                     .await
             }
         }
+    }
+
+    /// Returns the entries and partial maps corresponding to the given TrieMap.
+    /// See documentation of `lookup` and `get_partial_map` for the semantics of looking up entries and
+    /// partial maps.
+    ///
+    /// This is more efficient than calling `lookup` and `get_partial_map` separately for each
+    /// key and prefix.
+    pub async fn get_entries_and_partial_maps(
+        self,
+        ctx: &CoreContext,
+        blobstore: &impl Blobstore,
+        lookup_keys: TrieMap<LookupKind>,
+        concurrency: usize,
+    ) -> Result<TrieMap<Either<Value, LoadableShardedMapV2Node<Value>>>> {
+        bounded_traversal::bounded_traversal_stream(
+            concurrency,
+            vec![(LoadableShardedMapV2Node::Inlined(self), lookup_keys, SmallBinary::new())],
+            |(loadable_node, lookup_keys, mut accumulated_prefix)| {
+                async move {
+                    let node = loadable_node.load(ctx, blobstore).await?;
+
+                    // Find the longest common prefix between all lookup keys and the current node,
+                    // and strip it from the lookup keys and node prefix.
+                    let keys_prefix = lookup_keys.longest_common_prefix();
+                    let lcp = common_prefix(keys_prefix.as_ref(), node.prefix.as_ref());
+
+                    let lookup_keys = lookup_keys.extract_prefix(lcp).expect("lcp should be a prefix of lookup_keys");
+                    let node_prefix: SmallBinary = node.prefix.strip_prefix(lcp).expect("lcp should be a prefix of node.prefix").into();
+
+                    accumulated_prefix.extend_from_slice(lcp);
+
+                    let item = match lookup_keys.value.as_ref().map(|v| **v) {
+                        // If the lookup kind is Entry, then we're looking for a value that
+                        // corresponds to exactly accumulated_prefix.
+                        Some(LookupKind::Entry) => {
+                            if node_prefix.is_empty() {
+                                node.value.clone().map(|v| Either::Left(*v))
+                            } else {
+                                None
+                            }
+                        }
+                        // If the lookup kind is PartialMap, then we return the current node
+                        // after adjusting its prefix.
+                        Some(LookupKind::PartialMap) => {
+                            let mut partial_map = node.clone();
+                            partial_map.prefix = node_prefix.clone();
+                            Some(Either::Right(LoadableShardedMapV2Node::Inlined(
+                                partial_map,
+                            )))
+                        }
+                        _ => None,
+                    };
+
+                    // Expand the sharded map on the first byte.
+                    let mut child_nodes: SortedVectorMap<u8, LoadableShardedMapV2Node<Value>> =
+                        match node_prefix.split_first() {
+                            None => node.children,
+                            Some((first, rest)) => {
+                                let mut node = node;
+                                node.prefix = rest.into();
+                                sorted_vector_map! { *first => LoadableShardedMapV2Node::Inlined(node) }
+                            }
+                        };
+
+                    // Expand the lookup keys on the first byte.
+                    let (_, child_lookup_keys) = lookup_keys.expand();
+
+                    // Group the sharded map children and lookup keys by the first byte.
+                    let children = child_lookup_keys
+                        .into_iter()
+                        .flat_map({
+                            |(byte, lookup_keys)| {
+                                let mut accumulated_prefix = accumulated_prefix.clone();
+                                accumulated_prefix.push(byte);
+                                child_nodes.remove(&byte).map(|node| (node, lookup_keys, accumulated_prefix))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    // Return the current item and recurse on the grouped node children and lookup keys.
+                    anyhow::Ok((
+                        item.map(|item| (accumulated_prefix, item)),
+                        children,
+                    ))
+                }
+                .boxed()
+            },
+        )
+        .try_filter_map(futures::future::ok)
+        .try_collect()
+        .await
     }
 
     /// Returns an ordered stream over all key-value pairs in the map.
@@ -807,6 +942,140 @@ impl<Value: ShardedMapV2Value> ShardedMapV2Node<Value> {
         )
         .try_filter_map(futures::future::ok)
     }
+
+    /// Returns an unordered stream over all key-value pairs in this map for which
+    /// the value is different from all corresponding values in all `other_maps`.
+    ///
+    /// For each key we also return the corresponding values in `other_maps`.
+    pub fn difference_stream<'a>(
+        self,
+        ctx: &'a CoreContext,
+        blobstore: &'a impl Blobstore,
+        other_maps: Vec<Self>,
+        concurrency: usize,
+    ) -> impl Stream<Item = Result<(SmallBinary, DifferenceStreamItem<Value>)>> + 'a
+    where
+        Value: PartialEq,
+    {
+        bounded_traversal::bounded_traversal_stream(
+            concurrency,
+            vec![(
+                SmallBinary::new(),
+                LoadableShardedMapV2Node::Inlined(self),
+                other_maps
+                    .into_iter()
+                    .map(LoadableShardedMapV2Node::Inlined)
+                    .collect::<Vec<_>>(),
+            )],
+            move |(mut accumulated_prefix, current_map, other_maps): (
+                SmallBinary,
+                LoadableShardedMapV2Node<Value>,
+                Vec<LoadableShardedMapV2Node<Value>>,
+            )| {
+                async move {
+                    // If any of the other maps is the same as the current map, then there are no differences.
+                    if other_maps.iter().any(|other_map| other_map == &current_map) {
+                        return Ok((None, Either::Left(std::iter::empty())));
+                    }
+
+                    let (mut current_map, mut other_maps) = try_join!(
+                        current_map.load(ctx, blobstore),
+                        other_maps
+                            .into_iter()
+                            .map(|node| async move { node.load(ctx, blobstore).await })
+                            .collect::<FuturesUnordered<_>>()
+                            .try_collect::<Vec<_>>()
+                    )?;
+
+                    // Find the longest common prefix of all maps.
+                    let lcp: SmallBinary = other_maps
+                        .iter()
+                        .fold(current_map.prefix.as_ref(), |lcp, map| {
+                            common_prefix(lcp, map.prefix.as_ref())
+                        })
+                        .into();
+
+                    // Remove the longest common prefix from all maps.
+                    current_map.prefix = current_map
+                        .prefix
+                        .strip_prefix(lcp.as_ref())
+                        .expect("lcp is a prefix of current_map")
+                        .into();
+                    for other_map in &mut other_maps {
+                        other_map.prefix = other_map
+                            .prefix
+                            .strip_prefix(lcp.as_ref())
+                            .expect("lcp is a prefix of all maps in other_map")
+                            .into();
+                    }
+
+                    // Add the longest common prefix to the accumulated prefix.
+                    accumulated_prefix.extend_from_slice(lcp.as_ref());
+
+                    // Check if there's a value at the current prefix in the map,
+                    // and check that it's different from the values in all `other_maps`.                    
+                    let item = match (current_map.value.take(), current_map.prefix.is_empty()) {
+                        (Some(value), true) => {
+                            let previous_values = other_maps
+                                .iter_mut()
+                                .flat_map(|other_map| {
+                                    match (other_map.value.take(), other_map.prefix.is_empty()) {
+                                        (Some(value), true) => Some(*value),
+                                        _ => None,
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+
+                            if !previous_values.iter().any(|other_value| other_value == value.as_ref()) {
+                                Some(DifferenceStreamItem { current_value: *value, previous_values })
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    // Find the children of the current map corresponding to all possible
+                    // first bytes.
+                    let child_maps = match current_map.prefix.clone().split_first() {
+                        None => current_map.children,
+                        Some((first, rest)) => {
+                            current_map.prefix = rest.into();
+                            sorted_vector_map! { *first => LoadableShardedMapV2Node::Inlined(current_map) }
+                        }
+                    };
+
+                    // Find the children of all `other_maps` corresponding to all possible
+                    // first bytes.
+                    let mut child_other_maps = other_maps
+                        .into_iter()
+                        .flat_map(|mut other_map| {
+                            match other_map.prefix.clone().split_first() {
+                                None => Either::Left(other_map.children.into_iter()),
+                                Some((first, rest)) => {
+                                    other_map.prefix = rest.into();
+                                    Either::Right(std::iter::once((*first, LoadableShardedMapV2Node::Inlined(other_map))))
+                                }
+                            }
+                        })
+                        .into_group_map();
+
+                    Ok((item.map(|item| (accumulated_prefix.clone(), item)), Either::Right(child_maps.into_iter().map(move |(byte, child)| {
+                        // Add the current byte to the accumulated prefix.
+                        let mut accumulated_prefix = accumulated_prefix.clone();
+                        accumulated_prefix.push(byte);
+
+                        // Find children of `other_maps` that correspond to the current byte.
+                        let other_maps = child_other_maps.remove(&byte).unwrap_or_default();
+
+                        (accumulated_prefix, child, other_maps)
+                    }))))
+                }
+                .boxed()
+            },
+        )
+        .try_filter_map(futures::future::ok)
+    }
 }
 
 impl<Value: ShardedMapV2Value> ThriftConvert for ShardedMapV2Node<Value> {
@@ -875,6 +1144,7 @@ mod test {
     use context::CoreContext;
     use fbinit::FacebookInit;
     use memblob::Memblob;
+    use mononoke_macros::mononoke;
 
     use super::*;
     use crate::impl_typed_hash;
@@ -898,7 +1168,7 @@ mod test {
         context_key => "test.map2node",
     }
 
-    #[test]
+    #[mononoke::test]
     fn sharded_map_v2_blobstore_key() {
         let id = ShardedMapV2NodeTestId::from_byte_array([1; 32]);
         assert_eq!(id.blobstore_key(), format!("test.map2node.blake2.{}", id));
@@ -1040,9 +1310,51 @@ mod test {
         async fn lookup(
             &self,
             map: &ShardedMapV2Node<TestValue>,
-            key: &str,
+            key: impl AsRef<[u8]>,
         ) -> Result<Option<TestValue>> {
-            map.lookup(&self.0, &self.1, key.as_bytes()).await
+            map.lookup(&self.0, &self.1, key.as_ref()).await
+        }
+
+        async fn get_partial_map(
+            &self,
+            map: &ShardedMapV2Node<TestValue>,
+            key: impl AsRef<[u8]>,
+        ) -> Result<Option<ShardedMapV2Node<TestValue>>> {
+            let partial_map = map.get_partial_map(&self.0, &self.1, key.as_ref()).await?;
+
+            match partial_map {
+                Some(partial_map) => Ok(Some(partial_map.load(&self.0, &self.1).await?)),
+                None => Ok(None),
+            }
+        }
+
+        async fn load(
+            &self,
+            map: LoadableShardedMapV2Node<TestValue>,
+        ) -> Result<ShardedMapV2Node<TestValue>> {
+            map.load(&self.0, &self.1).await
+        }
+
+        async fn get_entries_and_partial_maps(
+            &self,
+            map: &ShardedMapV2Node<TestValue>,
+            lookup_keys: TrieMap<LookupKind>,
+        ) -> Result<TrieMap<Either<TestValue, ShardedMapV2Node<TestValue>>>> {
+            let trie_map = map
+                .clone()
+                .get_entries_and_partial_maps(&self.0, &self.1, lookup_keys, 10)
+                .await?;
+
+            let mut loaded_trie_map = TrieMap::default();
+            for (key, entry) in trie_map {
+                let entry = match entry {
+                    Either::Left(value) => Either::Left(value),
+                    Either::Right(partial_map) => Either::Right(self.load(partial_map).await?),
+                };
+                loaded_trie_map.insert(key, entry);
+            }
+
+            Ok(loaded_trie_map)
         }
 
         async fn into_entries(
@@ -1065,6 +1377,26 @@ mod test {
                 .and_then(
                     |(key, value)| async move { Ok((String::from_utf8(key.to_vec())?, value.0)) },
                 )
+                .try_collect::<Vec<_>>()
+                .await
+        }
+
+        async fn difference_stream(
+            &self,
+            map: ShardedMapV2Node<TestValue>,
+            other_maps: Vec<ShardedMapV2Node<TestValue>>,
+        ) -> Result<Vec<(String, u32, Vec<u32>)>> {
+            map.difference_stream(&self.0, &self.1, other_maps, 100)
+                .and_then(|(key, item)| async move {
+                    Ok((
+                        String::from_utf8(key.to_vec())?,
+                        item.current_value.0,
+                        item.previous_values
+                            .into_iter()
+                            .map(|value| value.0)
+                            .collect(),
+                    ))
+                })
                 .try_collect::<Vec<_>>()
                 .await
         }
@@ -1323,7 +1655,7 @@ mod test {
         LoadableShardedMapV2Node::Inlined(test_node(prefix, value, children))
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_sharded_map_v2_example(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let blobstore = Memblob::default();
@@ -1338,11 +1670,25 @@ mod test {
 
         helper.check_example_map(from_entries_map.clone()).await?;
 
+        assert!(
+            helper
+                .get_partial_map(&from_entries_map, "test")
+                .await?
+                .is_none()
+        );
+
         // map_abacab:
         //     *=7
         //     |
         //     a=8
         let map_abacab = inlined_node("", Some(7), vec![(b'a', inlined_node("", Some(8), vec![]))]);
+        assert_eq!(
+            helper.load(map_abacab.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "abacab")
+                .await?
+                .unwrap()
+        );
         // map_abac:
         //     *
         //     |
@@ -1370,6 +1716,13 @@ mod test {
                 "test.map2node.blake2.d40e11f4f3f08ad21b5eb6bab17e0916d449bffde464048dfb27efa3f9c19cee",
             )
             .await?;
+        assert_eq!(
+            helper.load(map_abac.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "abac")
+                .await?
+                .unwrap()
+        );
         // map_abal:
         //      *
         //      |
@@ -1384,6 +1737,13 @@ mod test {
                 (b'b', inlined_node("a", Some(5), vec![])),
                 (b'd', inlined_node("a", Some(6), vec![])),
             ],
+        );
+        assert_eq!(
+            helper.load(map_abal.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "abal")
+                .await?
+                .unwrap()
         );
         // map_a:
         //     *
@@ -1402,6 +1762,13 @@ mod test {
             Some(12),
             vec![(b'c', map_abac.clone()), (b'l', map_abal)],
         );
+        assert_eq!(
+            helper.load(map_a.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "a")
+                .await?
+                .unwrap()
+        );
         // map_omi:
         //     *
         //     |______
@@ -1414,6 +1781,13 @@ mod test {
                 (b'o', inlined_node("jo", Some(1), vec![])),
                 (b'u', inlined_node("x", Some(2), vec![])),
             ],
+        );
+        assert_eq!(
+            helper.load(map_omi.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "omi")
+                .await?
+                .unwrap()
         );
         // map_omu:
         //     *
@@ -1429,6 +1803,13 @@ mod test {
                 (b'd', inlined_node("o", Some(3), vec![])),
                 (b'g', inlined_node("al", Some(4), vec![])),
             ],
+        );
+        assert_eq!(
+            helper.load(map_omu.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "omu")
+                .await?
+                .unwrap()
         );
         // map_o:
         //     *
@@ -1449,6 +1830,13 @@ mod test {
                 "test.map2node.blake2.6f7dc1a2ad07d16eb4d3e586e2f7361c0990dcf4a29b0bb06fa5d04e69710a64"
             )
             .await?;
+        assert_eq!(
+            helper.load(map_o.clone()).await?,
+            helper
+                .get_partial_map(&from_entries_map, "o")
+                .await?
+                .unwrap()
+        );
         // map:
         //     *
         //     |_______________________________________________
@@ -1464,12 +1852,140 @@ mod test {
         //     a=8
         let map = test_node("", None, vec![(b'a', map_a), (b'o', map_o)]);
 
-        assert_eq!(from_entries_map, map);
+        assert_eq!(from_entries_map.clone(), map.clone());
+        assert_eq!(
+            map,
+            helper
+                .get_partial_map(&from_entries_map, "")
+                .await?
+                .unwrap()
+        );
+
+        assert_eq!(
+            helper
+                .from_entries_removed_prefix(&EXAMPLE_ENTRIES[0..8], 2)
+                .await?,
+            helper
+                .get_partial_map(&from_entries_map, "ab")
+                .await?
+                .unwrap()
+        );
+        assert_eq!(
+            helper
+                .from_entries_removed_prefix(&EXAMPLE_ENTRIES[0..8], 3)
+                .await?,
+            helper
+                .get_partial_map(&from_entries_map, "aba")
+                .await?
+                .unwrap()
+        );
+        assert_eq!(
+            helper
+                .from_entries_removed_prefix(&EXAMPLE_ENTRIES[8..12], 2)
+                .await?,
+            helper
+                .get_partial_map(&from_entries_map, "om")
+                .await?
+                .unwrap()
+        );
+        assert_eq!(
+            helper
+                .from_entries_removed_prefix(&EXAMPLE_ENTRIES[10..12], 4)
+                .await?,
+            helper
+                .get_partial_map(&from_entries_map, "omun")
+                .await?
+                .unwrap()
+        );
+
+        assert_eq!(
+            [
+                (
+                    "omun",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[10..12], 4)
+                            .await?
+                    )
+                ),
+                ("abacaxi", Either::Left(TestValue(11))),
+                ("abalaba", Either::Left(TestValue(5))),
+                ("omiojo", Either::Left(TestValue(1))),
+                ("omungal", Either::Left(TestValue(4))),
+                (
+                    "om",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[8..12], 2)
+                            .await?
+                    )
+                ),
+                (
+                    "aba",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[0..8], 3)
+                            .await?
+                    )
+                ),
+                (
+                    "o",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[8..12], 1)
+                            .await?
+                    )
+                ),
+                (
+                    "ab",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[0..8], 2)
+                            .await?
+                    )
+                ),
+                (
+                    "",
+                    Either::Right(helper.from_entries(EXAMPLE_ENTRIES).await?)
+                ),
+                (
+                    "abacab",
+                    Either::Right(
+                        helper
+                            .from_entries_removed_prefix(&EXAMPLE_ENTRIES[1..3], 6)
+                            .await?
+                    )
+                ),
+            ]
+            .into_iter()
+            .collect::<TrieMap<_>>(),
+            helper
+                .get_entries_and_partial_maps(
+                    &from_entries_map,
+                    [
+                        ("omun", LookupKind::PartialMap),
+                        ("om", LookupKind::PartialMap),
+                        ("aba", LookupKind::PartialMap),
+                        ("o", LookupKind::PartialMap),
+                        ("ab", LookupKind::PartialMap),
+                        ("", LookupKind::PartialMap),
+                        ("abacab", LookupKind::PartialMap),
+                        ("abacaxi", LookupKind::Entry),
+                        ("abalaba", LookupKind::Entry),
+                        ("omiojo", LookupKind::Entry),
+                        ("omungal", LookupKind::Entry),
+                        ("test", LookupKind::Entry),
+                    ]
+                    .into_iter()
+                    .collect()
+                )
+                .await?
+        );
 
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_sharded_map_v2_from_entries_only_maps(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let blobstore = Memblob::default();
@@ -1498,7 +2014,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_sharded_map_v2_from_entries_maps_and_values(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let blobstore = Memblob::default();
@@ -1525,7 +2041,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_sharded_map_v2_from_entries_conflict_detection(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let blobstore = Memblob::default();
@@ -1610,6 +2126,128 @@ mod test {
         Ok(())
     }
 
+    #[mononoke::fbinit_test]
+    async fn test_sharded_map_v2_difference_stream(fb: FacebookInit) -> Result<()> {
+        let ctx = CoreContext::test_mock(fb);
+        let blobstore = Memblob::default();
+        let helper = MapHelper(ctx, blobstore);
+
+        let map = helper
+            .from_entries(&[
+                ("aba", 12),
+                ("abacab", 7),
+                ("abacaba", 8),
+                ("abacakkk", 9),
+                ("abacate", 10),
+                ("abacaxi", 11),
+                ("abalaba", 5),
+                ("abalada", 6),
+                ("omiojo", 1),
+                ("omiux", 2),
+                ("omundo", 3),
+                ("omungal", 4),
+            ])
+            .await?;
+
+        let other_map_1 = helper
+            .from_entries(&[("aba", 12), ("abacab", 6), ("omiojo", 1), ("omiux", 9)])
+            .await?;
+
+        let other_map_2 = helper
+            .from_entries(&[
+                ("abacab", 13),
+                ("abacakkk", 9),
+                ("omiojo", 1),
+                ("omungal", 4),
+            ])
+            .await?;
+
+        assert_eq!(
+            helper
+                .difference_stream(map.clone(), vec![])
+                .await?
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
+            vec![
+                ("aba".to_string(), 12, vec![]),
+                ("abacab".to_string(), 7, vec![]),
+                ("abacaba".to_string(), 8, vec![]),
+                ("abacakkk".to_string(), 9, vec![]),
+                ("abacate".to_string(), 10, vec![]),
+                ("abacaxi".to_string(), 11, vec![]),
+                ("abalaba".to_string(), 5, vec![]),
+                ("abalada".to_string(), 6, vec![]),
+                ("omiojo".to_string(), 1, vec![]),
+                ("omiux".to_string(), 2, vec![]),
+                ("omundo".to_string(), 3, vec![]),
+                ("omungal".to_string(), 4, vec![])
+            ],
+        );
+
+        assert_eq!(
+            helper
+                .difference_stream(map.clone(), vec![other_map_1.clone()])
+                .await?
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
+            vec![
+                ("abacab".to_string(), 7, vec![6]),
+                ("abacaba".to_string(), 8, vec![]),
+                ("abacakkk".to_string(), 9, vec![]),
+                ("abacate".to_string(), 10, vec![]),
+                ("abacaxi".to_string(), 11, vec![]),
+                ("abalaba".to_string(), 5, vec![]),
+                ("abalada".to_string(), 6, vec![]),
+                ("omiux".to_string(), 2, vec![9]),
+                ("omundo".to_string(), 3, vec![]),
+                ("omungal".to_string(), 4, vec![])
+            ]
+        );
+
+        assert_eq!(
+            helper
+                .difference_stream(map.clone(), vec![other_map_2.clone()])
+                .await?
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
+            vec![
+                ("aba".to_string(), 12, vec![]),
+                ("abacab".to_string(), 7, vec![13]),
+                ("abacaba".to_string(), 8, vec![]),
+                ("abacate".to_string(), 10, vec![]),
+                ("abacaxi".to_string(), 11, vec![]),
+                ("abalaba".to_string(), 5, vec![]),
+                ("abalada".to_string(), 6, vec![]),
+                ("omiux".to_string(), 2, vec![]),
+                ("omundo".to_string(), 3, vec![])
+            ]
+        );
+
+        assert_eq!(
+            helper
+                .difference_stream(map, vec![other_map_1, other_map_2])
+                .await?
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
+            vec![
+                ("abacab".to_string(), 7, vec![6, 13]),
+                ("abacaba".to_string(), 8, vec![]),
+                ("abacate".to_string(), 10, vec![]),
+                ("abacaxi".to_string(), 11, vec![]),
+                ("abalaba".to_string(), 5, vec![]),
+                ("abalada".to_string(), 6, vec![]),
+                ("omiux".to_string(), 2, vec![9]),
+                ("omundo".to_string(), 3, vec![])
+            ]
+        );
+
+        Ok(())
+    }
+
     #[quickcheck_async::tokio]
     async fn test_sharded_map_v2_quickcheck(
         fb: FacebookInit,
@@ -1676,6 +2314,56 @@ mod test {
 
         if rollup_data != MaxTestValue(max_value) {
             return false;
+        }
+
+        true
+    }
+
+    #[quickcheck_async::tokio]
+    async fn test_sharded_map_v2_quickcheck_batch_lookup(
+        fb: FacebookInit,
+        values: Vec<(String, u32)>,
+        lookup_keys: TrieMap<LookupKind>,
+    ) -> bool {
+        let ctx = CoreContext::test_mock(fb);
+        let blobstore = Memblob::default();
+
+        let helper = MapHelper(ctx, blobstore);
+
+        let map = helper
+            .from_entries(
+                &values
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), *v))
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+
+        let batched_outputs = helper
+            .get_entries_and_partial_maps(&map, lookup_keys.clone())
+            .await
+            .unwrap();
+
+        for (key, kind) in lookup_keys {
+            match kind {
+                LookupKind::Entry => {
+                    let unbatched_lookup = helper.lookup(&map, &key).await.unwrap();
+                    let batched_lookup = batched_outputs.get(&key).cloned();
+
+                    if unbatched_lookup.map(Either::Left) != batched_lookup {
+                        return false;
+                    }
+                }
+                LookupKind::PartialMap => {
+                    let unbatched_lookup = helper.get_partial_map(&map, &key).await.unwrap();
+                    let batched_lookup = batched_outputs.get(&key).cloned();
+
+                    if unbatched_lookup.map(Either::Right) != batched_lookup {
+                        return false;
+                    }
+                }
+            }
         }
 
         true

@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use configloader::hg::RepoInfo;
 use configmodel::Config;
 use gitcompat::init::maybe_init_inside_dotgit;
 use repo::errors;
@@ -36,7 +37,7 @@ impl OptionalRepo {
             Ok(OptionalRepo::Some(repo))
         } else {
             Ok(OptionalRepo::None(Arc::new(configloader::hg::load(
-                None,
+                RepoInfo::NoRepo,
                 &pinned_configs(opts),
             )?)))
         }
@@ -79,10 +80,14 @@ impl OptionalRepo {
         }
     }
 
-    pub fn repo_opt(&mut self) -> Option<&mut Repo> {
+    pub fn repo_opt(&self) -> Option<&Repo> {
         match self {
             OptionalRepo::Some(repo) => Some(repo),
             OptionalRepo::None(_) => None,
         }
+    }
+
+    pub fn has_repo(&self) -> bool {
+        matches!(self, OptionalRepo::Some(_))
     }
 }

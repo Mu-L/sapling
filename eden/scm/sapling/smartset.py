@@ -535,228 +535,100 @@ class baseset(abstractsmartset):
         return "<%s%s %s>" % (type(self).__name__, d, s)
 
 
-class idset(abstractsmartset):
-    """Wrapper around Rust's IdSet that meets the smartset interface.
-
-    The Rust SpanSet does not keep order. This structure keeps orders.
-
-    >>> repo = util.refcell([])
-    >>> xs = idset([1, 3, 2, 4, 11, 10], repo=repo)
-    >>> ys = idset([2, 3, 4, 5, 20], repo=repo)
-
-    >>> xs
-    <idset- [1..=4 10 11]>
-    >>> ys
-    <idset- [2..=5 20]>
-
-    Iteration
-
-    >>> list(xs)
-    [11, 10, 4, 3, 2, 1]
-
-    >>> xs.reverse()
-    >>> list(xs)
-    [1, 2, 3, 4, 10, 11]
-
-    >>> ys.sort()
-    >>> list(ys)
-    [2, 3, 4, 5, 20]
-    >>> ys.first()
-    2
-    >>> ys.last()
-    20
-
-    >>> ys.sort(reverse=True)
-    >>> list(ys)
-    [20, 5, 4, 3, 2]
-    >>> ys.first()
-    20
-    >>> ys.last()
-    2
-
-    Length, contains, min, max
-
-    >>> len(xs)
-    6
-    >>> 1 in xs
-    True
-    >>> 5 in xs
-    False
-    >>> xs.min()
-    1
-    >>> xs.max()
-    11
-
-    Set operations
-
-    >>> xs & ys
-    <idset+ [2 3 4]>
-    >>> xs - ys
-    <idset+ [1 10 11]>
-    >>> xs + ys
-    <idset+ [1..=5 10 11 20]>
-    """
-
-    def __init__(self, spans, repo):
-        """data: a dag.spans object, or an iterable of revs"""
-        self._spans = dagmod.spans(spans)
-        self._ascending = False
-        self._reporef = weakref.ref(repo)
-
-    @staticmethod
-    def range(repo, start, end, ascending=False):
-        """start and end are inclusive, repo is used to filter out invalid revs
-
-        If start > end, an empty set will be returned.
-        """
-        if start > end:
-            spans = dagmod.spans([])
-        else:
-            spans = dagmod.spans.unsaferange(start, end)
-            # Filter by the fullreposet to remove invalid revs.
-            cl = repo.changelog
-            dag = cl.dag
-            allspans = cl.torevs(dag.all())
-            spans = spans & allspans
-        # Convert from Rust to Python object.
-        s = idset(spans, repo=repo)
-        s._ascending = ascending
-        return s
-
-    def iterrev(self):
-        if self._ascending:
-            return self.fastasc()
-        else:
-            return self.fastdesc()
-
-    def _reversediter(self):
-        if self._ascending:
-            return self.fastasc()
-        else:
-            return self.fastdesc()
-
-    def fastasc(self):
-        return self._spans.iterasc()
-
-    def fastdesc(self):
-        return self._spans.iterdesc()
-
-    @util.propertycache
-    def __contains__(self):
-        return self._spans.__contains__
-
-    def __nonzero__(self):
-        return bool(len(self))
-
-    __bool__ = __nonzero__
-
-    def sort(self, reverse=False):
-        self._ascending = not bool(reverse)
-
-    def reverse(self):
-        self._ascending = not self._ascending
-
-    def __len__(self):
-        return len(self._spans)
-
-    fastlen = __len__
-
-    def isascending(self):
-        """Returns True if the collection is ascending order, False if not.
-
-        This is part of the mandatory API for smartset."""
-        if len(self) <= 1:
-            return True
-        return self._ascending
-
-    def isdescending(self):
-        """Returns True if the collection is descending order, False if not.
-
-        This is part of the mandatory API for smartset."""
-        if len(self) <= 1:
-            return True
-        return not self._ascending
-
-    def istopo(self):
-        """Is the collection is in topographical order or not.
-
-        This is part of the mandatory API for smartset."""
-        if len(self) <= 1:
-            return True
-        return False
-
-    def min(self):
-        return self._spans.min()
-
-    def max(self):
-        return self._spans.max()
-
-    def first(self):
-        if self._ascending:
-            return self.min()
-        else:
-            return self.max()
-
-    def last(self):
-        if self._ascending:
-            return self.max()
-        else:
-            return self.min()
-
-    def _fastsetop(self, other, op):
-        # try to use native set operations as fast paths
-        if type(other) is idset:
-            s = idset(getattr(self._spans, op)(other._spans), repo=self.repo())
-            s._ascending = self._ascending
-        elif type(other) is baseset and (
-            op != "__add__" or all(r not in other for r in (nullrev, wdirrev))
-        ):
-            # baseset is cheap to convert. convert it on the fly, but do not
-            # convert if it has troublesome virtual revs and the operation is
-            # "__add__" (union).
-            s = idset(getattr(self._spans, op)(dagmod.spans(other)), repo=self.repo())
-            s._ascending = self._ascending
-        else:
-            # slow path
-            s = getattr(super(idset, self), op)(other)
-        return s
-
-    def __and__(self, other):
-        return self._fastsetop(other, "__and__")
-
-    def __sub__(self, other):
-        return self._fastsetop(other, "__sub__")
-
-    def __add__(self, other):
-        # XXX: This is an aggressive optimization. It does not respect orders
-        # if 'other' is also a idset.
-        return self._fastsetop(other, "__add__")
-
-    def __repr__(self):
-        d = {False: "-", True: "+"}[self._ascending]
-        return "<%s%s %s>" % (type(self).__name__, d, self._spans)
-
-
 class nameset(abstractsmartset):
     """Wrapper around Rust's NameSet that meets the smartset interface.
 
-    The Rust NameSet uses commit hashes for its public interface.
+    The Rust ``dag::Set`` uses commit hashes for its public interface.
     This object does conversions to fit in the abstractsmartset interface
     which uses revision numbers.
 
-    Unlike idset, this object can preserve more types of Rust set,
-    including lazy sets.
+    The Rust ``dag::Set`` is like a ``abstractsmartset`` that it supports
+    union, intersection, difference, slice, reverse, set, list, etc.
+    Ideally all ``abstractsmartset`` usage gets migrated to this ``nameset``,
+    meaning that ``dag::Set`` can cover all use-cases.
+
+    Ideally all kinds of smartsets are backed by this ``nameset`` and therefore
+    tracked by Rust ``Set``.
+
+    Currently, some remaining areas to consider are:
+    - The Rust Set does not track prefetch fields.
+    - The Rust Set has ``Hints``. It is designed to replace fast paths like
+      fastasc, fastdesc etc. However, it might have subtle differences.
+    - The generatorset can be tricky because its "next" calls into Python
+      and GIL + async Rust might deadlock. In some cases, during Py_Finalize
+      thread stack unwinding, we saw rust-cpython panic when the RGenerator
+      is used, this hasn't been fully understood. It might be a good idea
+      to reduce or elimate generatorset usage.
     """
 
-    def __init__(self, changelog, nameset, reverse=False, repo=None):
-        assert isinstance(nameset, bindings.dag.nameset)
-        self._changelog = changelog
-        self._set = nameset
-        # This controls the order of the set.
-        self._reversed = reverse
+    @property
+    def _constructor(self):
+        # used by subclassing, usually self.__class__ except for fullreposet
+        return nameset
+
+    def __init__(
+        self,
+        value=None,
+        *,
+        reverse=False,
+        datarepr=None,
+        istopo=False,
+        preserve_order=None,
+        repo=None
+    ):
+        """Initialize nameset (Rust ``dag::Set`` wrapper) for Python smartset.
+
+        ``value`` can be:
+        - bindings.dag.nameset
+        - List[bytes]: Nodes (binary hashes).
+        - bindings.dag.spans
+        - Iterator[int | Tuple[int, int]]: Integer revisions, a tuple
+          (start, end) indicates a range (used to be named "spanset").
+        - None: treated as [].
+
+        ``reverse`` is handled by this Python class, not by Rust (yet).
+        ``preserve_order`` is by default False for set, True for other types.
+        ``datarepr`` is a tuple of (format, obj, ...), a function or an object
+        that provides a printable representation of the given data.
+        """
+        if preserve_order is None:
+            preserve_order = not isinstance(value, set)
+        if value is None:
+            value = []
         if repo is None:
             raise TypeError("nameset requires repo")
+        changelog = repo.changelog
+        if isinstance(value, bindings.dag.nameset):
+            nodes = value
+        elif (
+            isinstance(value, list)
+            and value
+            and all(isinstance(n, bytes) for n in value)
+        ):
+            # Backed by StaticSet in Rust. The StaticSet is free form, not
+            # associated with a dag, which means every time it is calculated
+            # with other sets (ex. union, intersection), it triggers lookups.
+            # Callsites can use `dag.sort` to turn it to the more efficient
+            # IdStaticSet.
+            # Optimization: use IdStaticSet if the list is empty.
+            nodes = bindings.dag.nameset(value)
+            if not preserve_order:
+                nodes = changelog.dag.sort(nodes)
+        else:
+            # Iterator[int | Tuple[int, int]]
+            # Backed by IdStaticSet in Rust. Most efficient. Associated with the dag.
+            # See <pydag::spanset::Spans as FromPyObject>::extract
+            nodes = changelog.tonodes(value, preserve_order=preserve_order)
+
+        self._changelog = changelog
+        self._set = nodes
+        # This controls the order of the set on the Python side.
+        # The Rust set has its own order control.
+        self._reversed = reverse
         self._reporef = weakref.ref(repo)
+
+        self._istopo = istopo
+        self._datarepr = datarepr
 
     @property
     def _torev(self):
@@ -781,7 +653,7 @@ class nameset(abstractsmartset):
             # Filter by the fullreposet to remove invalid revs.
             allspans = cl.torevs(dag.all())
             spans = spans & allspans
-        s = nameset(cl, cl.tonodes(spans), reverse=ascending, repo=repo)
+        s = nameset(cl.tonodes(spans), reverse=ascending, repo=repo)
         return s
 
     @property
@@ -794,6 +666,8 @@ class nameset(abstractsmartset):
                     yield torev(node)
 
             return getiter
+        # It is tempting to use `set.iterrev()` for `if hints.get("desc")`.
+        # However, iterrev() can be slow. So don't use it in fastasc.
         return None
 
     @property
@@ -806,6 +680,8 @@ class nameset(abstractsmartset):
                     yield torev(node)
 
             return getiter
+        # It is tempting to use `set.iterrev()` for `if hints.get("asc")`.
+        # However, iterrev() can be slow. So don't use it in fastdesc.
         return None
 
     def iterrev(self):
@@ -838,6 +714,11 @@ class nameset(abstractsmartset):
         return node in self._set
 
     def __nonzero__(self):
+        min, max = self._set.size_hint()
+        if min > 0:
+            return True
+        elif max == 0:
+            return False
         return bool(self._set.first())
 
     __bool__ = __nonzero__
@@ -872,7 +753,10 @@ class nameset(abstractsmartset):
     def __len__(self):
         return len(self._set)
 
-    fastlen = __len__
+    def fastlen(self):
+        min, max = self._set.size_hint()
+        if min == max:
+            return min
 
     def fastmin(self):
         return self._set.hints().get("min")
@@ -893,7 +777,7 @@ class nameset(abstractsmartset):
             return bool(self._set.hints().get("desc"))
 
     def istopo(self):
-        return False
+        return self._istopo
 
     def first(self):
         if self._reversed:
@@ -913,6 +797,8 @@ class nameset(abstractsmartset):
 
     def min(self):
         hints = self._set.hints()
+        # Cannot use hints.get("min") even if it is not None.
+        # The hint min can be smaller than the actual min.
         if hints.get("desc"):
             result = self._set.last()
         elif hints.get("asc"):
@@ -928,6 +814,8 @@ class nameset(abstractsmartset):
 
     def max(self):
         hints = self._set.hints()
+        # Cannot use hints.get("max") even if it is not None.
+        # The hint max can be larger than the actual max.
         if hints.get("desc"):
             result = self._set.first()
         elif hints.get("asc"):
@@ -946,10 +834,7 @@ class nameset(abstractsmartset):
 
         # Extract the Rust binding object.
         ty = type(other)
-        if ty is idset:
-            # convert idset to nameset
-            otherset = self._changelog.tonodes(other)
-        elif ty is nameset:
+        if ty is nameset:
             otherset = other._set
         elif ty is baseset:
             # convert basesee to nameset
@@ -959,7 +844,7 @@ class nameset(abstractsmartset):
         if otherset is not None:
             # set operation by the Rust layer
             newset = getattr(self._set, op)(otherset)
-            s = nameset(self._changelog, newset, repo=self.repo())
+            s = self._constructor(newset, repo=self.repo())
             # preserve order
             if self.isascending():
                 s.sort()
@@ -1012,7 +897,7 @@ class nameset(abstractsmartset):
             return baseset([], repo=repo)
 
         newset = self._set.skip(skip).take(take)
-        s = nameset(self._changelog, newset, repo=self.repo())
+        s = self._constructor(newset, repo=self.repo())
         # preserve order
         if self.isascending():
             s.sort()
@@ -1021,8 +906,11 @@ class nameset(abstractsmartset):
         return s
 
     def __repr__(self):
-        d = {False: "-", True: "+", None: ""}[self._ascending]
-        return "<%s%s %s>" % (type(self).__name__, d, self._set)
+        s = _formatsetrepr(self._datarepr)
+        if not s:
+            d = {False: "-", True: "+", None: ""}[self._ascending]
+            s = "<%s%s %s>" % (type(self).__name__, d, self._set)
+        return s
 
 
 class filteredset(abstractsmartset):
@@ -1712,7 +1600,7 @@ class fullreposet(nameset):
 
     def __new__(cls, repo):
         cl = repo.changelog
-        s = nameset(cl, cl.dag.all(), reverse=True, repo=repo)
+        s = nameset(cl.dag.all(), reverse=True, repo=repo)
         s.__class__ = cls
         return s
 

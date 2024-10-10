@@ -13,9 +13,10 @@
 #include "eden/common/utils/RefPtr.h"
 #include "eden/fs/inodes/InodePtr.h"
 #include "eden/fs/inodes/UnmaterializedUnloadedBlobDirEntry.h"
-#include "eden/fs/model/BlobMetadata.h"
+#include "eden/fs/model/BlobAuxData.h"
 #include "eden/fs/model/EntryAttributeFlags.h"
 #include "eden/fs/model/Hash.h"
+#include "eden/fs/model/TreeAuxDataFwd.h"
 #include "eden/fs/model/TreeEntry.h"
 #include "eden/fs/model/TreeFwd.h"
 
@@ -119,6 +120,11 @@ class VirtualInode {
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext) const;
 
+  ImmediateFuture<Hash32> getDigestHash(
+      RelativePathPiece path,
+      const std::shared_ptr<ObjectStore>& objectStore,
+      const ObjectFetchContextPtr& fetchContext) const;
+
   /**
    * Get all the available attributes for a file entry in this tree. Available
    * attributes are currently:
@@ -134,7 +140,7 @@ class VirtualInode {
       RelativePathPiece path,
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext,
-      bool shouldFetchTreeMetadata) const;
+      bool shouldFetchTreeAuxData) const;
 
   /**
    * Emulate stat in a way that works for source control.
@@ -179,24 +185,32 @@ class VirtualInode {
       RelativePath path,
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext,
-      bool shouldFetchTreeMetadata);
+      bool shouldFetchTreeAuxData);
 
  private:
   /**
    * Helper function for getChildrenAttributes
    */
-  ImmediateFuture<BlobMetadata> getBlobMetadata(
+  ImmediateFuture<BlobAuxData> getBlobAuxData(
       RelativePathPiece path,
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext,
       bool blake3Required = false) const;
+
+  /**
+   * Helper function for getChildrenAttributes
+   */
+  ImmediateFuture<TreeAuxData> getTreeAuxData(
+      RelativePathPiece path,
+      const std::shared_ptr<ObjectStore>& objectStore,
+      const ObjectFetchContextPtr& fetchContext) const;
 
   ImmediateFuture<EntryAttributes> getEntryAttributesForNonFile(
       EntryAttributeFlags requestedAttributes,
       RelativePathPiece path,
       const std::shared_ptr<ObjectStore>& objectStore,
       const ObjectFetchContextPtr& fetchContext,
-      bool shouldFetchTreeMetadata,
+      bool shouldFetchTreeAuxData,
       std::optional<TreeEntryType> entryType,
       int errorCode,
       std::string additionalErrorContext = {}) const;

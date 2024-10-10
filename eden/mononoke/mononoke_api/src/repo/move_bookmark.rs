@@ -27,8 +27,9 @@ use mononoke_types::ChangesetId;
 use crate::errors::MononokeError;
 use crate::invalid_push_redirected_request;
 use crate::repo::RepoContext;
+use crate::MononokeRepo;
 
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     /// Create operation for moving a bookmark
     async fn move_bookmark_op<'a>(
         &self,
@@ -37,7 +38,6 @@ impl RepoContext {
         old_target: Option<ChangesetId>,
         allow_non_fast_forward: bool,
         pushvars: Option<&'a HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
     ) -> Result<UpdateBookmarkOp<'a>, MononokeError> {
         self.start_write()?;
 
@@ -46,7 +46,7 @@ impl RepoContext {
         let old_target = match old_target {
             Some(old_target) => old_target,
             None => self
-                .blob_repo()
+                .repo()
                 .bookmarks()
                 .get(self.ctx().clone(), bookmark)
                 .await
@@ -62,7 +62,6 @@ impl RepoContext {
             old_target: ChangesetId,
             allow_non_fast_forward: bool,
             pushvars: Option<&'a HashMap<String, Bytes>>,
-            affected_changesets_limit: Option<usize>,
         ) -> UpdateBookmarkOp<'a> {
             let op = UpdateBookmarkOp::new(
                 bookmark.clone(),
@@ -76,7 +75,6 @@ impl RepoContext {
                     BookmarkUpdatePolicy::FastForwardOnly
                 },
                 BookmarkUpdateReason::ApiRequest,
-                affected_changesets_limit,
             )
             .with_pushvars(pushvars);
             op.log_new_public_commits_to_scribe()
@@ -115,7 +113,6 @@ impl RepoContext {
                 old_target,
                 allow_non_fast_forward,
                 pushvars,
-                affected_changesets_limit,
             )
         } else {
             make_move_op(
@@ -124,7 +121,6 @@ impl RepoContext {
                 old_target,
                 allow_non_fast_forward,
                 pushvars,
-                affected_changesets_limit,
             )
         };
         Ok(op)
@@ -138,7 +134,6 @@ impl RepoContext {
         old_target: Option<ChangesetId>,
         allow_non_fast_forward: bool,
         pushvars: Option<&HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
     ) -> Result<(), MononokeError> {
         let update_op = self
             .move_bookmark_op(
@@ -147,7 +142,6 @@ impl RepoContext {
                 old_target,
                 allow_non_fast_forward,
                 pushvars,
-                affected_changesets_limit,
             )
             .await?;
         if let Some(redirector) = self.push_redirector.as_ref() {
@@ -156,7 +150,7 @@ impl RepoContext {
                 .run(
                     self.ctx(),
                     self.authorization_context(),
-                    redirector.repo.inner_repo(),
+                    &redirector.repo,
                     redirector.repo.hook_manager(),
                 )
                 .await?;
@@ -167,7 +161,7 @@ impl RepoContext {
                 .run(
                     self.ctx(),
                     self.authorization_context(),
-                    self.inner_repo(),
+                    self.repo(),
                     self.hook_manager().as_ref(),
                 )
                 .await?;
@@ -183,7 +177,6 @@ impl RepoContext {
         old_target: Option<ChangesetId>,
         allow_non_fast_forward: bool,
         pushvars: Option<&HashMap<String, Bytes>>,
-        affected_changesets_limit: Option<usize>,
         txn: Option<Box<dyn BookmarkTransaction>>,
         txn_hooks: Vec<BookmarkTransactionHook>,
     ) -> Result<BookmarkInfoTransaction, MononokeError> {
@@ -199,14 +192,13 @@ impl RepoContext {
                 old_target,
                 allow_non_fast_forward,
                 pushvars,
-                affected_changesets_limit,
             )
             .await?;
         let bookmark_info_transaction = update_op
             .run_with_transaction(
                 self.ctx(),
                 self.authorization_context(),
-                self.inner_repo(),
+                self.repo(),
                 self.hook_manager().as_ref(),
                 txn,
                 txn_hooks,

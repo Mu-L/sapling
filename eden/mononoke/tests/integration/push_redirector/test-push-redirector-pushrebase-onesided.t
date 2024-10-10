@@ -10,9 +10,9 @@
 setup configuration
   $ setconfig push.edenapi=true
   $ REPOTYPE="blob_files"
-  $ ENABLE_API_WRITES=1 REPOID=0 REPONAME=large-mon setup_common_config $REPOTYPE
-  $ ENABLE_API_WRITES=1 REPOID=1 REPONAME=small-mon-1 setup_common_config $REPOTYPE
-  $ ENABLE_API_WRITES=1 REPOID=2 REPONAME=small-mon-2 setup_common_config $REPOTYPE
+  $ REPOID=0 REPONAME=large setup_common_config $REPOTYPE
+  $ REPOID=1 REPONAME=small-1 setup_common_config $REPOTYPE
+  $ REPOID=2 REPONAME=small-2 setup_common_config $REPOTYPE
   $ cat >> "$TESTTMP/mononoke-config/common/commitsyncmap.toml" <<EOF
   > [megarepo_test]
   > large_repo_id = 0
@@ -130,7 +130,7 @@ Verification function
   $ function verify_wc() {
   >   local large_repo_commit
   >   large_repo_commit="$1"
-  >   "$MONONOKE_ADMIN" "${CACHE_ARGS[@]}" "${COMMON_ARGS[@]}" --log-level ERROR --mononoke-config-path "$TESTTMP"/mononoke-config --source-repo-id="$REPOIDLARGE" --target-repo-id="$REPOIDSMALL1" crossrepo verify-wc $large_repo_commit
+  >   "$MONONOKE_NEWADMIN" "${CACHE_ARGS[@]}" "${COMMON_ARGS[@]}" --log-level ERROR --mononoke-config-path "$TESTTMP"/mononoke-config cross-repo --source-repo-id="$REPOIDLARGE" --target-repo-id="$REPOIDSMALL1" verify-working-copy $large_repo_commit
   > }
 
 setup hg server repos
@@ -141,18 +141,18 @@ setup hg server repos
   > }
 
   $ cd $TESTTMP
-  $ hginit_treemanifest small-hg-srv-1
-  $ hginit_treemanifest small-hg-srv-2
-  $ cd "$TESTTMP/small-hg-srv-1"
+  $ hginit_treemanifest small-1
+  $ hginit_treemanifest small-2
+  $ cd "$TESTTMP/small-1"
   $ echo 1 > file.txt
   $ hg addremove -q && hg ci -q -m 'pre-move commit 1'
-  $ cd "$TESTTMP/small-hg-srv-2"
+  $ cd "$TESTTMP/small-2"
   $ echo 2 > file.txt
   $ hg addremove -q && hg ci -q -m 'pre-move commit 2'
 
   $ cd "$TESTTMP"
-  $ cp -r small-hg-srv-1 large-hg-srv
-  $ cd large-hg-srv
+  $ cp -r small-1 large
+  $ cd large
   $ mkdir smallrepofolder1
   $ hg mv file.txt smallrepofolder1/file.txt
   $ hg ci -m 'move commit'
@@ -163,11 +163,11 @@ setup hg server repos
   $ create_first_post_move_commit smallrepofolder1
   $ hg book -r . master_bookmark
 
-  $ cd "$TESTTMP/small-hg-srv-1"
+  $ cd "$TESTTMP/small-1"
   $ create_first_post_move_commit .
   $ hg book -r . master_bookmark
 
-  $ cd "$TESTTMP/small-hg-srv-2"
+  $ cd "$TESTTMP/small-2"
   $ hg book -r . master_bookmark
 
 blobimport hg servers repos into Mononoke repos
@@ -175,26 +175,25 @@ blobimport hg servers repos into Mononoke repos
   $ REPOIDLARGE=0
   $ REPOIDSMALL1=1
   $ REPOIDSMALL2=2
-  $ REPOID="$REPOIDLARGE" blobimport large-hg-srv/.hg large-mon
-  $ REPOID="$REPOIDSMALL1" blobimport small-hg-srv-1/.hg small-mon-1
-  $ REPOID="$REPOIDSMALL2" blobimport small-hg-srv-2/.hg small-mon-2
+  $ REPOID="$REPOIDLARGE" blobimport large/.hg large
+  $ REPOID="$REPOIDSMALL1" blobimport small-1/.hg small-1
+  $ REPOID="$REPOIDSMALL2" blobimport small-2/.hg small-2
 
 setup hg client repos
   $ function init_client() {
   > cd "$TESTTMP"
-  > hgclone_treemanifest ssh://user@dummy/"$1" "$2" --noupdate --config extensions.remotenames=
+  > hg clone -q mono:"$1" "$2" --noupdate
   > cd "$TESTTMP/$2"
   > cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   > }
 
-  $ init_client small-hg-srv-1 small-hg-client-1
-  $ init_client small-hg-srv-2 small-hg-client-2
+  $ init_client small-1 small-hg-client-1
+  $ init_client small-2 small-hg-client-2
   $ cd "$TESTTMP"
-  $ init_client large-hg-srv large-hg-client
+  $ init_client large large-hg-client
 
 Setup helpers
   $ LARGE_MASTER_BONSAI=$(mononoke_newadmin bookmarks --repo-id $REPOIDLARGE get master_bookmark)
@@ -210,9 +209,9 @@ Make sure mapping is set up and we know what we don't have to sync initial entri
 
 Normal pushrebase with one commit
   $ cd "$TESTTMP/small-hg-client-1"
-  $ REPONAME=small-mon-1 hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ echo 2 > 2 && hg addremove -q && hg ci -q -m newcommit
-  $ REPONAME=small-mon-1 sl push -r . --to master_bookmark 2>&1 | grep "updated remote bookmark"
+  $ hg push -r . --to master_bookmark 2>&1 | grep "updated remote bookmark"
   updated remote bookmark master_bookmark to 6989db12d1e5
 -- newcommit was correctly pushed to master_bookmark
   $ log -r master_bookmark
@@ -226,38 +225,38 @@ Normal pushrebase with one commit
   o  first post-move commit [public;rev=3;bca7e9574548] default/master_bookmark
   │
   ~
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ log -r master_bookmark
   o  newcommit [public;rev=4;7c9a729ceb57] default/master_bookmark
   │
   ~
 - compare the working copies
-  $ verify_wc master_bookmark
+  $ verify_wc $(hg log -r master_bookmark -T '{node}')
 
 At the same time, the tailed repo gets new commits
   $ cd "$TESTTMP/small-hg-client-2"
-  $ REPONAME=small-mon-2 hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ createfile file2_1
   $ hg ci -qm "Post-merge commit 1"
-  $ REPONAME=small-mon-2 sl push --to master_bookmark -q
+  $ hg push --to master_bookmark -q
 -- tailer puts this commit into a large repo
   $ mononoke_x_repo_sync $REPOIDSMALL2 $REPOIDLARGE once --target-bookmark master_bookmark --commit master_bookmark 2>&1 | grep "synced as"
   * changeset 46d7f49c05a72a305692183a11274a0fbbdc4f8a4b53ca759fb3d257ba54184e synced as 3a9ffb4771519f86b79729a543da084c6a70ff385933aed540e2112a049a0697 * (glob)
 
 Force pushrebase should fail, because it pushes to a shared bookmark
   $ cd "$TESTTMP/small-hg-client-1"
-  $ REPONAME=small-mon-1 hgmn up -q master_bookmark^
+  $ hg up -q master_bookmark^
   $ echo 3 > 3 && hg add 3 && hg ci -q -m "non-forward move"
-  $ REPONAME=small-mon-1 sl push --to master_bookmark --force --pushvar NON_FAST_FORWARD=true >/dev/null
+  $ hg push --to master_bookmark --force --pushvar NON_FAST_FORWARD=true >/dev/null
   pushing * (glob)
   abort: server error: invalid request: Cannot move shared bookmark 'master_bookmark' from small repo
   [255]
 
 Non-shared bookmark should work
-  $ REPONAME=small-mon-1 sl push --to master_bookmark_non_fast_forward --force --create -q
+  $ hg push --to master_bookmark_non_fast_forward --force --create -q
 -- it should also be present in a large repo
   $ cd "$TESTTMP/large-hg-client"
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ log -r bookprefix1/master_bookmark_non_fast_forward
   o  non-forward move [public;rev=5;6b6a308437bb] default/bookprefix1/master_bookmark_non_fast_forward
   │
@@ -265,7 +264,7 @@ Non-shared bookmark should work
 
 Bookmark-only pushrebase (Create a new bookmark, do not push commits)
   $ cd "$TESTTMP/small-hg-client-1"
-  $ REPONAME=small-mon-1 sl push -r master_bookmark^ --to master_bookmark_2 --create 2>&1 | grep creating
+  $ hg push -r master_bookmark^ --to master_bookmark_2 --create 2>&1 | grep creating
   creating remote bookmark master_bookmark_2
   $ hg book --all
   no bookmarks set
@@ -274,25 +273,25 @@ Bookmark-only pushrebase (Create a new bookmark, do not push commits)
      default/master_bookmark_non_fast_forward 161addaa86c7
 -- this is not a `common_pushrebase_bookmark`, so should be prefixed
   $ cd "$TESTTMP/large-hg-client"
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ hg book --all
   no bookmarks set
      default/bookprefix1/master_bookmark_2 bca7e9574548
      default/bookprefix1/master_bookmark_non_fast_forward 6b6a308437bb
      default/master_bookmark   bf8e8d65212d
 - compare the working copies
-  $ verify_wc bookprefix1/master_bookmark_2
+  $ verify_wc $(hg log -r bookprefix1/master_bookmark_2 -T '{node}')
 
 Delete a bookmark
   $ cd "$TESTTMP/small-hg-client-1"
-  $ REPONAME=small-mon-1 quiet_grep deleting -- sl push --delete master_bookmark_2
+  $ quiet_grep deleting -- hg push --delete master_bookmark_2
   deleting remote bookmark master_bookmark_2
   $ hg book --all
   no bookmarks set
      default/master_bookmark   6989db12d1e5
      default/master_bookmark_non_fast_forward 161addaa86c7
   $ cd "$TESTTMP/large-hg-client"
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ hg book --all
   no bookmarks set
      default/bookprefix1/master_bookmark_non_fast_forward 6b6a308437bb

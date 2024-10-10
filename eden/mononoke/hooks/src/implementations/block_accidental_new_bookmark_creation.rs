@@ -23,7 +23,7 @@ use mononoke_types::BonsaiChangeset;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::ChangesetHook;
+use crate::BookmarkHook;
 use crate::CrossRepoPushSource;
 use crate::HookConfig;
 use crate::HookExecution;
@@ -36,6 +36,8 @@ const NAMED_CAPTURE_NAME: &str = "marker_capture";
 #[derive(Clone, Debug, Deserialize)]
 pub struct BlockAccidentalNewBookmarkCreationConfig {
     allow_creations_with_marker: Option<AllowCreationsWithMarker>,
+    #[serde(default, with = "serde_regex")]
+    bypass_for_bookmarks_matching_regex: Option<Regex>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -54,6 +56,7 @@ struct CreationAllowedWithMarkerOptions {
 #[derive(Clone, Debug)]
 pub struct BlockAccidentalNewBookmarkCreationHook {
     creation_allowed_with_marker_options: Option<CreationAllowedWithMarkerOptions>,
+    bypass_for_bookmarks_matching_regex: Option<Regex>,
 }
 
 impl BlockAccidentalNewBookmarkCreationHook {
@@ -82,6 +85,7 @@ impl BlockAccidentalNewBookmarkCreationHook {
 
         Ok(Self {
             creation_allowed_with_marker_options,
+            bypass_for_bookmarks_matching_regex: config.bypass_for_bookmarks_matching_regex,
         })
     }
 }
@@ -97,12 +101,12 @@ fn extract_value_from_marker<'a>(
 }
 
 #[async_trait]
-impl ChangesetHook for BlockAccidentalNewBookmarkCreationHook {
+impl BookmarkHook for BlockAccidentalNewBookmarkCreationHook {
     async fn run<'this: 'cs, 'ctx: 'this, 'cs, 'fetcher: 'cs>(
         &'this self,
         ctx: &'ctx CoreContext,
         bookmark: &BookmarkKey,
-        changeset: &'cs BonsaiChangeset,
+        to: &'cs BonsaiChangeset,
         content_manager: &'fetcher dyn HookStateProvider,
         _cross_repo_push_source: CrossRepoPushSource,
         _push_authored_by: PushAuthoredBy,
@@ -118,8 +122,14 @@ impl ChangesetHook for BlockAccidentalNewBookmarkCreationHook {
 
         let bookmark_name = bookmark.as_str();
 
+        if let Some(regex) = &self.bypass_for_bookmarks_matching_regex {
+            if regex.is_match(bookmark_name) {
+                return Ok(HookExecution::Accepted);
+            }
+        }
+
         if let Some(options) = &self.creation_allowed_with_marker_options {
-            if let Some(value_from_marker) = extract_value_from_marker(options, changeset) {
+            if let Some(value_from_marker) = extract_value_from_marker(options, to) {
                 let value_to_compare = if let Some(comparison_prefix) = &options.comparison_prefix {
                     &format!("{}{}", comparison_prefix, value_from_marker)
                 } else {

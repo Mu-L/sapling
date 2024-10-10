@@ -8,7 +8,6 @@
 #![feature(trait_alias)]
 
 use ::repo_lock::RepoLockRef;
-use blobrepo::AsBlobRepo;
 use bonsai_git_mapping::BonsaiGitMappingArc;
 use bonsai_git_mapping::BonsaiGitMappingRef;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMappingArc;
@@ -54,7 +53,7 @@ mod restrictions;
 mod update;
 
 pub use bookmarks_types::BookmarkKind;
-use git_push_redirect::GitPushRedirectConfigRef;
+use git_source_of_truth::GitSourceOfTruthConfigRef;
 pub use hooks::CrossRepoPushSource;
 pub use hooks::HookRejection;
 pub use pushrebase::PushrebaseOutcome;
@@ -63,7 +62,8 @@ pub use pushrebase_hooks::PushrebaseHooksError;
 
 pub use crate::create::CreateBookmarkOp;
 pub use crate::delete::DeleteBookmarkOp;
-pub use crate::hook_running::run_hooks;
+pub use crate::hook_running::run_bookmark_hooks;
+pub use crate::hook_running::run_changeset_hooks;
 pub use crate::pushrebase_onto::PushrebaseOntoBookmarkOp;
 pub use crate::restrictions::check_bookmark_sync_config;
 pub use crate::restrictions::BookmarkKindRestrictions;
@@ -72,13 +72,14 @@ pub use crate::update::BookmarkUpdateTargets;
 pub use crate::update::UpdateBookmarkOp;
 
 const ALLOW_NON_FFWD_PUSHVAR: &str = "x-git-allow-non-ffwd-push";
+const ALLOW_BRANCH_DELETION: &str = "x-git-allow-branch-deletion";
+const ALLOW_TAG_DELETION: &str = "x-git-allow-tag-deletion";
 
 /// Trait alias for bookmarks movement repositories.
 ///
 /// These are the repo attributes that are necessary to call most functions in
 /// bookmarks movement.
-pub trait Repo = AsBlobRepo
-    + BonsaiHgMappingRef
+pub trait Repo = BonsaiHgMappingRef
     + BonsaiGitMappingArc
     + BonsaiGlobalrevMappingArc
     + BookmarksRef
@@ -95,7 +96,7 @@ pub trait Repo = AsBlobRepo
     + RepoLockRef
     + CommitGraphRef
     + CommitGraphWriterRef
-    + GitPushRedirectConfigRef
+    + GitSourceOfTruthConfigRef
     + Send
     + Sync;
 
@@ -216,7 +217,7 @@ impl BookmarkInfoData {
              + RepoConfigRef
              + BonsaiGlobalrevMappingRef
              + BonsaiGitMappingRef
-             + GitPushRedirectConfigRef
+             + GitSourceOfTruthConfigRef
          ),
     ) {
         if self.log_new_public_commits_to_scribe {

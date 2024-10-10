@@ -17,6 +17,7 @@ use context::CoreContext;
 
 use crate::typed_hash::BlobstoreKey;
 use crate::typed_hash::BssmV3DirectoryId;
+use crate::typed_hash::CaseConflictSkeletonManifestId;
 use crate::typed_hash::ChangesetId;
 use crate::typed_hash::ContentChunkId;
 use crate::typed_hash::ContentId;
@@ -29,6 +30,7 @@ use crate::typed_hash::ManifestUnodeId;
 use crate::typed_hash::RawBundle2Id;
 use crate::typed_hash::RedactionKeyListId;
 use crate::typed_hash::SkeletonManifestId;
+use crate::typed_hash::SkeletonManifestV2Id;
 use crate::typed_hash::TestManifestId;
 use crate::typed_hash::TestShardedManifestId;
 
@@ -94,6 +96,8 @@ pub type RedactionKeyListBlob = Blob<RedactionKeyListId>;
 pub type BssmV3DirectoryBlob = Blob<BssmV3DirectoryId>;
 pub type TestManifestBlob = Blob<TestManifestId>;
 pub type TestShardedManifestBlob = Blob<TestShardedManifestId>;
+pub type SkeletonManifestV2Blob = Blob<SkeletonManifestV2Id>;
+pub type CaseConflictSkeletonManifestBlob = Blob<CaseConflictSkeletonManifestId>;
 
 impl<Id: BlobstoreKey> From<Blob<Id>> for BlobstoreBytes {
     #[inline]

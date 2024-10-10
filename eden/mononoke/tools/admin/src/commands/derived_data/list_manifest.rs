@@ -21,8 +21,8 @@ use fsnodes::RootFsnodeId;
 use futures::stream::BoxStream;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use manifest::AsyncManifest;
 use manifest::Entry;
+use manifest::Manifest;
 use manifest::ManifestOps;
 use manifest::PathOrPrefix;
 use manifest::StoreLoadable;
@@ -91,9 +91,9 @@ enum ListItem {
 }
 
 impl ListItem {
-    fn new<TreeId, LeafId>(path: MPath, entry: Entry<TreeId, LeafId>) -> Self
+    fn new<TreeId, Leaf>(path: MPath, entry: Entry<TreeId, Leaf>) -> Self
     where
-        Entry<TreeId, LeafId>: Listable,
+        Entry<TreeId, Leaf>: Listable,
     {
         match entry {
             Entry::Tree(..) => ListItem::Directory(path, entry.list_item()),
@@ -205,12 +205,12 @@ async fn list<TreeId>(
 where
     TreeId: StoreLoadable<RepoBlobstore> + Clone + Send + Sync + Eq + Unpin + 'static,
     <TreeId as StoreLoadable<RepoBlobstore>>::Value:
-        AsyncManifest<RepoBlobstore, TreeId = TreeId> + Send + Sync,
-    <<TreeId as StoreLoadable<RepoBlobstore>>::Value as AsyncManifest<RepoBlobstore>>::LeafId:
+        Manifest<RepoBlobstore, TreeId = TreeId> + Send + Sync,
+    <<TreeId as StoreLoadable<RepoBlobstore>>::Value as Manifest<RepoBlobstore>>::Leaf:
         Clone + Send + Eq + Unpin,
     Entry<
         TreeId,
-        <<TreeId as StoreLoadable<RepoBlobstore>>::Value as AsyncManifest<RepoBlobstore>>::LeafId,
+        <<TreeId as StoreLoadable<RepoBlobstore>>::Value as Manifest<RepoBlobstore>>::Leaf,
     >: Listable,
 {
     if directory {

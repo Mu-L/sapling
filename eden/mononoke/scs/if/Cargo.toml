@@ -15,10 +15,11 @@ doctest = false
 doc = false
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 bytes = { version = "1.6.0", features = ["serde"] }
 codegen_includer_proc_macro = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 derived_data_type_if = { version = "0.1.0", path = "../../derived_data/if" }
+faster-hex = "0.6.1"
 fb303_core = { version = "0.0.0", git = "https://github.com/facebook/fb303.git", branch = "main" }
 fbthrift = { version = "0.0.1+unstable", git = "https://github.com/facebook/fbthrift.git", branch = "main" }
 futures = { version = "0.3.30", features = ["async-await", "compat"] }
@@ -28,7 +29,7 @@ ref-cast = "1.0.18"
 serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_derive = "1.0.185"
 smallvec = { version = "1.6.1", features = ["serde", "specialization", "union"] }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 thrift = { version = "0.0.1+unstable", git = "https://github.com/facebook/fbthrift.git", branch = "main" }
 
 [build-dependencies]

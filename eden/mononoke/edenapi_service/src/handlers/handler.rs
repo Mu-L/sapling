@@ -15,9 +15,12 @@ use gotham::extractor::QueryStringExtractor;
 use gotham_derive::StateData;
 use gotham_derive::StaticResponseExtender;
 use gotham_ext::error::HttpError;
+use gotham_ext::handler::SlapiCommitIdentityScheme;
 use gotham_ext::middleware::request_context::RequestContext;
 use hyper::body::Body;
 use mononoke_api::MononokeError;
+use mononoke_api::MononokeRepo;
+use mononoke_api::Repo;
 use mononoke_api_hg::HgRepoContext;
 use nonzero_ext::nonzero;
 use serde::Deserialize;
@@ -72,21 +75,23 @@ impl From<HttpError> for HandlerError {
 pub type HandlerResult<'a, Response> =
     Result<BoxStream<'a, anyhow::Result<Response>>, HandlerError>;
 
-pub struct SaplingRemoteApiContext<P, Q> {
+pub struct SaplingRemoteApiContext<P, Q, R: Send + Sync + 'static> {
     rctx: RequestContext,
-    sctx: ServerContext,
-    repo: HgRepoContext,
+    sctx: ServerContext<R>,
+    repo: HgRepoContext<R>,
     path: P,
     query: Q,
+    slapi_flavour: SlapiCommitIdentityScheme,
 }
 
-impl<P, Q> SaplingRemoteApiContext<P, Q> {
+impl<P, Q, R: Send + Sync + 'static> SaplingRemoteApiContext<P, Q, R> {
     pub fn new(
         rctx: RequestContext,
-        sctx: ServerContext,
-        repo: HgRepoContext,
+        sctx: ServerContext<R>,
+        repo: HgRepoContext<R>,
         path: P,
         query: Q,
+        slapi_flavour: SlapiCommitIdentityScheme,
     ) -> Self {
         Self {
             rctx,
@@ -94,10 +99,19 @@ impl<P, Q> SaplingRemoteApiContext<P, Q> {
             repo,
             path,
             query,
+            slapi_flavour,
         }
     }
-    pub fn repo(&self) -> HgRepoContext {
+    pub fn repo(&self) -> HgRepoContext<R>
+    where
+        R: Clone,
+    {
         self.repo.clone()
+    }
+
+    #[allow(unused)]
+    pub fn slapi_flavour(&self) -> SlapiCommitIdentityScheme {
+        self.slapi_flavour
     }
 
     #[allow(unused)]
@@ -110,7 +124,13 @@ impl<P, Q> SaplingRemoteApiContext<P, Q> {
     }
 
     /// Open an "other" repo (i.e. distinct from repo specified in URL path).
-    pub async fn other_repo(&self, repo_name: impl AsRef<str>) -> Result<HgRepoContext, HttpError> {
+    pub async fn other_repo(
+        &self,
+        repo_name: impl AsRef<str>,
+    ) -> Result<HgRepoContext<R>, HttpError>
+    where
+        R: MononokeRepo,
+    {
         get_repo(&self.sctx, &self.rctx, repo_name, None).await
     }
 }
@@ -129,12 +149,15 @@ pub trait SaplingRemoteApiHandler: 'static {
     /// Example: "/ephemeral/prepare"
     const ENDPOINT: &'static str;
 
+    const SUPPORTED_FLAVOURS: &'static [SlapiCommitIdentityScheme] =
+        &[SlapiCommitIdentityScheme::Hg];
+
     fn sampling_rate(_request: &Self::Request) -> NonZeroU64 {
         nonzero!(1u64)
     }
 
     async fn handler(
-        ctx: SaplingRemoteApiContext<Self::PathExtractor, Self::QueryStringExtractor>,
+        ctx: SaplingRemoteApiContext<Self::PathExtractor, Self::QueryStringExtractor, Repo>,
         request: Self::Request,
     ) -> HandlerResult<'async_trait, Self::Response>;
 }

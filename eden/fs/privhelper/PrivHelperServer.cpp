@@ -890,7 +890,7 @@ UnixSocket::Message PrivHelperServer::processMountNfsMsg(Cursor& cursor) {
       useReaddirplus);
   XLOGF(DBG3, "mount.nfs \"{}\"", mountPath);
 
-  sanityCheckMountPoint(mountPath);
+  sanityCheckMountPoint(mountPath, true /* isNfs */);
 
   nfsMount(mountPath, mountdAddr, nfsdAddr, readOnly, iosize, useReaddirplus);
   mountPoints_.insert(mountPath);
@@ -1028,6 +1028,17 @@ UnixSocket::Message PrivHelperServer::processSetUseEdenFs(
   PrivHelperConn::parseSetUseEdenFsRequest(cursor, useDevEdenFs_);
 
   return makeResponse();
+}
+
+UnixSocket::Message PrivHelperServer::processGetPid() {
+  XLOG(DBG3, "get privhelper pid");
+
+  pid_t pid = getpid();
+  auto response = makeResponse();
+  response.data.unshare();
+  folly::io::Appender cursor{&response.data, 0};
+  cursor.writeBE<pid_t>(pid);
+  return response;
 }
 
 namespace {
@@ -1221,6 +1232,8 @@ UnixSocket::Message PrivHelperServer::processMessage(
       return processSetDaemonTimeout(cursor, request);
     case PrivHelperConn::REQ_SET_USE_EDENFS:
       return processSetUseEdenFs(cursor, request);
+    case PrivHelperConn::REQ_GET_PID:
+      return processGetPid();
     case PrivHelperConn::MSG_TYPE_NONE:
     case PrivHelperConn::RESP_ERROR:
       break;

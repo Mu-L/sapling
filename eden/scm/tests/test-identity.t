@@ -23,7 +23,6 @@ Init can create a ".sl" repo.
   [1]
   $ ls .sl
   00changelog.i
-  reponame
   requires
   store
 
@@ -62,6 +61,7 @@ Clone can create a ".sl" repo.
 Status works in ".sl" repo
   $ LOG=configloader::hg=info hg status -A
    INFO configloader::hg: loading config repo_path=* (glob)
+   WARN configloader::hg: repo name: no remotefilelog.reponame
   C foo
   $ cd ..
 
@@ -97,7 +97,7 @@ Test we prefer ".sl" over ".hg"
 
 Can choose flavor of dot dir using REPO_IDENTITY override:
   $ SL_IDENTITY=sl SL_REPO_IDENTITY=hg hg version -q
-  Sapling 4.4.2_dev
+  Sapling 4.* (glob)
   $ SL_IDENTITY=sl SL_REPO_IDENTITY=hg newrepo
   $ ls .hg/requires
   .hg/requires
@@ -105,3 +105,25 @@ Works from within a repo of the opposite flavor:
   $ SL_REPO_IDENTITY=sl hg init foo
   $ ls foo/.sl/requires
   foo/.sl/requires
+
+
+Export/import works:
+  $ newrepo
+  $ echo "A" | drawdag
+  $ HGIDENTITY=sl hg export -r $A | hg import -
+  applying patch from stdin
+  $ hg show
+  commit:      426bada5c675
+  user:        test
+  date:        Thu Jan 01 00:00:00 1970 +0000
+  files:       A
+  description:
+  A
+  
+  
+  diff -r 000000000000 -r 426bada5c675 A
+  --- /dev/null	Thu Jan 01 00:00:00 1970 +0000
+  +++ b/A	Thu Jan 01 00:00:00 1970 +0000
+  @@ -0,0 +1,1 @@
+  +A
+  \ No newline at end of file

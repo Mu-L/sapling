@@ -11,8 +11,7 @@ Create repo a:
 
   $ hg init a
   $ cd a
-  $ setconfig extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  $ setconfig treemanifest.server=True ui.allowemptycommit=True
+  $ setconfig ui.allowemptycommit=True
   $ hg commit -qm "A"
   $ hg commit -qm "B"
   $ hg commit -qm "C"

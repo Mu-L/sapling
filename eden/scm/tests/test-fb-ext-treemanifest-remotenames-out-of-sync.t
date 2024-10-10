@@ -1,6 +1,5 @@
 #chg-compatible
 #debugruntest-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
 
@@ -8,21 +7,13 @@
   > [extensions]
   > pushrebase=
   > remotenames=
-  > treemanifest=
-  > [treemanifest]
-  > sendtrees=True
-  > treeonly=True
   > EOF
 
 # Setup repo
 
-  $ hg init repo --config remotefilelog.reponame=repo --config extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
+  $ hg init repo --config remotefilelog.reponame=repo
   $ cd repo
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [treemanifest]
-  > server=True
   > [remotefilelog]
   > reponame=repo
   > server=True
@@ -52,7 +43,7 @@
 
   $ cd client_concurrent
   $ setconfig remotefilelog.cachepath=$ROOTDIR/cache_client_concurrent
-  $ setconfig treemanifest.pullprefetchrevs=master treemanifest.sendtrees=True treemanifest.treeonly=True
+  $ setconfig treemanifest.pullprefetchrevs=master
   $ echo x >> y
   $ hg commit -qAm x3
   $ hg push --to master
@@ -76,7 +67,7 @@
 
   $ cd client
   $ setconfig remotefilelog.cachepath=$ROOTDIR/cache_client
-  $ setconfig treemanifest.pullprefetchrevs=master treemanifest.sendtrees=True treemanifest.treeonly=True
+  $ setconfig treemanifest.pullprefetchrevs=master
   $ setconfig paths.default=ssh://user@dummy/repo?read_copy
   $ setconfig paths.default-push=ssh://user@dummy/repo?write
   $ hg path
@@ -101,6 +92,9 @@
 # Verify that a push succeeds because the read will go to the write server
 # instead of the out-of-date read server
 
+FIXME: reads through SLAPI do _not_ respect default-push during a push.
+This is one symptom of the general issue of the SLAPI URL not being
+derived from the "path" (be it paths.default or paths.default-push).
   $ hg push --to master
   pushing rev e68715a0fc4c to destination ssh://user@dummy/repo?write bookmark master
   searching for changes
@@ -111,13 +105,11 @@
   remote: pushing 1 changeset:
   remote:     e68715a0fc4c  x4
   remote: 2 new changesets from the server will be downloaded
-  fetching tree '' eda1f7bdb1c764a4e03857a25db3d6cad9d25088
-  1 trees fetched over 0.00s
-  1 files updated, 0 files merged, 0 files removed, 0 files unresolved
+  abort: "unable to find the following nodes locally or on the server: ('', eda1f7bdb1c764a4e03857a25db3d6cad9d25088)"
+  (commit: 12f14bedbd28d5166ae298499d66ee31858b6d01)
+  [255]
   $ hg log -r .
-  commit:      12f14bedbd28
-  bookmark:    default/master
-  hoistedname: master
+  commit:      e68715a0fc4c
   user:        test
   date:        Thu Jan 01 00:00:00 1970 +0000
   summary:     x4

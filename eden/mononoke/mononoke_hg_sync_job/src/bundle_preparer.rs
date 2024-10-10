@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Error;
 use bookmarks::BookmarkKey;
@@ -52,7 +53,7 @@ use crate::Repo;
 
 pub struct BundlePreparer {
     repo: Repo,
-    base_retry_delay_ms: u64,
+    base_retry_delay: Duration,
     retry_num: usize,
     filenode_verifier: FilenodeVerifier,
     bookmark_regex_force_lfs: Option<Regex>,
@@ -62,7 +63,7 @@ pub struct BundlePreparer {
 impl BundlePreparer {
     pub async fn new_generate_bundles(
         repo: Repo,
-        base_retry_delay_ms: u64,
+        base_retry_delay: Duration,
         retry_num: usize,
         filenode_verifier: FilenodeVerifier,
         bookmark_regex_force_lfs: Option<Regex>,
@@ -70,7 +71,7 @@ impl BundlePreparer {
     ) -> Result<BundlePreparer, Error> {
         Ok(BundlePreparer {
             repo,
-            base_retry_delay_ms,
+            base_retry_delay,
             retry_num,
             filenode_verifier,
             bookmark_regex_force_lfs,
@@ -160,7 +161,7 @@ impl BundlePreparer {
     ) -> BoxFuture<'static, Result<CombinedBookmarkUpdateLogEntry, Error>> {
         cloned!(self.repo, self.push_vars, self.filenode_verifier);
 
-        let base_retry_delay_ms = self.base_retry_delay_ms;
+        let base_retry_delay = self.base_retry_delay;
         let retry_num = self.retry_num;
         async move {
             let entry_ids = batch
@@ -200,7 +201,7 @@ impl BundlePreparer {
                         )
                     }
                 },
-                base_retry_delay_ms,
+                base_retry_delay,
                 retry_num,
             )
             .map_ok(|(res, _)| res);
@@ -538,6 +539,7 @@ mod test {
     use fbinit::FacebookInit;
     use filestore::FilestoreConfig;
     use maplit::hashmap;
+    use mononoke_macros::mononoke;
     use mononoke_types::RepositoryId;
     use repo_blobstore::RepoBlobstore;
     use repo_derived_data::RepoDerivedData;
@@ -574,7 +576,7 @@ mod test {
         pub repo_identity: RepoIdentity,
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_simple(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -620,7 +622,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_all_in_one_batch(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -662,7 +664,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_commit_limit(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -709,7 +711,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_different_bookmarks(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -766,7 +768,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_non_forward_move(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -818,7 +820,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_split_in_batches_weird_move(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -864,7 +866,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_maybe_adjust_batch(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;

@@ -44,6 +44,7 @@ use crate::iddagstore::IdDagStore;
 use crate::idmap::CoreMemIdMap;
 use crate::idmap::IdMapAssignHead;
 use crate::idmap::IdMapWrite;
+use crate::lifecycle::LifecycleId;
 use crate::ops::CheckIntegrity;
 use crate::ops::DagAddHeads;
 use crate::ops::DagAlgorithm;
@@ -154,7 +155,8 @@ where
     /// confirmed the vertexes are outside the master group.
     missing_vertexes_confirmed_by_remote: Arc<RwLock<HashSet<Vertex>>>,
 
-    /// Internal stats (for testing).
+    /// Internal stats (for testing and debugging).
+    lifecycle_id: LifecycleId,
     pub(crate) internal_stats: DagInternalStats,
 }
 
@@ -193,7 +195,9 @@ where
 {
     /// Set the content of the VIRTUAL group that survives reloading.
     ///
-    /// `items` is a list of vertexes and parents.
+    /// `items` is a list of vertexes and parents. The vertexes MUST be unique
+    /// and not already exist in non-VIRTUAL groups. This assumption is used
+    /// as an optimization to avoid remote lookups.
     ///
     /// Existing content of the VIRTUAL group will be cleared before inserting
     /// `items`. So this API feels declarative. As a comparison, `add_heads`
@@ -207,6 +211,7 @@ where
         &mut self,
         items: Option<Vec<(Vertex, Vec<Vertex>)>>,
     ) -> Result<()> {
+        tracing::debug!(target: "dag::set_managed_virtual_group", lifecycle_id=?self.lifecycle_id, ?items);
         self.managed_virtual_group = items.map(|items| {
             // Calculate `Parents` and `VertexListWithOptions` so they can be
             // used in `maybe_recreate_virtual_group`.
@@ -246,6 +251,15 @@ where
             self.clear_virtual_group().await?;
             let parents = &maintained_virtual_group.0;
             let head_opts = &maintained_virtual_group.1;
+            // With the assumption (see set_managed_virtual_group docstring) that VIRTUAL group
+            // only has unique vertexes, we can pre-populate the negative cache to avoid remote
+            // lookup.
+            {
+                let mut cache = self.missing_vertexes_confirmed_by_remote.write().unwrap();
+                for v in head_opts.vertexes() {
+                    cache.insert(v);
+                }
+            }
             // Insert to the VIRTUAL group, using the a precalculated insertion order.
             self.add_heads(parents.as_ref(), head_opts).await?;
         }
@@ -274,6 +288,7 @@ where
                 &self.pending_heads.vertexes(),
             ));
         }
+        tracing::debug!(target: "dag::add_heads_and_flush", lifecycle_id=?self.lifecycle_id, ?heads);
 
         // Clear the VIRTUAL group. Their parents might have changed in incompatible ways.
         self.clear_virtual_group().await?;
@@ -332,6 +347,7 @@ where
     /// is empty, then `VertexOptions` provided to `add_head` will be
     /// used.
     async fn flush(&mut self, heads: &VertexListWithOptions) -> Result<()> {
+        tracing::debug!(target: "dag::flush", lifecycle_id=?self.lifecycle_id, ?heads);
         // Sanity check.
         for result in self.vertex_id_batch(&heads.vertexes()).await? {
             result?;
@@ -516,11 +532,22 @@ where
         parents: &dyn Parents,
         heads: &VertexListWithOptions,
     ) -> Result<bool> {
-        self.invalidate_snapshot();
-
+        tracing::debug!(target: "dag::add_heads", lifecycle_id=?self.lifecycle_id, ?heads);
         // Populate vertex negative cache to reduce round-trips doing remote lookups.
-        self.populate_missing_vertexes_for_add_heads(parents, &heads.vertexes())
-            .await?;
+        // Attention: this might have side effect recreating the snapshots!
+        // Skip this optimization for virtual group add_heads since the virutal set
+        // is usually small and related tracing logs can be noisy.
+        if heads.min_desired_group().unwrap_or(Group::VIRTUAL) < Group::VIRTUAL {
+            self.populate_missing_vertexes_for_add_heads(parents, &heads.vertexes())
+                .await?;
+        }
+
+        // When heads are not VIRTUAL, invalidate_snapshot() helps performance, is optional for
+        // correctness. invalidate_snapshot() decreases VerLink ref count so VerLink::bump() can
+        // use a fast path mutating in place. When heads are VIRTUAL, invalidate_snapshot() is
+        // necessary for correctness, since the versions (VerLinks) won't be bumped to avoid
+        // excessive cache invalidation.
+        self.invalidate_snapshot();
 
         // This API takes `heads` with "desired_group"s. When a head already exists in a lower
         // group than its "desired_group" we need to remove the higher-group id and re-assign
@@ -624,6 +651,7 @@ where
                 &self.pending_heads.vertexes(),
             ));
         }
+        tracing::debug!(target: "dag::strip", lifecycle_id=?self.lifecycle_id, ?set);
 
         // Do strip with a lock to avoid cases where descendants are added to
         // the stripped segments.
@@ -633,6 +661,7 @@ where
 
         new.strip_with_lock(set, &map_lock).await?;
         new.persist(lock, map_lock, dag_lock)?;
+        new.maybe_recreate_virtual_group().await?;
 
         *self = new;
         Ok(())
@@ -695,9 +724,6 @@ where
 
         // Snapshot cannot be reused.
         self.invalidate_snapshot();
-
-        // Re-create the VIRTUAL group content.
-        self.maybe_recreate_virtual_group().await?;
 
         Ok(())
     }
@@ -1335,6 +1361,7 @@ where
                     missing_vertexes_confirmed_by_remote: Arc::clone(
                         &self.missing_vertexes_confirmed_by_remote,
                     ),
+                    lifecycle_id: self.lifecycle_id.clone(),
                     internal_stats: Default::default(),
                 };
                 let result = Arc::new(cloned);
@@ -1887,6 +1914,7 @@ where
     }
 
     /// Returns a set that covers all vertexes tracked by this DAG.
+    /// Excluding the virtual group.
     async fn all(&self) -> Result<Set> {
         let spans = self.dag().all()?;
         let result = Set::from_id_set_dag(spans, self)?;
@@ -1899,6 +1927,13 @@ where
         let spans = self.dag().master_group()?;
         let result = Set::from_id_set_dag(spans, self)?;
         result.hints().add_flags(Flags::ANCESTORS);
+        Ok(result)
+    }
+
+    /// Returns a set that covers all vertexes in the virtual group.
+    async fn virtual_group(&self) -> Result<Set> {
+        let spans = self.dag().all_ids_in_groups(&[Group::VIRTUAL])?;
+        let result = Set::from_id_set_dag(spans, self)?;
         Ok(result)
     }
 

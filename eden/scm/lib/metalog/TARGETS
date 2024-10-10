@@ -1,5 +1,4 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("sapling")
 
@@ -22,6 +21,7 @@ rust_library(
         "fbsource//third-party/rust:serde",
         "fbsource//third-party/rust:serde_json",
         "fbsource//third-party/rust:tracing",
+        "//eden/scm/lib/hgtime:hgtime",
         "//eden/scm/lib/indexedlog:indexedlog",
         "//eden/scm/lib/mincode:mincode",
         "//eden/scm/lib/minibytes:minibytes",

@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use anyhow::format_err;
 use anyhow::Error;
-use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use cmdlib::args;
 use context::CoreContext;
@@ -26,13 +25,14 @@ use repo_factory::RepoFactoryBuilder;
 use slog::debug;
 use slog::Logger;
 use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SqlSyncedCommitMappingBuilder;
 
 // The function retrieves the HgFileNodeId of a file, based on path and rev.
 // If the path is not valid an error is expected.
 pub async fn get_file_nodes(
     ctx: CoreContext,
     logger: Logger,
-    repo: &BlobRepo,
+    repo: &impl RepoBlobstoreRef,
     cs_id: HgChangesetId,
     paths: Vec<NonRootMPath>,
 ) -> Result<Vec<HgFileNodeId>, Error> {
@@ -90,12 +90,14 @@ where
     // It'll be nice to verify it
     let (source_repo, target_repo) = try_join!(source_repo, target_repo)?;
 
-    let mapping = args::not_shardmanager_compatible::open_source_sql::<SqlSyncedCommitMapping>(
-        fb,
-        config_store,
-        matches,
-    )
-    .await?;
+    let mapping =
+        args::not_shardmanager_compatible::open_source_sql::<SqlSyncedCommitMappingBuilder>(
+            fb,
+            config_store,
+            matches,
+        )
+        .await?
+        .build(matches.environment().rendezvous_options);
 
     Ok((source_repo, target_repo, mapping))
 }

@@ -6,15 +6,11 @@
 
   $ . "${TEST_FIXTURES}/library.sh"
   $ REPOTYPE="blob_files"
-  $ ENABLED_DERIVED_DATA='["git_commits", "git_trees", "git_delta_manifests_v2", "unodes", "filenodes", "hgchangesets"]' setup_common_config $REPOTYPE
+  $ setup_common_config $REPOTYPE
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ BUNDLE_PATH="${TESTTMP}/repo_bundle.bundle"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
 # Setup git repository
   $ mkdir -p "$GIT_REPO_ORIGIN"
@@ -73,7 +69,7 @@
   $ git log --pretty=format:"%h %an %s %D" > $TESTTMP/new_repo_log
   $ diff -w $TESTTMP/new_repo_log $TESTTMP/repo_log
   > d46416c mononoke यह एक और परीक्षा है HEAD -> master, tag: empty_tag
-  $TESTTMP.sh: line 107: d46416c: command not found
+  $TESTTMP.sh: line *: d46416c: command not found (glob)
   [127]
 
 # Print out the log to ensure the commit messages have carried over without data loss

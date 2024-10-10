@@ -8,11 +8,14 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
+use anyhow::bail;
 use anyhow::Result;
-use gitcompat::rungit::RunGitOptions;
+use gitcompat::rungit::RepoGit;
+use gitcompat::GitCmd;
 use types::workingcopy_client::CheckoutConflict;
 use types::workingcopy_client::CheckoutMode;
 use types::workingcopy_client::FileStatus;
+use types::workingcopy_client::ProgressInfo;
 use types::HgId;
 use types::RepoPathBuf;
 
@@ -34,6 +37,11 @@ pub trait WorkingCopyClient: Send + Sync {
     /// Set parents (tracked by the external program) without changing the working copy content.
     /// This is used by commands like `reset -k`.
     fn set_parents(&self, p1: HgId, p2: Option<HgId>, p1_tree: HgId) -> Result<()>;
+
+    /// Progress as reported by the external program (in reported units of
+    /// progress, not percentage).
+    /// When a checkout is not ongoing it returns None.
+    fn checkout_progress(&self) -> Result<Option<ProgressInfo>>;
 
     /// Checkout. Set parents and update working copy content.
     fn checkout(
@@ -73,12 +81,16 @@ impl WorkingCopyClient for edenfs_client::EdenFsClient {
         edenfs_client::EdenFsClient::checkout(self, node, tree_node, mode)
     }
 
+    fn checkout_progress(&self) -> Result<Option<ProgressInfo>> {
+        edenfs_client::EdenFsClient::checkout_progress(self)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self as &dyn Any
     }
 }
 
-impl WorkingCopyClient for RunGitOptions {
+impl WorkingCopyClient for RepoGit {
     fn get_status(
         &self,
         node: HgId,
@@ -131,14 +143,21 @@ impl WorkingCopyClient for RunGitOptions {
         Ok(changes)
     }
 
-    fn set_parents(&self, p1: HgId, p2: Option<HgId>, p1_tree: HgId) -> Result<()> {
+    fn set_parents(&self, p1: HgId, p2: Option<HgId>, mut p1_tree: HgId) -> Result<()> {
         tracing::debug!(?p1, ?p2, ?p1_tree, "set_parents");
         // TODO: What to do with p2?
         if self.resolve_head()? != p1 {
             let p1_hex = p1.to_hex();
             self.call("update-ref", &["HEAD", &p1_hex])?;
-            let p1_tree_hex = p1_tree.to_hex();
-            self.call("read-tree", &["--no-recurse-submodules", &p1_tree_hex])?;
+            if !p1_tree.is_wdir() {
+                if p1_tree.is_null() {
+                    // Git's empty tree.
+                    // git hash-object -t tree /dev/null
+                    p1_tree = HgId::from_hex(b"4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap();
+                }
+                let p1_tree_hex = p1_tree.to_hex();
+                self.call("read-tree", &["--no-recurse-submodules", &p1_tree_hex])?;
+            }
         }
         Ok(())
     }
@@ -151,21 +170,22 @@ impl WorkingCopyClient for RunGitOptions {
     ) -> Result<Vec<CheckoutConflict>> {
         tracing::debug!(p1=?node, p1_tree=?tree_node, mode=?mode, "checkout");
         // TODO: Conflicts are not reported properly. Are they needed?
+        let flags = match mode {
+            CheckoutMode::Normal => "-d",
+            CheckoutMode::Force => "-fd",
+            CheckoutMode::DryRun => return Ok(Vec::new()),
+        };
+
         let hex = node.to_hex();
-        match mode {
-            CheckoutMode::Normal => {
-                self.run("checkout", &["-d", "--recurse-submodules", &hex])?;
-                Ok(Vec::new())
-            }
-            CheckoutMode::Force => {
-                self.run("checkout", &["-f", "-d", "--recurse-submodules", &hex])?;
-                Ok(Vec::new())
-            }
-            CheckoutMode::DryRun => Ok(Vec::new()),
-        }
+        self.run("checkout", &[flags, "--recurse-submodules", &hex])?;
+        Ok(Vec::new())
     }
 
     fn as_any(&self) -> &dyn Any {
         self as &dyn Any
+    }
+
+    fn checkout_progress(&self) -> Result<Option<ProgressInfo>> {
+        bail!("Progress for Git checkout not yet implemented!");
     }
 }

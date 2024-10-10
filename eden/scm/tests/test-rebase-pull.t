@@ -3,7 +3,6 @@
 #require no-eden
 
 # coding=utf-8
-#inprocess-hg-incompatible
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # Copyright (c) Mercurial Contributors.
@@ -12,7 +11,6 @@
 # GNU General Public License version 2 or any later version.
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
   $ cat >> $HGRCPATH << 'EOF'
   > [extensions]
   > rebase=
@@ -36,11 +34,11 @@
   $ cd ..
 
   $ hg clone --no-shallow a b
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ hg clone --no-shallow a c
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ cd b

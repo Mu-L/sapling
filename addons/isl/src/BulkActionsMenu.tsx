@@ -14,8 +14,8 @@ import {T} from './i18n';
 import {Button} from 'isl-components/Button';
 import {Icon} from 'isl-components/Icon';
 import {Kbd} from 'isl-components/Kbd';
+import {KeyCode, Modifier} from 'isl-components/KeyboardShortcuts';
 import {Tooltip} from 'isl-components/Tooltip';
-import {KeyCode, Modifier} from 'shared/KeyboardShortcuts';
 
 import './BulkActionsMenu.css';
 
@@ -32,7 +32,7 @@ export function BulkActionsMenu() {
           Bulk Actions ($shortcut)
         </T>
       }
-      additionalToggles={additionalToggles}>
+      additionalToggles={additionalToggles.asEventTarget()}>
       <Button icon data-testid="bulk-actions-button">
         <Icon icon="run-all" />
       </Button>

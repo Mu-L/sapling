@@ -1,6 +1,5 @@
 load("@fbcode_macros//build_defs:cpp_python_extension.bzl", "cpp_python_extension")
 load("@fbcode_macros//build_defs:python_library.bzl", "python_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("scm_client_infra")
 
@@ -16,6 +15,7 @@ python_library(
         ),
     ],
     deps = [
+        "fbcode//fb303/thrift:fb303_core-py",
         "fbsource//third-party/pypi/pexpect:pexpect",
         "//eden/fs/cli:lib",
         "//eden/fs/cli:proc_utils",

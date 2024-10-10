@@ -31,6 +31,9 @@ pub struct NoExecutableBinariesConfig {
     illegal_executable_binary_message: String,
     /// Allow-list all files under any of these paths
     allow_list_paths: Option<Vec<String>>,
+    /// Allow-list specific files that might be present in multiple paths
+    /// by adding their Sha256 digest and size to this list.
+    allow_list_files: Option<Vec<(String, u64)>>,
 }
 
 /// Hook to block commits containing files with illegal name patterns
@@ -72,20 +75,34 @@ impl FileHook for NoExecutableBinariesHook {
                 }
             }
         }
-        let content_id = match change {
+        let (content_id, size) = match change {
             Some(basic_fc) => {
                 if basic_fc.file_type() != FileType::Executable {
                     // Not an executable, so passes hook right away
                     return Ok(HookExecution::Accepted);
                 };
-                basic_fc.content_id()
+                (basic_fc.content_id(), basic_fc.size())
             }
             _ => {
                 // File change is not committed, so passes hook
                 return Ok(HookExecution::Accepted);
             }
         };
+
         let content_metadata = content_manager.get_file_metadata(ctx, content_id).await?;
+
+        let is_allow_listed_file =
+            self.config
+                .allow_list_files
+                .as_ref()
+                .map_or(false, |allow_listed_files| {
+                    allow_listed_files.contains(&(content_metadata.sha256.to_string(), size))
+                });
+
+        if is_allow_listed_file {
+            // Allow-listed file
+            return Ok(HookExecution::Accepted);
+        }
 
         if content_metadata.is_binary {
             return Ok(HookExecution::Rejected(HookRejectionInfo::new_long(
@@ -112,6 +129,7 @@ mod test {
     use fbinit::FacebookInit;
     use maplit::hashmap;
     use maplit::hashset;
+    use mononoke_macros::mononoke;
     use mononoke_types::BonsaiChangeset;
     use repo_hook_file_content_provider::RepoHookStateProvider;
     use tests_utils::BasicTestRepo;
@@ -125,6 +143,10 @@ mod test {
             illegal_executable_binary_message: "Executable file '${filename}' can't be committed."
                 .to_string(),
             allow_list_paths: Some(vec!["some_dir/".to_string()]),
+            allow_list_files: Some(vec![(
+                "560a153deec1d4cda8481e96756e53c466f3c8eb2dabaf93f9e167c986bb77c4".to_string(),
+                3,
+            )]),
         }
     }
 
@@ -182,7 +204,7 @@ mod test {
     }
 
     /// Test that the hook rejects an executable binary file
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_reject_single_executable_binary(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -210,7 +232,7 @@ mod test {
     }
 
     /// Test that the hook rejects multiple executable binaries
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_reject_multiple_executable_binaries(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -245,7 +267,7 @@ mod test {
     }
 
     /// That that non-executable binaries pass
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_non_executable_binaries_pass(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -269,7 +291,7 @@ mod test {
     }
 
     /// That that executable scripts pass
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_executable_scripts_pass(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -293,7 +315,7 @@ mod test {
     }
 
     /// That that changes without executable file types are still allowed
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_changes_without_binaries_pass(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -317,7 +339,7 @@ mod test {
     }
 
     /// Test that the hook allows executable binaries under allow-listed paths
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_executable_binaries_under_allow_listed_path_pass(fb: FacebookInit) -> Result<()> {
         let (ctx, repo, content_manager, hook) = test_setup(fb).await;
 
@@ -338,6 +360,37 @@ mod test {
 
         let valid_files: HashSet<&str> =
             hashset! {"some_dir/exec", "foo bar/baz", "bar/baz/hoo.txt" };
+
+        let illegal_files: HashMap<&str, &str> = hashmap! {};
+
+        assert_hook_execution(ctx, content_manager, bcs, hook, valid_files, illegal_files).await
+    }
+
+    /// Test that the hook allows executable binaries allow-listed by sha256 and
+    /// size, regardless of its path.
+    #[mononoke::fbinit_test]
+    async fn test_executable_binaries_allow_listed_by_sha256_and_size_pass(
+        fb: FacebookInit,
+    ) -> Result<()> {
+        let (ctx, repo, content_manager, hook) = test_setup(fb).await;
+
+        borrowed!(ctx, repo);
+
+        let cs_id = CreateCommitContext::new_root(ctx, repo)
+            .add_file_with_type(
+                "random_dir/always_allowed_file",
+                vec![b'\0', 0x8D, 0x5F],
+                FileType::Executable,
+            )
+            .add_file("bar/baz/hoo.txt", "a")
+            .add_file("foo bar/baz", "b")
+            .commit()
+            .await?;
+
+        let bcs = cs_id.load(ctx, &repo.repo_blobstore).await?;
+
+        let valid_files: HashSet<&str> =
+            hashset! {"random_dir/always_allowed_file", "foo bar/baz", "bar/baz/hoo.txt" };
 
         let illegal_files: HashMap<&str, &str> = hashmap! {};
 

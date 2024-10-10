@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "mononoke_api_hg",
@@ -11,6 +10,7 @@ rust_library(
     test_deps = [
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/fbinit:fbinit-tokio",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/repo_factory:test_repo_factory",
         "//eden/mononoke/tests/fixtures:fixtures",
         "//eden/mononoke/tests/utils:tests_utils",
@@ -22,7 +22,8 @@ rust_library(
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:futures-util",
         "fbsource//third-party/rust:slog",
-        "//eden/mononoke/blobrepo:blobrepo",
+        "//common/rust/shed/borrowed:borrowed",
+        "//common/rust/shed/cloned:cloned",
         "//eden/mononoke/blobrepo:blobrepo_hg",
         "//eden/mononoke/blobrepo:repo_blobstore",
         "//eden/mononoke/blobstore:blobstore",
@@ -30,11 +31,11 @@ rust_library(
         "//eden/mononoke/bonsai_hg_mapping:bonsai_hg_mapping",
         "//eden/mononoke/bookmarks:bookmarks",
         "//eden/mononoke/commit_cloud:commit_cloud",
+        "//eden/mononoke/commit_cloud/types:commit_cloud_types",
         "//eden/mononoke/derived_data/mercurial_derivation:mercurial_derivation",
         "//eden/mononoke/features/repo_update_logger:repo_update_logger",
         "//eden/mononoke/filestore:filestore",
         "//eden/mononoke/hgproto:hgproto",
-        "//eden/mononoke/manifest:manifest",
         "//eden/mononoke/mercurial:mercurial_mutation",
         "//eden/mononoke/mercurial:mercurial_types",
         "//eden/mononoke/metaconfig:metaconfig_types",

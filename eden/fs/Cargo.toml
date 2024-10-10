@@ -1,15 +1,27 @@
 [patch.crates-io]
 abomonation = { git = "https://github.com/markbt/abomonation", rev = "0f43346d2afa2aedc64d61f3f4273e8d1e454642" }
 base64urlsafedata = { git = "https://github.com/kanidm/webauthn-rs.git", rev = "d278c56adfa39a0723c79bdcd461644194bc5138" }
-bindgen = { git = "https://github.com/rust-lang/rust-bindgen", rev = "7ea3f36d58399204a6ab81a38be14c3c363c296b" }
-bindgen-cli = { git = "https://github.com/rust-lang/rust-bindgen", rev = "7ea3f36d58399204a6ab81a38be14c3c363c296b" }
-cxx = { package = "cxx", git = "https://github.com/facebookexperimental/cxx.git", rev = "cf9ae5500db7d31292d12a6b0728b0f6a1d7b9c9" }
-cxx-build = { package = "cxx-build", git = "https://github.com/facebookexperimental/cxx.git", rev = "cf9ae5500db7d31292d12a6b0728b0f6a1d7b9c9" }
+cbindgen = { git = "https://github.com/jsgf/cbindgen.git", rev = "e522aa9c35a9235f9e8ef03b1c54e41ee4cfafbd" }
+cxx = { package = "cxx", git = "https://github.com/facebookexperimental/cxx.git", rev = "2ea39c564284a70fdc1793fd72c442433e5a2638" }
+cxx-build = { package = "cxx-build", git = "https://github.com/facebookexperimental/cxx.git", rev = "2ea39c564284a70fdc1793fd72c442433e5a2638" }
 displaydoc = { git = "https://github.com/yaahc/displaydoc", rev = "7dc6e324b1788a6b7fb9f3a1953c512923a3e9f0" }
 graphql-parser = { git = "https://github.com/graphql-rust//graphql-parser", rev = "8d76425d83c40670570cc325f57c730262f07456" }
 lru-disk-cache = { git = "https://github.com/mozilla/sccache", rev = "fdbf843d174c6796d736b2b61dab0297670390f8" }
 perf-event = { version = "0.4", git = "https://github.com/krallin/perf-event.git", rev = "86224a9bc025d5d19f719542f27c8c629a08b167" }
 perf-event-open-sys = { version = "4.0", git = "https://github.com/krallin/perf-event.git", rev = "86224a9bc025d5d19f719542f27c8c629a08b167" }
+pingora-cache = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-core = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-error = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-header-serde = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-http = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-lru = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-openssl = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-pool = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-proxy = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-runtime = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+pingora-timeout = { git = "https://github.com/cloudflare/pingora.git", rev = "aa37d5448746e80f871c444cf6a6e2e1c599b5fd" }
+plexi-core = { git = "https://github.com/haochenuw/plexi", rev = "a0326d9802a594ca5382b075620135607e1cdb23" }
+pyo3-build-config = { package = "pyo3-build-config", version = "0.21.2", git = "https://github.com/fbsource/pyo3", rev = "ff94a09031cc29d88d57ae3c846e5b871497aeb9" }
 quickcheck = { git = "https://github.com/jakoschiko/quickcheck", rev = "6ecdf5bb4b0132ce66670b4d46453aa022ea892c" }
 riscv = { git = "https://github.com/rust-embedded/riscv.git", rev = "28e9b02d45827055188be0dbd1f800ba64bc75e6" }
 

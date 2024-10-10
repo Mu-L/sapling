@@ -18,9 +18,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo 1 > 1 && hg addremove && hg ci -m 1
   adding 1
   $ hg up null
@@ -30,10 +29,9 @@ setup repo
 
 Clone the repo
   $ cd ..
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
-  $ cd ../repo-hg
+  $ cd ../repo
 
 Create merge commit with rename
   $ hg up -q "min(all())"
@@ -53,19 +51,18 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
   $ cd repo2
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  adding remote bookmark master_bookmark
-  $ hgmn up 2
+  $ hg up 2
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ hg st --change . -C
   A 2

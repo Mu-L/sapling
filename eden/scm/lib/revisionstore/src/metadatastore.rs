@@ -9,11 +9,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::bail;
 use anyhow::format_err;
 use anyhow::Result;
-use configmodel::convert::ByteCount;
 use configmodel::Config;
-use configmodel::ConfigExt;
 use types::Key;
 use types::NodeInfo;
 
@@ -23,17 +22,13 @@ use crate::historystore::RemoteHistoryStore;
 use crate::indexedloghistorystore::IndexedLogHgIdHistoryStore;
 use crate::indexedlogutil::StoreType;
 use crate::localstore::LocalStore;
-use crate::packstore::CorruptionPolicy;
-use crate::packstore::MutableHistoryPackStore;
 use crate::remotestore::HgIdRemoteStore;
-use crate::repack::RepackLocation;
 use crate::types::StoreKey;
 use crate::unionhistorystore::UnionHgIdHistoryStore;
-use crate::util::get_cache_packs_path;
 use crate::util::get_cache_path;
 use crate::util::get_indexedloghistorystore_path;
 use crate::util::get_local_path;
-use crate::util::get_packs_path;
+use crate::HistoryStore;
 
 /// A `MetadataStore` aggregate all the local and remote stores and expose them as one. Both local and
 /// remote stores can be queried and accessed via the `HgIdHistoryStore` trait. The local store can also
@@ -41,8 +36,8 @@ use crate::util::get_packs_path;
 /// commit data.
 pub struct MetadataStore {
     historystore: UnionHgIdHistoryStore<Arc<dyn HgIdHistoryStore>>,
-    local_mutablehistorystore: Option<Arc<dyn HgIdMutableHistoryStore>>,
-    shared_mutablehistorystore: Arc<dyn HgIdMutableHistoryStore>,
+    local_mutablehistorystore: Option<Arc<IndexedLogHgIdHistoryStore>>,
+    shared_mutablehistorystore: Arc<IndexedLogHgIdHistoryStore>,
     remote_store: Option<Arc<dyn RemoteHistoryStore>>,
 }
 
@@ -88,32 +83,6 @@ impl MetadataStore {
     }
 }
 
-// Repack specific methods, not to be used directly but by the repack code.
-impl MetadataStore {
-    pub(crate) fn add_pending(
-        &self,
-        key: &Key,
-        info: NodeInfo,
-        location: RepackLocation,
-    ) -> Result<()> {
-        match location {
-            RepackLocation::Local => self.add(key, &info),
-            RepackLocation::Shared => self.shared_mutablehistorystore.add(key, &info),
-        }
-    }
-
-    pub(crate) fn commit_pending(&self, location: RepackLocation) -> Result<Option<Vec<PathBuf>>> {
-        match location {
-            RepackLocation::Local => self.flush(),
-            RepackLocation::Shared => self.shared_mutablehistorystore.flush(),
-        }
-    }
-
-    pub fn get_shared_mutable(&self) -> Arc<dyn HgIdMutableHistoryStore> {
-        self.shared_mutablehistorystore.clone()
-    }
-}
-
 impl HgIdHistoryStore for MetadataStore {
     fn get_node_info(&self, key: &Key) -> Result<Option<NodeInfo>> {
         self.historystore.get_node_info(key)
@@ -137,6 +106,23 @@ impl RemoteHistoryStore for MetadataStore {
             // There is no remote store, let's pretend everything is fine.
             Ok(())
         }
+    }
+}
+
+impl HistoryStore for MetadataStore {
+    fn with_shared_only(&self) -> Arc<dyn HistoryStore> {
+        let mut historystore: UnionHgIdHistoryStore<Arc<dyn HgIdHistoryStore>> =
+            UnionHgIdHistoryStore::new();
+        historystore.add(self.shared_mutablehistorystore.clone());
+        if let Some(remote) = &self.remote_store {
+            historystore.add(Arc::new(remote.clone()));
+        }
+        Arc::new(Self {
+            historystore,
+            shared_mutablehistorystore: self.shared_mutablehistorystore.clone(),
+            remote_store: self.remote_store.clone(),
+            local_mutablehistorystore: None,
+        })
     }
 }
 
@@ -224,29 +210,18 @@ impl<'a> MetadataStoreBuilder<'a> {
             .map(|p| get_local_path(p.clone(), &self.suffix))
             .transpose()?;
         let cache_path = get_cache_path(self.config, &self.suffix)?;
-        let max_pending: u64 = self
-            .config
-            .get_or("packs", "maxhistorypending", || 10000000)?;
-        let max_bytes = self
-            .config
-            .get_opt::<ByteCount>("packs", "maxhistorybytes")?
-            .map(|v| v.value());
 
-        let cache_packs_path = get_cache_packs_path(self.config, &self.suffix)?;
-        let shared_pack_store = Arc::new(MutableHistoryPackStore::new(
-            cache_packs_path,
-            CorruptionPolicy::REMOVE,
-            max_pending,
-            max_bytes,
-        )?);
         let mut historystore: UnionHgIdHistoryStore<Arc<dyn HgIdHistoryStore>> =
             UnionHgIdHistoryStore::new();
 
-        let shared_indexedloghistorystore = Arc::new(IndexedLogHgIdHistoryStore::new(
-            get_indexedloghistorystore_path(cache_path)?,
-            &self.config,
-            StoreType::Rotated,
-        )?);
+        let shared_indexedloghistorystore = match cache_path {
+            Some(cache_path) => Some(Arc::new(IndexedLogHgIdHistoryStore::new(
+                get_indexedloghistorystore_path(cache_path)?,
+                &self.config,
+                StoreType::Rotated,
+            )?)),
+            None => None,
+        };
 
         // The shared store should precede the local one for 2 reasons:
         //  - It is expected that the number of blobs and the number of requests satisfied by the
@@ -254,48 +229,26 @@ impl<'a> MetadataStoreBuilder<'a> {
         //  - When pushing changes on a pushrebase server, the local linknode will become
         //    incorrect, future fetches will put that change in the shared cache where the linknode
         //    will be correct.
-        let primary: Arc<dyn HgIdMutableHistoryStore> =
-            if self
-                .config
-                .get_or("remotefilelog", "write-hgcache-to-indexedlog", || true)?
-            {
-                // Put the indexedlog first, since recent data will have gone there.
-                historystore.add(shared_indexedloghistorystore.clone());
-                historystore.add(shared_pack_store);
-                shared_indexedloghistorystore
-            } else {
-                historystore.add(shared_pack_store.clone());
+        let primary: Option<Arc<IndexedLogHgIdHistoryStore>> = {
+            // Put the indexedlog first, since recent data will have gone there.
+            if let Some(shared_indexedloghistorystore) = shared_indexedloghistorystore.clone() {
                 historystore.add(shared_indexedloghistorystore);
-                shared_pack_store
-            };
+            }
+            shared_indexedloghistorystore
+        };
 
-        let local_mutablehistorystore: Option<Arc<dyn HgIdMutableHistoryStore>> =
-            if let Some(unsuffixed_local_path) = self.local_path {
-                let local_pack_store = Arc::new(MutableHistoryPackStore::new(
-                    get_packs_path(unsuffixed_local_path, &self.suffix)?,
-                    CorruptionPolicy::IGNORE,
-                    max_pending,
-                    None,
-                )?);
+        let local_mutablehistorystore: Option<Arc<IndexedLogHgIdHistoryStore>> =
+            if let Some(local_path) = local_path.as_ref() {
                 let local_indexedloghistorystore = Arc::new(IndexedLogHgIdHistoryStore::new(
-                    get_indexedloghistorystore_path(local_path.unwrap())?,
+                    get_indexedloghistorystore_path(local_path)?,
                     &self.config,
                     StoreType::Permanent,
                 )?);
-                let primary: Arc<dyn HgIdMutableHistoryStore> =
-                    if self
-                        .config
-                        .get_or("remotefilelog", "write-local-to-indexedlog", || true)?
-                    {
-                        // Put the indexedlog first, since recent data will have gone there.
-                        historystore.add(local_indexedloghistorystore.clone());
-                        historystore.add(local_pack_store);
-                        local_indexedloghistorystore
-                    } else {
-                        historystore.add(local_pack_store.clone());
-                        historystore.add(local_indexedloghistorystore);
-                        local_pack_store
-                    };
+                let primary: Arc<IndexedLogHgIdHistoryStore> = {
+                    // Put the indexedlog first, since recent data will have gone there.
+                    historystore.add(local_indexedloghistorystore.clone());
+                    local_indexedloghistorystore
+                };
 
                 Some(primary)
             } else {
@@ -307,6 +260,14 @@ impl<'a> MetadataStoreBuilder<'a> {
                 None
             };
 
+        let primary = match primary {
+            Some(primary) => primary,
+            None => match local_mutablehistorystore.as_ref() {
+                Some(local) => local.clone(),
+                None => bail!("MetadataStore requires at least one of local store or shared store"),
+            },
+        };
+
         let remote_store: Option<Arc<dyn RemoteHistoryStore>> =
             if let Some(remotestore) = self.remotestore {
                 let shared_store = primary.clone() as Arc<dyn HgIdMutableHistoryStore>;
@@ -317,12 +278,10 @@ impl<'a> MetadataStoreBuilder<'a> {
                 None
             };
 
-        let shared_mutablehistorystore: Arc<dyn HgIdMutableHistoryStore> = primary;
-
         Ok(MetadataStore {
             historystore,
             local_mutablehistorystore,
-            shared_mutablehistorystore,
+            shared_mutablehistorystore: primary,
             remote_store,
         })
     }
@@ -337,7 +296,6 @@ mod tests {
 
     use super::*;
     use crate::testutil::make_config;
-    use crate::testutil::setconfig;
     use crate::testutil::FakeHgIdRemoteStore;
 
     #[test]
@@ -581,13 +539,7 @@ mod tests {
     fn test_local_indexedlog_write() -> Result<()> {
         let cachedir = TempDir::new()?;
         let localdir = TempDir::new()?;
-        let mut config = make_config(&cachedir);
-        setconfig(
-            &mut config,
-            "remotefilelog",
-            "write-local-to-indexedlog",
-            "True",
-        );
+        let config = make_config(&cachedir);
 
         let store = MetadataStoreBuilder::new(&config)
             .local_path(&localdir)

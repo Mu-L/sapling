@@ -12,9 +12,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag << EOF
   > B
   > |
@@ -23,11 +22,11 @@ Initialize test repo.
 
 import testing repo
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ setup_mononoke_config
   $ start_and_wait_for_mononoke_server
 Check response.
-  $ sl debugapi -e ephemeralprepare -i None -i "['some', 'label']"
+  $ hg debugapi mono:repo -e ephemeralprepare -i None -i "['some', 'label']"
   {"bubble_id": 1}

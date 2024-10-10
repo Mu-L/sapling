@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use blobstore_factory::MetadataSqlFactory;
 use bookmarks::BookmarkKey;
 use cmdlib::helpers;
-use cmdlib_cross_repo::create_commit_syncers_from_app_unredacted;
+use cmdlib_cross_repo::create_commit_syncers_from_app;
 use context::CoreContext;
 use cross_repo_sync::CommitSyncer;
 use cross_repo_sync::PushrebaseRewriteDates;
@@ -25,6 +25,7 @@ use futures::FutureExt;
 use live_commit_sync_config::CfgrLiveCommitSyncConfig;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::RepoConfigRef;
 use mononoke_app::args::AsRepoArg;
 use mononoke_app::args::SourceAndTargetRepoArgs;
 use mononoke_app::MononokeApp;
@@ -38,7 +39,7 @@ use scuba_ext::MononokeScubaSampleBuilder;
 use sharding_ext::encode_repo_name;
 use sharding_ext::RepoShard;
 use slog::info;
-use synced_commit_mapping::SqlSyncedCommitMapping;
+use sql_query_config::SqlQueryConfigArc;
 use zk_leader_election::LeaderElection;
 use zk_leader_election::ZkMode;
 
@@ -113,7 +114,7 @@ pub struct XRepoSyncProcessExecutor {
     common_bookmarks: HashSet<BookmarkKey>,
     target_mutable_counters: Arc<dyn MutableCounters + Send + Sync>,
     pushrebase_rewrite_dates: PushrebaseRewriteDates,
-    commit_syncer: CommitSyncer<SqlSyncedCommitMapping, Repo>,
+    commit_syncer: CommitSyncer<Arc<Repo>>,
     live_commit_sync_config: Arc<CfgrLiveCommitSyncConfig>,
 }
 
@@ -124,11 +125,12 @@ impl XRepoSyncProcessExecutor {
         args: Arc<ForwardSyncerArgs>,
         repo_args: &SourceAndTargetRepoArgs,
     ) -> Result<Self> {
-        let small_repo: Arc<Repo> = app.open_repo(&repo_args.source_repo).await?;
-        let large_repo: Arc<Repo> = app.open_repo(&repo_args.target_repo).await?;
-        let syncers = create_commit_syncers_from_app_unredacted(&ctx, &app, repo_args).await?;
+        let small_repo: Arc<Repo> = app.open_repo_unredacted(&repo_args.source_repo).await?;
+        let large_repo: Arc<Repo> = app.open_repo_unredacted(&repo_args.target_repo).await?;
+        let syncers =
+            create_commit_syncers_from_app(&ctx, &app, small_repo.clone(), large_repo.clone())
+                .await?;
         let config_store = app.environment().config_store.clone();
-        let logger = ctx.logger();
         let commit_syncer = syncers.small_to_large;
         let mut scuba_sample = ctx.scuba().clone();
         let (_, repo_config) = app.repo_config(repo_args.source_repo.as_repo_arg())?;
@@ -142,14 +144,13 @@ impl XRepoSyncProcessExecutor {
         let builder = sql_factory
             .open::<SqlPushRedirectionConfigBuilder>()
             .await?;
-        let push_redirection_config = builder.build(small_repo.inner.sql_query_config.clone());
-        let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new_with_xdb(
-            logger,
+        let push_redirection_config = builder.build(small_repo.sql_query_config_arc());
+        let live_commit_sync_config = Arc::new(CfgrLiveCommitSyncConfig::new(
             &config_store,
             Arc::new(push_redirection_config),
         )?);
-        let common_commit_sync_config = live_commit_sync_config
-            .get_common_config(small_repo.inner_repo().repo_identity().id())?;
+        let common_commit_sync_config =
+            live_commit_sync_config.get_common_config(small_repo.repo_identity().id())?;
 
         let common_bookmarks: HashSet<_> = common_commit_sync_config
             .common_pushrebase_bookmarks
@@ -211,12 +212,9 @@ impl XRepoSyncProcessExecutor {
                     .clone()
                     .map(BookmarkKey::new)
                     .transpose()?;
-                let bcs = helpers::csid_resolve(
-                    ctx,
-                    self.small_repo.inner_repo(),
-                    &once_cmd_args.commit.as_str(),
-                )
-                .await?;
+                let bcs =
+                    helpers::csid_resolve(ctx, &self.small_repo, &once_cmd_args.commit.as_str())
+                        .await?;
                 let new_version = once_cmd_args
                     .new_version
                     .clone()
@@ -278,7 +276,12 @@ impl XRepoSyncProcessExecutor {
         if let Some(regex) = cli_bookmark_regex {
             let regex = Regex::new(regex.as_str())?;
             Ok(Some(regex))
-        } else if let Some(configs) = self.small_repo.config().x_repo_sync_source_mapping.as_ref() {
+        } else if let Some(configs) = self
+            .small_repo
+            .repo_config()
+            .x_repo_sync_source_mapping
+            .as_ref()
+        {
             let large_repo_name = self.large_repo.repo_identity().name();
             let regex = configs
                 .mapping

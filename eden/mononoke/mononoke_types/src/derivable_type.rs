@@ -28,6 +28,7 @@ use crate::thrift;
 pub enum DerivableType {
     BlameV2,
     BssmV3,
+    Ccsm,
     ChangesetInfo,
     DeletedManifests,
     Fastlog,
@@ -39,6 +40,7 @@ pub enum DerivableType {
     GitCommits,
     GitDeltaManifestsV2,
     SkeletonManifests,
+    SkeletonManifestsV2,
     TestManifests,
     TestShardedManifests,
     Unodes,
@@ -51,6 +53,7 @@ impl DerivableType {
         Ok(match s {
             "blame" => DerivableType::BlameV2,
             "bssm_v3" => DerivableType::BssmV3,
+            "ccsm" => DerivableType::Ccsm,
             "changeset_info" => DerivableType::ChangesetInfo,
             "deleted_manifest" => DerivableType::DeletedManifests,
             "fastlog" => DerivableType::Fastlog,
@@ -62,6 +65,7 @@ impl DerivableType {
             "git_commits" => DerivableType::GitCommits,
             "git_delta_manifests_v2" => DerivableType::GitDeltaManifestsV2,
             "skeleton_manifests" => DerivableType::SkeletonManifests,
+            "skeleton_manifests_v2" => DerivableType::SkeletonManifestsV2,
             "test_manifests" => DerivableType::TestManifests,
             "test_sharded_manifests" => DerivableType::TestShardedManifests,
             "unodes" => DerivableType::Unodes,
@@ -74,6 +78,7 @@ impl DerivableType {
         match self {
             DerivableType::BlameV2 => "blame",
             DerivableType::BssmV3 => "bssm_v3",
+            DerivableType::Ccsm => "ccsm",
             DerivableType::ChangesetInfo => "changeset_info",
             DerivableType::DeletedManifests => "deleted_manifest",
             DerivableType::Fastlog => "fastlog",
@@ -85,6 +90,7 @@ impl DerivableType {
             DerivableType::GitCommits => "git_commits",
             DerivableType::GitDeltaManifestsV2 => "git_delta_manifests_v2",
             DerivableType::SkeletonManifests => "skeleton_manifests",
+            DerivableType::SkeletonManifestsV2 => "skeleton_manifests_v2",
             DerivableType::TestManifests => "test_manifests",
             DerivableType::TestShardedManifests => "test_sharded_manifests",
             DerivableType::Unodes => "unodes",
@@ -94,6 +100,7 @@ impl DerivableType {
         Ok(match other {
             thrift::DerivedDataType::BLAME => Self::BlameV2,
             thrift::DerivedDataType::BSSM_V3 => Self::BssmV3,
+            thrift::DerivedDataType::CCSM => Self::Ccsm,
             thrift::DerivedDataType::CHANGESET_INFO => Self::ChangesetInfo,
             thrift::DerivedDataType::DELETED_MANIFEST_V2 => Self::DeletedManifests,
             thrift::DerivedDataType::FASTLOG => Self::Fastlog,
@@ -105,6 +112,7 @@ impl DerivableType {
             thrift::DerivedDataType::COMMIT_HANDLE => Self::GitCommits,
             thrift::DerivedDataType::GIT_DELTA_MANIFEST_V2 => Self::GitDeltaManifestsV2,
             thrift::DerivedDataType::SKELETON_MANIFEST => Self::SkeletonManifests,
+            thrift::DerivedDataType::SKELETON_MANIFEST_V2 => Self::SkeletonManifestsV2,
             thrift::DerivedDataType::TEST_MANIFEST => Self::TestManifests,
             thrift::DerivedDataType::TEST_SHARDED_MANIFEST => Self::TestShardedManifests,
             thrift::DerivedDataType::UNODE => Self::Unodes,
@@ -115,6 +123,7 @@ impl DerivableType {
         match self {
             Self::BlameV2 => thrift::DerivedDataType::BLAME,
             Self::BssmV3 => thrift::DerivedDataType::BSSM_V3,
+            Self::Ccsm => thrift::DerivedDataType::CCSM,
             Self::ChangesetInfo => thrift::DerivedDataType::CHANGESET_INFO,
             Self::DeletedManifests => thrift::DerivedDataType::DELETED_MANIFEST_V2,
             Self::Fastlog => thrift::DerivedDataType::FASTLOG,
@@ -126,6 +135,7 @@ impl DerivableType {
             Self::GitCommits => thrift::DerivedDataType::COMMIT_HANDLE,
             Self::GitDeltaManifestsV2 => thrift::DerivedDataType::GIT_DELTA_MANIFEST_V2,
             Self::SkeletonManifests => thrift::DerivedDataType::SKELETON_MANIFEST,
+            Self::SkeletonManifestsV2 => thrift::DerivedDataType::SKELETON_MANIFEST_V2,
             Self::TestManifests => thrift::DerivedDataType::TEST_MANIFEST,
             Self::TestShardedManifests => thrift::DerivedDataType::TEST_SHARDED_MANIFEST,
             Self::Unodes => thrift::DerivedDataType::UNODE,
@@ -139,11 +149,12 @@ impl DerivableType {
 
 #[cfg(test)]
 mod tests {
+    use mononoke_macros::mononoke;
     use strum::IntoEnumIterator;
 
     use super::DerivableType;
 
-    #[test]
+    #[mononoke::test]
     fn thrift_derived_data_type_conversion_must_be_bidirectional() {
         for variant in DerivableType::iter() {
             assert_eq!(
@@ -153,7 +164,7 @@ mod tests {
             );
         }
     }
-    #[test]
+    #[mononoke::test]
     fn name_derived_data_type_conversion_must_be_bidirectional() {
         for variant in DerivableType::iter() {
             assert_eq!(

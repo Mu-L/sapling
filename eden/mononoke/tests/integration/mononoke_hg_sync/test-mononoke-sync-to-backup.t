@@ -15,8 +15,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo foo > a
   $ echo foo > b
   $ hg addremove && hg ci -m 'initial'
@@ -35,38 +35,37 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ REPOID=0 blobimport repo-hg/.hg orig
+  $ REPOID=0 blobimport repo/.hg orig
   $ REPONAME=orig
-  $ REPOID=1 blobimport repo-hg/.hg backup
+  $ REPOID=1 blobimport repo/.hg backup
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Make client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames= -q
-  $ hgclone_treemanifest mononoke://$(mononoke_address)/backup backup --noupdate --config extensions.remotenames=
+  $ hg clone -q mono:orig client-push --noupdate
+  $ hg clone -q mono:backup backup --noupdate
 
 Push to Mononoke
   $ cd $TESTTMP/client-push
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q tip
 
   $ mkcommit pushcommit
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
   $ hg up -q master_bookmark
   $ mkcommit pushcommit2
   $ mkcommit pushcommit3
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Modify same file
   $ hg up -q master_bookmark
   $ echo 1 >> 1 && hg addremove && hg ci -m 'modify 1'
   adding 1
   $ echo 1 >> 1 && hg addremove && hg ci -m 'modify 1'
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Empty commits
   $ hg up -q "min(all())"
@@ -76,24 +75,20 @@ Empty commits
   $ echo 1 > 1 && hg -q addremove && hg ci -m empty
   $ hg revert -r ".^" 1 && hg commit --amend
 
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Two pushes synced one after another
   $ hg up -q master_bookmark
   $ mkcommit commit_first
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
   $ hg up -q master_bookmark
   $ mkcommit commit_second
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Sync it to another client
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ enable_replay_verification_hook
-  $ cat >> .hg/hgrc <<EOF
-  > [treemanifest]
-  > treeonly=True
-  > EOF
   $ cd $TESTTMP
 
 Sync a pushrebase bookmark move
@@ -126,14 +121,13 @@ Do a manual move
 
   $ cd "$TESTTMP/backup"
   $ REPONAME=backup
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:*/backup (glob)
+  $ hg pull
+  pulling from mono:backup
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  adding remote bookmark master_bookmark
-  $ hgmn log -r master_bookmark -T '{node}\n'
+  $ hg log -r master_bookmark -T '{node}\n'
   f5fb745185a2d197d092e7dfffe147f36de1af76
   $ echo "$TIP_PARENT"
   f5fb745185a2d197d092e7dfffe147f36de1af76
@@ -149,14 +143,13 @@ Move forward to a commit that's already present in the destination
 
   $ cd "$TESTTMP/backup"
   $ REPONAME=backup
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:*/backup (glob)
+  $ hg pull
+  pulling from mono:backup
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  updating bookmark master_bookmark
-  $ hgmn log -r master_bookmark -T '{node}\n'
+  $ hg log -r master_bookmark -T '{node}\n'
   bcf523b814e2cbae2d4d2d5b1cbbe3e391f4b4d8
   $ echo "$TIP"
   bcf523b814e2cbae2d4d2d5b1cbbe3e391f4b4d8

@@ -25,7 +25,11 @@
 #include <folly/Exception.h>
 #include <folly/FileUtil.h>
 #include <folly/SocketAddress.h>
-#include <folly/String.h>
+
+#include <folly/json/json.h>
+#ifdef __APPLE__
+#include <folly/Subprocess.h> // @manual
+#endif
 #include <folly/chrono/Conv.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/thread_factory/NamedThreadFactory.h>
@@ -90,7 +94,8 @@
 #include "eden/fs/takeover/TakeoverData.h"
 #include "eden/fs/telemetry/EdenStats.h"
 #include "eden/fs/telemetry/EdenStructuredLogger.h"
-#include "eden/fs/telemetry/IHiveLogger.h"
+#include "eden/fs/telemetry/IFileAccessLogger.h"
+#include "eden/fs/telemetry/IScribeLogger.h"
 #include "eden/fs/telemetry/LogEvent.h"
 #include "eden/fs/utils/Clock.h"
 #include "eden/fs/utils/EdenError.h"
@@ -102,6 +107,11 @@
 
 #ifdef EDEN_HAVE_USAGE_SERVICE
 #include "eden/fs/service/facebook/EdenFSSmartPlatformServiceEndpoint.h" // @manual
+#endif
+
+#ifdef EDEN_HAVE_SERVER_OBSERVER
+#include "common/fb303/cpp/ThreadPoolExecutorCounters.h" // @manual
+#include "eden/fs/service/facebook/ServerObserver.h" // @manual
 #endif
 
 #ifndef _WIN32
@@ -212,6 +222,9 @@ constexpr StringPiece kSlStorePrefix{"store.sapling"};
 #ifndef _WIN32
 constexpr StringPiece kFuseRequestPrefix{"fuse"};
 #endif
+#ifdef __APPLE__
+constexpr StringPiece kNFSStatPrefix{"nfs"};
+#endif
 constexpr StringPiece kStateConfig{"config.toml"};
 
 std::optional<std::string> getUnixDomainSocketPath(
@@ -219,6 +232,21 @@ std::optional<std::string> getUnixDomainSocketPath(
   return AF_UNIX == address.getFamily() ? std::make_optional(address.getPath())
                                         : std::nullopt;
 }
+
+#ifdef __APPLE__
+folly::Try<folly::dynamic> collectNFSUtilStats() {
+  try {
+    folly::Subprocess nfsStatProc(
+        "nfsstat -f JSON",
+        folly::Subprocess::Options().pipeStdout().pipeStderr());
+    std::string nfsStatOutputString = nfsStatProc.communicate().first;
+    nfsStatProc.wait();
+    return folly::Try<folly::dynamic>(folly::parseJson(nfsStatOutputString));
+  } catch (const std::exception& e) {
+    return folly::Try<folly::dynamic>(e);
+  }
+}
+#endif
 
 std::string getCounterNameForImportMetric(
     RequestMetricsScope::RequestStage stage,
@@ -300,11 +328,16 @@ std::shared_ptr<folly::Executor> makeFsChannelThreads(
     return std::make_shared<UnboundedQueueExecutor>(
         edenConfig->numFsChannelThreads.getValue(), "FsChannelThreadPool");
   }
-  return std::make_shared<folly::CPUThreadPoolExecutor>(
-      edenConfig->numFsChannelThreads.getValue(),
-      std::make_unique<EdenTaskQueue>(
-          edenConfig->maxFsChannelInflightRequests.getValue()),
-      std::make_unique<folly::NamedThreadFactory>("FsChannelThreadPool"));
+  std::shared_ptr<folly::CPUThreadPoolExecutor> fsChannelThreads =
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          edenConfig->numFsChannelThreads.getValue(),
+          std::make_unique<EdenTaskQueue>(
+              edenConfig->maxFsChannelInflightRequests.getValue()),
+          std::make_unique<folly::NamedThreadFactory>("FsChannelThreadPool"));
+#ifdef EDEN_HAVE_SERVER_OBSERVER
+  facebook::fb303::installThreadPoolExecutorCounters("", *fsChannelThreads);
+#endif
+  return fsChannelThreads;
 }
 
 } // namespace
@@ -402,7 +435,8 @@ EdenServer::EdenServer(
     std::shared_ptr<const EdenConfig> edenConfig,
     ActivityRecorderFactory activityRecorderFactory,
     BackingStoreFactory* backingStoreFactory,
-    std::shared_ptr<IHiveLogger> hiveLogger,
+    std::shared_ptr<IFileAccessLogger> fileAccessLogger,
+    std::shared_ptr<IScribeLogger> scribeLogger,
     std::shared_ptr<StartupStatusChannel> startupStatusChannel,
     std::string version)
     : originalCommandLine_{std::move(originalCommandLine)},
@@ -431,7 +465,8 @@ EdenServer::EdenServer(
           std::make_shared<UnixClock>(),
           std::make_shared<ProcessInfoCache>(),
           structuredLogger_,
-          std::move(hiveLogger),
+          std::move(fileAccessLogger),
+          std::move(scribeLogger),
           config_,
           *edenConfig,
           mainEventBase_,
@@ -498,6 +533,48 @@ EdenServer::EdenServer(
     }
     return (size_t)0;
   });
+
+#ifdef __APPLE__
+  // On macOS, export the NFS clients/servers counters
+  if (config_->getEdenConfig()->updateNFSStatsInterval.getValue() > 0ms) {
+    auto result = collectNFSUtilStats();
+    if (result.hasValue()) {
+      for (const auto& nfsStatsCounter : kNfsStatsToEdenStatsMap_) {
+        auto counterName = mapCounterNameForNFSStat(nfsStatsCounter);
+        if (counterName.has_value()) {
+          counters->registerCallback(
+              counterName.value(), [this, nfsStatsCounter] {
+                auto result =
+                    this->getNFSStatCounterValue(nfsStatsCounter.first);
+                if (result.has_value()) {
+                  return result.value();
+                } else {
+                  return 0LL;
+                }
+              });
+        } else {
+          // This is not an error, just log it and continue.
+          // This only happen on registration time, not during runtime per
+          // counter. It notify us that we have a NFS counter in the map that
+          // is not reported by Apple.
+          XLOGF(
+              DFATAL,
+              "macOS doesn't report any stat for: {}",
+              nfsStatsCounter.first);
+        }
+      }
+    } else {
+      auto error = result.exception();
+      // This is not a fatal error, just log it and continue.
+      // This only happen on registration time, not during runtime per
+      // counter.
+      XLOGF(
+          ERR,
+          "Failed to collect NFS clients/servers counters: {}",
+          error.what());
+    }
+  }
+#endif
 }
 
 EdenServer::~EdenServer() {
@@ -516,7 +593,60 @@ EdenServer::~EdenServer() {
     }
   }
   counters->unregisterCallback(kFsChannelTaskCount);
+#ifdef __APPLE__
+  for (const auto& nfsStatsCounter : kNfsStatsToEdenStatsMap_) {
+    auto counterName = mapCounterNameForNFSStat(nfsStatsCounter);
+    if (counterName.has_value()) {
+      counters->unregisterCallback(counterName.value());
+    }
+  }
+#endif
 }
+
+#ifdef __APPLE__
+std::optional<std::string> EdenServer::mapCounterNameForNFSStat(
+    std::pair<std::string, std::string> nfsStatsCounter) {
+  auto result = this->getNFSStatCounterValue(nfsStatsCounter.first);
+  if (result.has_value()) {
+    return fmt::format(
+        fmt::runtime(kNFSStatPrefix.str() + ".{}"),
+        nfsStatsCounter.second); // e.g. "nfs.requests"
+  } else {
+    return std::nullopt;
+  }
+}
+
+std::optional<long long> EdenServer::getNFSStatCounterValue(
+    std::string nfsStatsCounterMacOSName) {
+  if (!this->updateNFSStatsIfNeeded()) {
+    // Unable to collect NFS stats
+    return std::nullopt;
+  }
+  try {
+    std::vector<std::string> tokens;
+    folly::split('.', nfsStatsCounterMacOSName, tokens);
+    return nfsStatOutput_[tokens[0]][tokens[1]][tokens[2]].asInt();
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+bool EdenServer::updateNFSStatsIfNeeded() {
+  auto now = std::chrono::steady_clock::now();
+  auto last = lastTimeUpdatedNfsStat_.wlock();
+  if (now >=
+      *last + config_->getEdenConfig()->updateNFSStatsInterval.getValue()) {
+    auto result = collectNFSUtilStats();
+    *last = std::chrono::steady_clock::now();
+    if (!result.hasValue()) {
+      // Unable to collect NFS stats
+      return false;
+    }
+    nfsStatOutput_ = result.value();
+  }
+  return true;
+}
+#endif
 
 namespace cursor_helper {
 
@@ -725,10 +855,13 @@ Future<TakeoverData> EdenServer::stopMountsForTakeover(
   }
   // Use collectAll() rather than collect() to wait for all of the unmounts
   // to complete, and only check for errors once everything has finished.
-  return folly::collectAll(futures).toUnsafeFuture().thenValue(
-      [takeoverPromise = std::move(takeoverPromise)](
-          std::vector<folly::Try<optional<TakeoverData::MountInfo>>>
-              results) mutable {
+  // We should not be using .via(&InlineExecutor::instance()) here, this is
+  // unsafe and deadlock prone. See eden/fs/docs/Futures.md for more details.
+  return folly::collectAll(futures)
+      .via(&folly::InlineExecutor::instance())
+      .thenValue([takeoverPromise = std::move(takeoverPromise)](
+                     std::vector<folly::Try<optional<TakeoverData::MountInfo>>>
+                         results) mutable {
         TakeoverData data;
         data.takeoverComplete = std::move(takeoverPromise);
         data.mountPoints.reserve(results.size());
@@ -825,6 +958,16 @@ void EdenServer::updatePeriodicTaskIntervals(const EdenConfig& config) {
   } else {
     detectNfsCrawlTask_.updateInterval(0s);
   }
+
+#ifdef _WIN32
+  // Using 1 minute as threshold for reporting slowness.
+  // P99 of `eden doctor --dry-run` run is ~25s.
+  // (https://fburl.com/scuba/edenfs_cli_usage/0ky3mf6q)
+  edenDoctorTask_.updateInterval(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          config.edenDoctorInterval.getValue()),
+      60s);
+#endif
 }
 
 void EdenServer::scheduleCallbackOnMainEventBase(
@@ -898,8 +1041,11 @@ void EdenServer::unloadInodes() {
       auto& rootInode = mountHandle.getRootInode();
       auto unloaded = rootInode->unloadChildrenLastAccessedBefore(cutoff_ts);
       if (unloaded) {
-        XLOG(INFO) << "Unloaded " << unloaded
-                   << " inodes in background from mount " << mount.getPath();
+        XLOGF(
+            DBG6,
+            "Unloaded {} inodes in background from mount {}",
+            unloaded,
+            mount.getPath());
       }
       mount.getInodeMap()->recordPeriodicInodeUnload(unloaded);
     }
@@ -1337,6 +1483,13 @@ bool EdenServer::performCleanup() {
     XDCHECK_EQ(state->state, RunState::SHUTTING_DOWN);
     state->state = RunState::SHUTTING_DOWN;
   }
+
+#ifdef EDEN_HAVE_SERVER_OBSERVER
+  // Stop the server observer publish thread. If this is a takeover and the
+  // takeover fails, the recovery code will restart the thread again
+  fb303::ThreadCachedServiceData::get()->stopPublishThread();
+#endif
+
   if (!takeover) {
     shutdownFuture = performNormalShutdown().deferValue(
         [](auto&&) -> std::optional<TakeoverData> { return std::nullopt; });
@@ -1463,6 +1616,16 @@ void EdenServer::registerStats(std::shared_ptr<EdenMount> edenMount) {
         auto stats = edenMount->getJournal().getStats();
         return stats ? stats->maxFilesAccumulated : 0;
       });
+  counters->registerCallback(
+      edenMount->getCounterName(CounterName::OVERLAY_DIR_COUNT), [edenMount] {
+        auto stats = edenMount->getOverlay()->getOverlayStats();
+        return stats.dirCount;
+      });
+  counters->registerCallback(
+      edenMount->getCounterName(CounterName::OVERLAY_FILE_COUNT), [edenMount] {
+        auto stats = edenMount->getOverlay()->getOverlayStats();
+        return stats.fileCount;
+      });
 #ifndef _WIN32
   if (auto* channel = edenMount->getFuseChannel()) {
     for (auto metric : RequestMetricsScope::requestMetrics) {
@@ -1513,6 +1676,10 @@ void EdenServer::unregisterStats(EdenMount* edenMount) {
       edenMount->getCounterName(CounterName::JOURNAL_DURATION));
   counters->unregisterCallback(
       edenMount->getCounterName(CounterName::JOURNAL_MAX_FILES_ACCUMULATED));
+  counters->unregisterCallback(
+      edenMount->getCounterName(CounterName::OVERLAY_DIR_COUNT));
+  counters->unregisterCallback(
+      edenMount->getCounterName(CounterName::OVERLAY_FILE_COUNT));
 #ifndef _WIN32
   if (edenMount->getFuseChannel()) {
     for (auto metric : RequestMetricsScope::requestMetrics) {
@@ -1769,7 +1936,7 @@ void EdenServer::mountFinished(
   const auto& mountPath = edenMount->getPath();
   XLOG(INFO) << "mount point \"" << mountPath << "\" stopped";
 
-  // Save the unmount and takover Promises
+  // Save the unmount and takeover Promises
   folly::SharedPromise<Unit> unmountPromise;
   std::optional<folly::Promise<TakeoverData::MountInfo>> takeoverPromise;
   auto shutdownFuture = folly::SemiFuture<SerializedInodeMap>::makeEmpty();
@@ -2052,6 +2219,18 @@ std::vector<size_t> EdenServer::collectSaplingBackingStoreCounters(
 folly::SemiFuture<Unit> EdenServer::createThriftServer() {
   auto edenConfig = config_->getEdenConfig();
   server_ = make_shared<ThriftServer>();
+#ifdef EDEN_HAVE_SERVER_OBSERVER
+  server_->setObserver(createServerObserver(
+      kServiceName, edenConfig->thriftServerObserverSamplingRate.getValue()));
+  // The server observer that is set up above collects its stats via a
+  // ThreadCachedServiceData object rather than directly via the ServiceData
+  // object for efficiency's sake. However, it does require periodically calling
+  // publishStats() in order to flush the stats data cached in each thread to
+  // the underlying ServiceData object.
+  fb303::ThreadCachedServiceData::get()->startPublishThread(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          edenConfig->thriftServerObserverPublishInterval.getValue()));
+#endif
   server_->setMaxRequests(edenConfig->thriftMaxRequests.getValue());
 
   // Set up the CPU worker threads
@@ -2246,7 +2425,7 @@ folly::Future<TakeoverData> EdenServer::startTakeoverShutdown() {
   return serverState_->getFaultInjector()
       .checkAsync("takeover", "server_shutdown")
       .semi()
-      .via(serverState_->getThreadPool().get())
+      .via(getMainEventBase())
       .thenValue([this](auto&&) {
         // Compact storage for all key spaces in order to speed up the
         // takeover start of the new process. We could potentially test this
@@ -2515,9 +2694,10 @@ void EdenServer::detectNfsCrawl() {
                        processRecords.find(pid) == processRecords.end()) {
                   auto processInfo =
                       serverState->getProcessInfoCache()->lookup(pid).get();
-                  nonLeafPids.insert(processInfo.ppid);
-                  processRecords.insert({pid, processInfo});
-                  pid = processInfo.ppid;
+                  auto ppid = processInfo.ppid;
+                  nonLeafPids.insert(ppid);
+                  processRecords.insert({pid, std::move(processInfo)});
+                  pid = ppid;
                 }
               }
 
@@ -2574,6 +2754,37 @@ void EdenServer::detectNfsCrawl() {
       }
     }
   }
+}
+
+void EdenServer::runEdenDoctor() {
+  // We are creating a new thread after a long time of inactivity and hence
+  // it makes sense to create a new thread pool executor for each run rather
+  // than reusing it. Explanation on why CPUThreadPoolExecutor-
+  // https://www.internalfb.com/intern/staticdocs/fbcref/guides/Executors/.
+  folly::CPUThreadPoolExecutor executor(1);
+  executor.add([] {
+    try {
+      XLOG(INFO, "Running periodic eden doctor dry-run.");
+      // Assuming, this will only be run from windows user's system,
+      // we are using the plain vanilla version of eden doctor dry run.
+      // This can be modified in the future to pass config-dir param.
+      auto proc = SpawnedProcess({"edenfsctl", "doctor", "--dry-run"});
+      XLOG(INFO, "Checking status for eden doctor dry-run.");
+      // Setting the timeout to terminate process to 2.5 minutes.
+      // P99.9 to run eden doctor dry-run is ~2 minutes.
+      // (https://fburl.com/scuba/edenfs_cli_usage/0ky3mf6q)
+      auto status = proc.waitOrTerminateOrKill(150s, 5s);
+      if (status.exitStatus() != 0) {
+        XLOG(
+            ERR,
+            "EdenFS doctor dry run failed or timed-out. Check edenfs doctor scuba logs for more info.");
+      }
+    } catch (const std::exception& e) {
+      XLOG(ERR)
+          << "Exception occurred while trying to run periodic doctor dry-run: "
+          << e.what();
+    }
+  });
 }
 
 void EdenServer::reloadConfig() {

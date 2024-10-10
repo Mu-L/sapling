@@ -24,6 +24,7 @@ use mercurial_mutation::HgMutationStore;
 use mercurial_mutation::SqlHgMutationStoreBuilder;
 use mercurial_types::HgChangesetId;
 use mercurial_types_mocks::nodehash::make_hg_cs_id;
+use mononoke_macros::mononoke;
 use mononoke_types::RepositoryId;
 use mononoke_types_mocks::repo::REPO_ZERO;
 use sql_construct::SqlConstruct;
@@ -81,7 +82,7 @@ impl HgMutationStore for CountedHgMutationStore {
     }
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn add_entries_and_fetch_predecessors_with_caching(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let sql_store = SqlHgMutationStoreBuilder::with_sqlite_in_memory()
@@ -211,9 +212,9 @@ async fn add_entries_and_fetch_predecessors_with_caching(fb: FacebookInit) -> Re
     )
     .await?;
 
-    // Add a more complex fold with some gaps and a new primordial.  This is
-    // somewhat artificial as this kind of entry is unlikely to happen in normal
-    // use, however it will exercise some edge cases.
+    // Add a more complex fold with some gaps.  This is somewhat artificial
+    // as this kind of entry is unlikely to happen in normal use, however
+    // it will exercise some edge cases.
     //
     // Current graph is:
     //
@@ -336,8 +337,8 @@ async fn add_entries_and_fetch_predecessors_with_caching(fb: FacebookInit) -> Re
         &[1, 15, 16, 17],
     )
     .await?;
-    // The mutation history for 4 was fetched earlier, and inspite of change
-    // in the primordial the history would still be served through cache.
+    // The mutation history for 4 was fetched earlier so the history will
+    // be served through cache.
     // Thus, instead of getting [1, 2, 4, 15] as the history we get [2, 4].
     // The new values would take place once the cache expires.
     check_entries(&store, &ctx, hashset![make_hg_cs_id(4)], &entries, &[2, 4]).await?;

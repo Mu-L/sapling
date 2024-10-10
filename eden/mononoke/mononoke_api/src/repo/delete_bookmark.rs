@@ -20,8 +20,9 @@ use mononoke_types::ChangesetId;
 use crate::errors::MononokeError;
 use crate::invalid_push_redirected_request;
 use crate::repo::RepoContext;
+use crate::MononokeRepo;
 
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     async fn delete_bookmark_op<'a>(
         &self,
         bookmark: &'_ BookmarkKey,
@@ -35,7 +36,7 @@ impl RepoContext {
         let old_target = match old_target {
             Some(old_target) => old_target,
             None => self
-                .blob_repo()
+                .repo()
                 .bookmarks()
                 .get(self.ctx().clone(), bookmark)
                 .await
@@ -89,17 +90,13 @@ impl RepoContext {
         if let Some(redirector) = self.push_redirector.as_ref() {
             let ctx = self.ctx();
             let log_id = delete_op
-                .run(
-                    self.ctx(),
-                    self.authorization_context(),
-                    redirector.repo.inner_repo(),
-                )
+                .run(self.ctx(), self.authorization_context(), &redirector.repo)
                 .await?;
             // Wait for bookmark to catch up on small repo
             redirector.ensure_backsynced(ctx, log_id).await?;
         } else {
             delete_op
-                .run(self.ctx(), self.authorization_context(), self.inner_repo())
+                .run(self.ctx(), self.authorization_context(), self.repo())
                 .await?;
         }
         Ok(())
@@ -123,12 +120,7 @@ impl RepoContext {
             .await?;
 
         let bookmark_info_transaction = delete_op
-            .run_with_transaction(
-                self.ctx(),
-                self.authorization_context(),
-                self.inner_repo(),
-                txn,
-            )
+            .run_with_transaction(self.ctx(), self.authorization_context(), self.repo(), txn)
             .await?;
         Ok(bookmark_info_transaction)
     }

@@ -112,6 +112,9 @@ macro_rules! delegate {
             fn to_set(&self, set: &$crate::IdSet) -> $crate::Result<$crate::Set> {
                 self.$($t)*.to_set(set)
             }
+            fn id_list_to_set(&self, list: &$crate::IdList) -> $crate::Result<$crate::Set> {
+                self.$($t)*.id_list_to_set(list)
+            }
         }
     };
 
@@ -144,6 +147,13 @@ macro_rules! delegate {
                     > + Send + 's>> where Self: 's
             {
                 self.$($t)*.master_group()
+            }
+            fn virtual_group<'a: 's, 's>(&'a self)
+                -> std::pin::Pin<Box<dyn std::future::Future<Output=
+                        $crate::Result<$crate::Set>
+                    > + Send + 's>> where Self: 's
+            {
+                self.$($t)*.virtual_group()
             }
             fn ancestors<'a: 's, 's>(&'a self, set: $crate::Set)
                 -> std::pin::Pin<Box<dyn std::future::Future<Output=

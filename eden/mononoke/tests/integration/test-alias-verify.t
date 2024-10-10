@@ -13,9 +13,8 @@
   $ setup_common_config $REPOTYPE
   $ cd $TESTTMP
 
-  $ hginit_treemanifest repo-hg-nolfs
-  $ cd repo-hg-nolfs
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 # Commit files
   $ echo f1 > f1
   $ hg commit -Aqm "f1"
@@ -28,7 +27,7 @@
 
   $ cd ..
 
-  $ blobimport repo-hg-nolfs/.hg repo
+  $ blobimport repo/.hg repo
 
   $ ls $TESTTMP/blobstore/blobs | grep "alias"
   blob-repo0000.alias.gitsha1.45d9e0e9fc8859787c33081dffdf12f41b54fcf3

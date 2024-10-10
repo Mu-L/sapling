@@ -88,6 +88,7 @@ By using a script, default files and bookmarks are disabled.
 
 import base64
 import collections
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -95,17 +96,7 @@ from typing import Dict, List, Optional, Union
 
 import bindings
 
-from . import (
-    bookmarks,
-    context,
-    error,
-    git,
-    hg,
-    mutation,
-    pycompat,
-    scmutil,
-    visibility,
-)
+from . import bookmarks, context, error, git, hg, mutation, scmutil, visibility
 from .i18n import _
 from .node import bin, hex, nullhex, nullid, short
 
@@ -285,21 +276,6 @@ class simplecommitctx(context.committablectx):
     def __init__(
         self, repo, name, parentctxs, filemap, mutationspec, date, text=None, user=None
     ):
-        added = []
-        removed = []
-        for path, data in (filemap or {}).items():
-            assert isinstance(data, str)
-            # check "(renamed from)". mark the source as removed
-            m = re.search(r"\(renamed from (.+)\)\s*\Z", data, re.S)
-            if m:
-                removed.append(m.group(1))
-            # check "(removed)"
-            if re.match(r"\A\s*\(removed\)\s*\Z", data, re.S):
-                removed.append(path)
-            else:
-                if path in removed:
-                    raise error.Abort(_("%s: both added and removed") % path)
-                added.append(path)
         extra = {"branch": "default"}
         mutinfo = None
         if mutationspec is not None:
@@ -317,7 +293,7 @@ class simplecommitctx(context.committablectx):
             if mutation.recording(repo):
                 extra.update(mutinfo)
         opts = {
-            "changes": scmutil.status([], added, removed, [], [], [], []),
+            "changes": scmutil.status([], [], [], [], [], [], []),
             "date": date,
             "extra": extra,
             "mutinfo": mutinfo,
@@ -330,6 +306,9 @@ class simplecommitctx(context.committablectx):
         while len(self._parents) < 2:
             self._parents.append(repo[nullid])
 
+        for path, data in self._filemap.items():
+            self.add(path, data)
+
     def filectx(self, key):
         data = self._filemap[key]
         m = re.match(r"\A(.*) \((?:renamed|copied) from (.+)\)\s*\Z", data, re.S)
@@ -338,7 +317,11 @@ class simplecommitctx(context.committablectx):
             renamed = m.group(2)
         else:
             renamed = None
-        if data.startswith("base85:"):
+
+        if data.startswith("random:"):
+            file_size = int(data.split(":", 1)[-1].strip())
+            bdata = os.urandom(file_size)
+        elif data.startswith("base85:"):
             bdata = base64.b85decode(data.split(":", 1)[-1].strip())
         else:
             bdata = data.encode("utf-8")
@@ -346,6 +329,36 @@ class simplecommitctx(context.committablectx):
 
     def commit(self):
         return self._repo.commitctx(self)
+
+    def add(self, path, data):
+        assert isinstance(data, str)
+
+        remove = None
+        add = None
+
+        # check "(renamed from)". mark the source as removed
+        m = re.search(r"\(renamed from (.+)\)\s*\Z", data, re.S)
+        if m:
+            remove = m.group(1)
+        # check "(removed)"
+        if re.match(r"\A\s*\(removed\)\s*\Z", data, re.S):
+            remove = path
+        else:
+            add = path
+
+        if add is not None:
+            if add in self._status.removed:
+                raise error.Abort(_("%s: both added and removed") % add)
+            if add not in self._status.added:
+                self._status.added.append(add)
+            self._filemap[add] = data
+
+        if remove is not None and remove not in self._status.removed:
+            self._status.removed.append(remove)
+            try:
+                self._status.added.remove(remove)
+            except ValueError:
+                pass
 
 
 def _walkgraph(edges, extraedges):
@@ -577,14 +590,12 @@ def _drawdagintransaction(repo, text: str, tr, **opts) -> None:
                 # If it's a merge, take the files and contents from the parents
                 for f in pctxs[1].manifest():
                     if f not in pctxs[0].manifest():
-                        added[f] = pycompat.decodeutf8(pctxs[1][f].data())
+                        data = pctxs[1][f].data()
+                        added[f] = f"base85:{base64.b85encode(data).decode()}"
             else:
                 # If it's not a merge, add a single file, if defaultfiles is set
                 if defaultfiles:
                     added[name] = name
-            # add extra file contents in comments
-            for path, content in files.pop(name, {}).items():
-                added[path] = content
             commitmutations = None
             if name in mutations:
                 preds, cmd, split = mutations[name]
@@ -594,6 +605,10 @@ def _drawdagintransaction(repo, text: str, tr, **opts) -> None:
 
             date = dates.get(name, "0 0")
             ctx = simplecommitctx(repo, name, pctxs, added, commitmutations, date)
+
+        # add extra file contents in comments
+        for path, content in files.pop(name, {}).items():
+            ctx.add(path, content)
 
         n = ctx.commit()
         committed[name] = n

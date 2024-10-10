@@ -78,6 +78,15 @@ impl GitLfs {
             GitLfs::FullContent => false,
         }
     }
+
+    pub fn non_canonical_pointer_content_id(&self) -> Option<ContentId> {
+        match self {
+            GitLfs::GitLfsPointer {
+                non_canonical_pointer,
+            } => *non_canonical_pointer,
+            GitLfs::FullContent => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -123,6 +132,18 @@ impl TrackedFileChange {
             self.inner.size,
             copy_from,
             self.inner.git_lfs,
+        )
+    }
+
+    /// Drops the Git-LFS information from file change
+    /// useful when mirroring commits to repos that don't support Git-LFS.
+    pub fn without_git_lfs(&self) -> Self {
+        Self::new(
+            self.inner.content_id,
+            self.inner.file_type,
+            self.inner.size,
+            self.copy_from.clone(),
+            GitLfs::FullContent,
         )
     }
 
@@ -300,6 +321,14 @@ impl FileChange {
         match &self {
             Self::Change(tc) => Some(tc.size()),
             Self::UntrackedChange(uc) => Some(uc.size),
+            Self::Deletion | Self::UntrackedDeletion => None,
+        }
+    }
+
+    pub fn git_lfs(&self) -> Option<GitLfs> {
+        match &self {
+            Self::Change(tc) => Some(tc.git_lfs()),
+            Self::UntrackedChange(uc) => Some(uc.git_lfs),
             Self::Deletion | Self::UntrackedDeletion => None,
         }
     }
@@ -570,6 +599,7 @@ impl Arbitrary for FileType {
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
 
     use super::*;
@@ -590,13 +620,13 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn bad_filetype_thrift() {
         let thrift_ft = thrift::bonsai::FileType(42);
         FileType::from_thrift(thrift_ft).expect_err("unexpected OK - unknown file type");
     }
 
-    #[test]
+    #[mononoke::test]
     fn bad_filechange_thrift() {
         let thrift_fc = thrift::bonsai::FileChange {
             content_id: thrift::id::ContentId(thrift::id::Id::Blake2(thrift::id::Blake2(

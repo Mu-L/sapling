@@ -9,7 +9,7 @@
 
   $ setup_common_config
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ BLOB_TYPE="blob_files" default_setup
   hg repo
   o  C [draft;rev=2;26805aba1e60]
@@ -190,32 +190,30 @@
     "x_repo_check_disabled": false
   }
 
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo1 --noupdate -q
+  $ hg clone -q mono:repo repo1 --noupdate
   $ cd repo1
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
+  no changes found
   adding changesets
   adding manifests
   adding file changes
-  updating bookmark master_bookmark
-  adding remote bookmark repo_import_new_repo
-  $ hgmn up master_bookmark
+  $ hg up master_bookmark
   6 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark master_bookmark)
 
   $ log -r "ancestors(master_bookmark)"
-  @    merging [draft;rev=5;dd88c051bcb0]
+  @    merging [public;rev=5;dd88c051bcb0] default/master_bookmark default/repo_import_new_repo
   ├─╮
-  │ o  Add file3 [draft;rev=4;fe8342d2de1a]
+  │ o  Add file3 [public;rev=4;fe8342d2de1a]
   │ │
-  │ o  Add file1 and file2 [draft;rev=3;4ad443ff73f0]
+  │ o  Add file1 and file2 [public;rev=3;4ad443ff73f0]
   │
-  o  C [draft;rev=2;26805aba1e60]
+  o  C [public;rev=2;26805aba1e60]
   │
-  o  B [draft;rev=1;112478962961]
+  o  B [public;rev=1;112478962961]
   │
-  o  A [draft;rev=0;426bada5c675]
+  o  A [public;rev=0;426bada5c675]
   $
 
   $ ls

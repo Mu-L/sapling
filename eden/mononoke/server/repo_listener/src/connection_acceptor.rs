@@ -44,6 +44,7 @@ use lazy_static::lazy_static;
 use metaconfig_types::CommonConfig;
 use metadata::Metadata;
 use mononoke_api::Mononoke;
+use mononoke_api::Repo;
 use mononoke_app::fb303::ReadyFlagService;
 use mononoke_configs::MononokeConfigs;
 use openssl::ssl::Ssl;
@@ -116,7 +117,7 @@ pub async fn connection_acceptor(
     sockname: String,
     service: ReadyFlagService,
     root_log: Logger,
-    mononoke: Arc<Mononoke>,
+    mononoke: Arc<Mononoke<Repo>>,
     tls_acceptor: SslAcceptor,
     terminate_process: oneshot::Receiver<()>,
     rate_limiter: Option<RateLimitEnvironment>,
@@ -205,10 +206,10 @@ pub async fn connection_acceptor(
 }
 
 /// Our environment for accepting connections.
-pub struct Acceptor {
+pub struct Acceptor<R> {
     pub fb: FacebookInit,
     pub tls_acceptor: SslAcceptor,
-    pub mononoke: Arc<Mononoke>,
+    pub mononoke: Arc<Mononoke<R>>,
     pub security_checker: ConnectionSecurityChecker,
     pub rate_limiter: Option<RateLimitEnvironment>,
     pub scribe: Scribe,
@@ -229,7 +230,7 @@ pub struct Acceptor {
 /// Details for a socket we've just opened.
 #[derive(Clone)]
 pub struct PendingConnection {
-    pub acceptor: Arc<Acceptor>,
+    pub acceptor: Arc<Acceptor<Repo>>,
     pub addr: SocketAddr,
 }
 
@@ -238,6 +239,7 @@ pub struct PendingConnection {
 pub struct AcceptedConnection {
     pub pending: PendingConnection,
     pub is_trusted: bool,
+    pub mtls_disabled: bool,
     pub identities: Arc<MononokeIdentitySet>,
 }
 
@@ -285,6 +287,7 @@ async fn handle_connection(conn: PendingConnection, sock: TcpStream) -> Result<(
         true => AcceptedConnection {
             pending: conn,
             is_trusted: false,
+            mtls_disabled: true,
             identities: Arc::new(MononokeIdentitySet::new()),
         },
         false => {
@@ -301,6 +304,7 @@ async fn handle_connection(conn: PendingConnection, sock: TcpStream) -> Result<(
             AcceptedConnection {
                 pending: conn,
                 is_trusted,
+                mtls_disabled: false,
                 identities: Arc::new(identities),
             }
         }

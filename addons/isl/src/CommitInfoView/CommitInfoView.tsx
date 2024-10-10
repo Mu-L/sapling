@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import type {Operation} from '../operations/Operation';
 import type {CommitInfo, DiffId} from '../types';
 import type {CommitInfoMode, EditedMessage} from './CommitInfoState';
 import type {CommitMessageFields, FieldConfig, FieldsBeingEdited} from './types';
@@ -14,6 +15,7 @@ import serverAPI from '../ClientToServerAPI';
 import {Commit} from '../Commit';
 import {OpenComparisonViewButton} from '../ComparisonView/OpenComparisonViewButton';
 import {Center} from '../ComponentUtils';
+import {confirmNoBlockingDiagnostics} from '../Diagnostics';
 import {getCachedGeneratedFileStatuses, useGeneratedFileStatuses} from '../GeneratedFile';
 import {numPendingImageUploads} from '../ImageUpload';
 import {Internal} from '../Internal';
@@ -31,12 +33,18 @@ import {
   latestCommitMessageFields,
 } from '../codeReview/CodeReviewInfo';
 import {submitAsDraft, SubmitAsDraftCheckbox} from '../codeReview/DraftCheckbox';
+import {showBranchingPrModal} from '../codeReview/github/BranchingPrModal';
 import {overrideDisabledSubmitModes} from '../codeReview/github/branchPrState';
 import GatedComponent from '../components/GatedComponent';
 import {FoldButton, useRunFoldPreview} from '../fold';
 import {t, T} from '../i18n';
+import {IrrelevantCwdIcon} from '../icons/IrrelevantCwdIcon';
 import {readAtom, writeAtom} from '../jotaiUtils';
-import {messageSyncingEnabledState, updateRemoteMessage} from '../messageSyncing';
+import {
+  messageSyncingEnabledState,
+  messageSyncingOverrideState,
+  updateRemoteMessage,
+} from '../messageSyncing';
 import {AmendMessageOperation} from '../operations/AmendMessageOperation';
 import {getAmendOperation} from '../operations/AmendOperation';
 import {getCommitOperation} from '../operations/CommitOperation';
@@ -47,10 +55,12 @@ import {SetConfigOperation} from '../operations/SetConfigOperation';
 import {useRunOperation} from '../operationsState';
 import {useUncommittedSelection} from '../partialSelection';
 import platform from '../platform';
-import {CommitPreview, uncommittedChangesWithPreviews} from '../previews';
+import {CommitPreview, dagWithPreviews, uncommittedChangesWithPreviews} from '../previews';
+import {repoRelativeCwd, useIsIrrelevantToCwd} from '../repositoryData';
 import {selectedCommits} from '../selection';
 import {commitByHash, latestHeadCommit, repositoryInfo} from '../serverAPIState';
 import {latestSuccessorUnlessExplicitlyObsolete} from '../successionUtils';
+import {showToast} from '../toast';
 import {GeneratedStatus, succeedableRevset} from '../types';
 import {useModal} from '../useModal';
 import {firstOfIterable} from '../utils';
@@ -83,11 +93,13 @@ import {Badge} from 'isl-components/Badge';
 import {Banner, BannerKind, BannerTooltip} from 'isl-components/Banner';
 import {Button} from 'isl-components/Button';
 import {Divider} from 'isl-components/Divider';
+import {ErrorNotice} from 'isl-components/ErrorNotice';
+import {Column} from 'isl-components/Flex';
 import {Icon} from 'isl-components/Icon';
 import {RadioGroup} from 'isl-components/Radio';
 import {Subtle} from 'isl-components/Subtle';
 import {Tooltip} from 'isl-components/Tooltip';
-import {useAtom, useAtomValue} from 'jotai';
+import {atom, useAtom, useAtomValue} from 'jotai';
 import {useAtomCallback} from 'jotai/utils';
 import {useCallback, useEffect, useMemo} from 'react';
 import {ComparisonType} from 'shared/Comparison';
@@ -182,6 +194,9 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
   const isOptimistic =
     useAtomValue(commitByHash(commit.hash)) == null && !isCommitMode && !isFoldPreview;
 
+  const cwd = useAtomValue(repoRelativeCwd);
+  const isIrrelevantToCwd = useIsIrrelevantToCwd(commit);
+
   const isPublic = commit.phase === 'public';
   const isObsoleted = commit.successorInfo != null;
   const isAmendDisabled = mode === 'amend' && (isPublic || isObsoleted);
@@ -235,6 +250,12 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
     schema,
     fieldsBeingEdited,
     previousFieldsBeingEdited,
+  );
+
+  const diffSummaries = useAtomValue(allDiffSummaries);
+  const remoteTrackingBranch = provider?.getRemoteTrackingBranch(
+    diffSummaries?.value,
+    commit.diffId,
   );
 
   const isSplitSuggestionSupported = provider?.isSplitSuggestionSupported() ?? false;
@@ -305,12 +326,45 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
                         latestFields={parsedFields}
                         editedCommitMessageKey={isCommitMode ? 'head' : commit.hash}
                       />
+                      {!isPublic && isIrrelevantToCwd ? (
+                        <Tooltip
+                          title={
+                            <T
+                              replace={{
+                                $prefix: <pre>{commit.maxCommonPathPrefix}</pre>,
+                                $cwd: <pre>{cwd}</pre>,
+                              }}>
+                              This commit only contains files within: $prefix These are irrelevant
+                              to your current working directory: $cwd
+                            </T>
+                          }>
+                          <Banner kind={BannerKind.default}>
+                            <IrrelevantCwdIcon />
+                            <div style={{paddingLeft: 'var(--halfpad)'}}>
+                              <T replace={{$cwd: <code>{cwd}</code>}}>
+                                All files in this commit are outside $cwd
+                              </T>
+                            </div>
+                          </Banner>
+                        </Tooltip>
+                      ) : null}
                     </>
                   ) : undefined
                 }
               />
             );
           })}
+        {remoteTrackingBranch == null ? null : (
+          <Section>
+            <SmallCapsTitle>
+              <Icon icon="source-control"></Icon>
+              <T>Remote Tracking Branch</T>
+            </SmallCapsTitle>
+            <div className="commit-info-tokenized-field">
+              <span className="token">{remoteTrackingBranch}</span>
+            </div>
+          </Section>
+        )}
         <Divider />
         {commit.isDot && !isAmendDisabled ? (
           <Section data-testid="changes-to-amend">
@@ -387,7 +441,7 @@ export function CommitInfoDetails({commit}: {commit: CommitInfo}) {
  * Some files are generated -> "Open non-generated files" button
  */
 function OpenAllFilesButton({commit}: {commit: CommitInfo}) {
-  const paths = useMemo(() => commit.filesSample.map(file => file.path), [commit]);
+  const paths = useMemo(() => commit.filePathsSample, [commit]);
   const statuses = useGeneratedFileStatuses(paths);
   const allAreGenerated = paths.every(file => statuses[file] === GeneratedStatus.Generated);
   const someAreGenerated = paths.some(file => statuses[file] === GeneratedStatus.Generated);
@@ -403,16 +457,13 @@ function OpenAllFilesButton({commit}: {commit: CommitInfo}) {
         icon
         onClick={() => {
           tracker.track('OpenAllFiles');
-          const statuses = getCachedGeneratedFileStatuses(
-            commit.filesSample.map(file => file.path),
-          );
+          const statuses = getCachedGeneratedFileStatuses(commit.filePathsSample);
           const toOpen = allAreGenerated
-            ? commit.filesSample
-            : commit.filesSample.filter(
-                file =>
-                  statuses[file.path] == null || statuses[file.path] !== GeneratedStatus.Generated,
+            ? commit.filePathsSample
+            : commit.filePathsSample.filter(
+                file => statuses[file] == null || statuses[file] !== GeneratedStatus.Generated,
               );
-          platform.openFiles(toOpen.map(file => file.path));
+          platform.openFiles(toOpen);
         }}>
         <Icon icon="go-to-file" slot="start" />
         {someAreGenerated && !allAreGenerated ? (
@@ -471,6 +522,7 @@ function ShowingRemoteMessageBanner({
   const schema = useAtomValue(commitMessageFieldsSchema);
   const runOperation = useRunOperation();
   const syncingEnabled = useAtomValue(messageSyncingEnabledState);
+  const syncingOverride = useAtomValue(messageSyncingOverrideState);
 
   const loadLocalMessage = useCallback(() => {
     const originalFields = parseCommitMessageFields(schema, commit.title, commit.description);
@@ -501,8 +553,37 @@ function ShowingRemoteMessageBanner({
     ];
   });
 
-  if (!syncingEnabled || !provider) {
+  if (!provider || (syncingOverride == null && !syncingEnabled)) {
     return null;
+  }
+
+  if (syncingOverride === false) {
+    return (
+      <BannerTooltip
+        tooltip={t(
+          'Message syncing with $provider has been temporarily disabled due to a failed sync.\n\n' +
+            'Your local commit message is shown instead.\n' +
+            "Changes you make won't be automatically synced.\n\n" +
+            'Make sure to manually sync your message with $provider, then reenable or restart ISL to start syncing again.',
+          {replace: {$provider: provider.label}},
+        )}>
+        <Banner
+          icon={<Icon icon="warn" />}
+          alwaysShowButtons
+          kind={BannerKind.warning}
+          buttons={
+            <Button
+              icon
+              onClick={() => {
+                writeAtom(messageSyncingOverrideState, null);
+              }}>
+              <T>Show Remote Messages Instead</T>
+            </Button>
+          }>
+          <T replace={{$provider: provider.label}}>Not syncing messages with $provider</T>
+        </Banner>
+      </BannerTooltip>
+    );
   }
 
   const originalFields = parseCommitMessageFields(schema, commit.title, commit.description);
@@ -510,6 +591,7 @@ function ShowingRemoteMessageBanner({
   if (areTextFieldsUnchanged(schema, originalFields, latestFields)) {
     return null;
   }
+
   return (
     <BannerTooltip
       tooltip={t(
@@ -551,6 +633,10 @@ function FoldPreviewActions() {
   );
 }
 
+const imageUploadsPendingAtom = atom(get => {
+  return get(numPendingImageUploads(undefined)) > 0;
+});
+
 function ActionsBar({
   commit,
   latestMessage,
@@ -574,13 +660,8 @@ function ActionsBar({
     ((!isCommitMode && isAnythingBeingEdited) || uncommittedChanges.length > 0);
 
   const provider = useAtomValue(codeReviewProvider);
-  const [repoInfo, setRepoInfo] = useAtom(repositoryInfo);
-  const diffSummaries = useAtomValue(allDiffSummaries);
-  const shouldSubmitAsDraft = useAtomValue(submitAsDraft);
   const schema = useAtomValue(commitMessageFieldsSchema);
   const headCommit = useAtomValue(latestHeadCommit);
-
-  const [updateMessage, setUpdateMessage] = useAtom(diffUpdateMessagesState(commit.hash));
 
   const messageSyncEnabled = useAtomValue(messageSyncingEnabledState);
 
@@ -613,7 +694,8 @@ function ActionsBar({
         }
       }
 
-      writeAtom(editedCommitMessages(isCommitMode ? 'head' : commit.hash), {});
+      // Delete the edited message atom (and delete from persisted storage)
+      writeAtom(editedCommitMessages(isCommitMode ? 'head' : commit.hash), undefined);
     },
     [commit.hash, isCommitMode],
   );
@@ -640,19 +722,8 @@ function ActionsBar({
   const showOptionModal = useModal();
 
   const codeReviewProviderName = provider?.label;
-  const codeReviewProviderType =
-    repoInfo?.type === 'success' ? repoInfo.codeReviewSystem.type : 'unknown';
-  const canSubmitWithCodeReviewProvider =
-    codeReviewProviderType !== 'none' && codeReviewProviderType !== 'unknown';
-  const submittable =
-    diffSummaries.value && provider?.getSubmittableDiffs([commit], diffSummaries.value);
-  const canSubmitIndividualDiffs = submittable && submittable.length > 0;
 
-  const forceEnableSubmit = useAtomValue(overrideDisabledSubmitModes);
-  const submitDisabledReason = forceEnableSubmit ? undefined : provider?.submitDisabledReason?.();
-
-  const ongoingImageUploads = useAtomValue(numPendingImageUploads(undefined));
-  const areImageUploadsOngoing = ongoingImageUploads > 0;
+  const areImageUploadsOngoing = useAtomValue(imageUploadsPendingAtom);
 
   // Generally "Amend"/"Commit" for head commit, but if there's no changes while amending, just use "Amend message"
   const showCommitOrAmend =
@@ -710,9 +781,11 @@ function ActionsBar({
                   }
                 }
 
-                const shouldContinue = await confirmUnsavedFiles();
-                if (!shouldContinue) {
-                  return;
+                {
+                  const shouldContinue = await confirmUnsavedFiles();
+                  if (!shouldContinue) {
+                    return;
+                  }
                 }
 
                 return doAmendOrCommit();
@@ -766,149 +839,255 @@ function ActionsBar({
             </OperationDisabledButton>
           </Tooltip>
         )}
-        {(commit.isDot && (anythingToCommit || !isAnythingBeingEdited)) ||
-        (!commit.isDot &&
-          canSubmitIndividualDiffs &&
-          // For non-head commits, "submit" doesn't update the message, which is confusing.
-          // Just hide the submit button so you're encouraged to "amend message" first.
-          !isAnythingBeingEdited) ? (
-          <Tooltip
-            title={
-              areImageUploadsOngoing
-                ? t('Image uploads are still pending')
-                : submitDisabledReason
-                ? submitDisabledReason
-                : canSubmitWithCodeReviewProvider
-                ? t('Submit for code review with $provider', {
-                    replace: {$provider: codeReviewProviderName ?? 'remote'},
-                  })
-                : t(
-                    'Submitting for code review is currently only supported for GitHub-backed repos',
-                  )
-            }
-            placement="top">
-            <OperationDisabledButton
-              kind="primary"
-              contextKey={`submit-${commit.isDot ? 'head' : commit.hash}`}
-              disabled={
-                !canSubmitWithCodeReviewProvider ||
-                areImageUploadsOngoing ||
-                submitDisabledReason != null
-              }
-              runOperation={async () => {
-                const shouldContinue = await confirmUnsavedFiles();
-                if (!shouldContinue) {
-                  return;
-                }
-
-                let amendOrCommitOp;
-                if (commit.isDot && anythingToCommit) {
-                  // TODO: we should also amend if there are pending commit message changes, and change the button
-                  // to amend message & submit.
-                  // Or just remove the submit button if you start editing since we'll update the remote message anyway...
-                  amendOrCommitOp = doAmendOrCommit();
-                }
-
-                if (
-                  repoInfo?.type === 'success' &&
-                  repoInfo.codeReviewSystem.type === 'github' &&
-                  repoInfo.preferredSubmitCommand == null
-                ) {
-                  const buttons = [t('Cancel') as 'Cancel', 'ghstack', 'pr'] as const;
-                  const cancel = buttons[0];
-                  const answer = await showOptionModal({
-                    type: 'confirm',
-                    icon: 'warning',
-                    title: t('Preferred Code Review command not yet configured'),
-                    message: (
-                      <div className="commit-info-confirm-modal-paragraphs">
-                        <div>
-                          <T replace={{$pr: <code>sl pr</code>, $ghstack: <code>sl ghstack</code>}}>
-                            You can configure Sapling to use either $pr or $ghstack to submit for
-                            code review on GitHub.
-                          </T>
-                        </div>
-                        <div>
-                          <T
-                            replace={{
-                              $config: <code>github.preferred_submit_command</code>,
-                            }}>
-                            Each submit command has tradeoffs, due to how GitHub creates Pull
-                            Requests. This can be controlled by the $config config.
-                          </T>
-                        </div>
-                        <div>
-                          <T>To continue, select a command to use to submit.</T>
-                        </div>
-                        <Link href="https://sapling-scm.com/docs/git/intro#pull-requests">
-                          <T>Learn More</T>
-                        </Link>
-                      </div>
-                    ),
-                    buttons,
-                  });
-                  if (answer === cancel || answer == null) {
-                    return;
-                  }
-                  const rememberConfigOp = new SetConfigOperation(
-                    'local',
-                    'github.preferred_submit_command',
-                    answer,
-                  );
-                  setRepoInfo(info => ({
-                    ...nullthrows(info),
-                    preferredSubmitCommand: answer,
-                  }));
-                  // setRepoInfo updates `provider`, but we still have a stale reference in this callback.
-                  // So this one time, we need to manually run the new submit command.
-                  // Future submit calls can delegate to provider.submitOperation();
-                  const submitOp =
-                    answer === 'ghstack'
-                      ? new GhStackSubmitOperation({
-                          draft: shouldSubmitAsDraft,
-                        })
-                      : new PrSubmitOperation({
-                          draft: shouldSubmitAsDraft,
-                        });
-
-                  return [amendOrCommitOp, rememberConfigOp, submitOp].filter(notEmpty);
-                }
-
-                // Only do message sync if we're amending the local commit in some way.
-                // If we're just doing a submit, we expect the message to have been synced previously
-                // during another amend or amend message.
-                const shouldUpdateMessage = !isCommitMode && messageSyncEnabled && anythingToCommit;
-
-                const submitOp = nullthrows(provider).submitOperation(
-                  commit.isDot ? [] : [commit], // [] means to submit the head commit
-                  {
-                    draft: shouldSubmitAsDraft,
-                    updateFields: shouldUpdateMessage,
-                    updateMessage: updateMessage || undefined,
-                  },
-                );
-                // clear out the update message now that we've used it to submit
-                if (updateMessage) {
-                  setUpdateMessage('');
-                }
-
-                return [amendOrCommitOp, submitOp].filter(notEmpty);
-              }}>
-              {commit.isDot && anythingToCommit ? (
-                isCommitMode ? (
-                  <T>Commit and Submit</T>
-                ) : (
-                  <T>Amend and Submit</T>
-                )
-              ) : (
-                <T>Submit</T>
-              )}
-            </OperationDisabledButton>
-          </Tooltip>
-        ) : null}
+        <SubmitButton
+          commit={commit}
+          getAmendOrCommitOperation={doAmendOrCommit}
+          anythingToCommit={anythingToCommit}
+          isAnythingBeingEdited={isAnythingBeingEdited}
+          isCommitMode={isCommitMode}
+        />
       </div>
     </div>
   );
+}
+
+function SubmitButton({
+  commit,
+  getAmendOrCommitOperation,
+  anythingToCommit,
+  isAnythingBeingEdited,
+  isCommitMode,
+}: {
+  commit: CommitInfo;
+  getAmendOrCommitOperation: () => Operation;
+  anythingToCommit: boolean;
+  isAnythingBeingEdited: boolean;
+  isCommitMode: boolean;
+}) {
+  const [repoInfo, setRepoInfo] = useAtom(repositoryInfo);
+  const diffSummaries = useAtomValue(allDiffSummaries);
+  const shouldSubmitAsDraft = useAtomValue(submitAsDraft);
+  const [updateMessage, setUpdateMessage] = useAtom(diffUpdateMessagesState(commit.hash));
+  const provider = useAtomValue(codeReviewProvider);
+
+  const codeReviewProviderType =
+    repoInfo?.type === 'success' ? repoInfo.codeReviewSystem.type : 'unknown';
+  const canSubmitWithCodeReviewProvider =
+    codeReviewProviderType !== 'none' && codeReviewProviderType !== 'unknown';
+  const submittable =
+    diffSummaries.value && provider?.getSubmittableDiffs([commit], diffSummaries.value);
+  const canSubmitIndividualDiffs = submittable && submittable.length > 0;
+
+  const showOptionModal = useModal();
+  const forceEnableSubmit = useAtomValue(overrideDisabledSubmitModes);
+  const submitDisabledReason = forceEnableSubmit ? undefined : provider?.submitDisabledReason?.();
+  const messageSyncEnabled = useAtomValue(messageSyncingEnabledState);
+  const areImageUploadsOngoing = useAtomValue(imageUploadsPendingAtom);
+
+  const runOperation = useRunOperation();
+
+  const selection = useUncommittedSelection();
+
+  const isBranchingPREnabled =
+    repoInfo?.type === 'success' &&
+    repoInfo.codeReviewSystem.type === 'github' &&
+    repoInfo.preferredSubmitCommand === 'push';
+
+  const disabledReason = areImageUploadsOngoing
+    ? t('Image uploads are still pending')
+    : submitDisabledReason
+    ? submitDisabledReason
+    : !canSubmitWithCodeReviewProvider
+    ? t('No code review system found for this repository')
+    : null;
+
+  const getApplicableOperations = async (): Promise<Array<Operation> | undefined> => {
+    const shouldContinue = await confirmUnsavedFiles();
+    if (!shouldContinue) {
+      return;
+    }
+
+    if (!(await confirmNoBlockingDiagnostics(selection, isCommitMode ? undefined : commit))) {
+      return;
+    }
+
+    let amendOrCommitOp;
+    if (commit.isDot && anythingToCommit) {
+      // TODO: we should also amend if there are pending commit message changes, and change the button
+      // to amend message & submit.
+      // Or just remove the submit button if you start editing since we'll update the remote message anyway...
+      amendOrCommitOp = getAmendOrCommitOperation();
+    }
+
+    if (
+      repoInfo?.type === 'success' &&
+      repoInfo.codeReviewSystem.type === 'github' &&
+      repoInfo.preferredSubmitCommand == null
+    ) {
+      const buttons = [t('Cancel') as 'Cancel', 'ghstack', 'pr'] as const;
+      const cancel = buttons[0];
+      const answer = await showOptionModal({
+        type: 'confirm',
+        icon: 'warning',
+        title: t('Preferred Code Review command not yet configured'),
+        message: (
+          <div className="commit-info-confirm-modal-paragraphs">
+            <div>
+              <T replace={{$pr: <code>sl pr</code>, $ghstack: <code>sl ghstack</code>}}>
+                You can configure Sapling to use either $pr or $ghstack to submit for code review on
+                GitHub.
+              </T>
+            </div>
+            <div>
+              <T
+                replace={{
+                  $config: <code>github.preferred_submit_command</code>,
+                }}>
+                Each submit command has tradeoffs, due to how GitHub creates Pull Requests. This can
+                be controlled by the $config config.
+              </T>
+            </div>
+            <div>
+              <T>To continue, select a command to use to submit.</T>
+            </div>
+            <Link href="https://sapling-scm.com/docs/git/intro#pull-requests">
+              <T>Learn More</T>
+            </Link>
+          </div>
+        ),
+        buttons,
+      });
+      if (answer === cancel || answer == null) {
+        return;
+      }
+      const rememberConfigOp = new SetConfigOperation(
+        'local',
+        'github.preferred_submit_command',
+        answer,
+      );
+      setRepoInfo(info => ({
+        ...nullthrows(info),
+        preferredSubmitCommand: answer,
+      }));
+      // setRepoInfo updates `provider`, but we still have a stale reference in this callback.
+      // So this one time, we need to manually run the new submit command.
+      // Future submit calls can delegate to provider.submitOperation();
+      const submitOp =
+        answer === 'ghstack'
+          ? new GhStackSubmitOperation({
+              draft: shouldSubmitAsDraft,
+            })
+          : answer === 'pr'
+          ? new PrSubmitOperation({
+              draft: shouldSubmitAsDraft,
+            })
+          : null;
+
+      // TODO: account for branching PR
+
+      return [amendOrCommitOp, rememberConfigOp, submitOp].filter(notEmpty);
+    }
+
+    // Only do message sync if we're amending the local commit in some way.
+    // If we're just doing a submit, we expect the message to have been synced previously
+    // during another amend or amend message.
+    const shouldUpdateMessage = !isCommitMode && messageSyncEnabled && anythingToCommit;
+
+    const submitOp = isBranchingPREnabled
+      ? null // branching PRs will show a follow-up modal which controls submitting
+      : nullthrows(provider).submitOperation(
+          commit.isDot ? [] : [commit], // [] means to submit the head commit
+          {
+            draft: shouldSubmitAsDraft,
+            updateFields: shouldUpdateMessage,
+            updateMessage: updateMessage || undefined,
+          },
+        );
+
+    // clear out the update message now that we've used it to submit
+    if (updateMessage) {
+      setUpdateMessage('');
+    }
+
+    return [amendOrCommitOp, submitOp].filter(notEmpty);
+  };
+
+  return (commit.isDot && (anythingToCommit || !isAnythingBeingEdited)) ||
+    (!commit.isDot &&
+      canSubmitIndividualDiffs &&
+      // For non-head commits, "submit" doesn't update the message, which is confusing.
+      // Just hide the submit button so you're encouraged to "amend message" first.
+      !isAnythingBeingEdited) ? (
+    <Tooltip
+      title={
+        disabledReason ??
+        t('Submit for code review with $provider', {
+          replace: {$provider: provider?.label ?? 'remote'},
+        })
+      }
+      placement="top">
+      {isBranchingPREnabled ? (
+        <Button
+          primary
+          disabled={disabledReason != null}
+          onClick={async () => {
+            try {
+              const operations = await getApplicableOperations();
+              if (operations == null || operations.length === 0) {
+                return;
+              }
+
+              for (const operation of operations) {
+                runOperation(operation);
+              }
+              const dag = readAtom(dagWithPreviews);
+              const topOfStack = commit.isDot && isCommitMode ? dag.resolve('.') : commit;
+              if (topOfStack == null) {
+                throw new Error('could not find commit to push');
+              }
+              const pushOps = await showBranchingPrModal(topOfStack);
+              if (pushOps == null) {
+                return;
+              }
+              for (const pushOp of pushOps) {
+                runOperation(pushOp);
+              }
+            } catch (err) {
+              const error = err as Error;
+              showToast(<ErrorNotice error={error} title={<T>Failed to push commits</T>} />, {
+                durationMs: 10000,
+              });
+            }
+          }}>
+          {commit.isDot && anythingToCommit ? (
+            isCommitMode ? (
+              <T>Commit and Push...</T>
+            ) : (
+              <T>Amend and Push...</T>
+            )
+          ) : (
+            <T>Push...</T>
+          )}
+        </Button>
+      ) : (
+        <OperationDisabledButton
+          kind="primary"
+          contextKey={`submit-${commit.isDot ? 'head' : commit.hash}`}
+          disabled={disabledReason != null}
+          runOperation={getApplicableOperations}>
+          {commit.isDot && anythingToCommit ? (
+            isCommitMode ? (
+              <T>Commit and Submit</T>
+            ) : (
+              <T>Amend and Submit</T>
+            )
+          ) : (
+            <T>Submit</T>
+          )}
+        </OperationDisabledButton>
+      )}
+    </Tooltip>
+  ) : null;
 }
 
 async function tryToUpdateRemoteMessage(
@@ -960,8 +1139,28 @@ async function tryToUpdateRemoteMessage(
       .operation('SyncDiffMessageMutation', 'SyncMessageError', {extras: {reason}}, () =>
         updateRemoteMessage(diffId, title, description),
       )
-      .catch(() => {
-        // TODO: We should notify about this in the UI
+      .catch(err => {
+        // Uh oh we failed to sync. Let's override all syncing so you can see your local changes
+        // and we don't get you stuck in a syncing loop.
+
+        writeAtom(messageSyncingOverrideState, false);
+
+        showToast(
+          <Banner kind={BannerKind.error}>
+            <Column alignStart>
+              <div>
+                <T>Failed to sync message to remote. Further syncing has been disabled.</T>
+              </div>
+              <div>
+                <T>Try manually syncing and restarting ISL.</T>
+              </div>
+              <div>{firstLine(err.message || err.toString())}</div>
+            </Column>
+          </Banner>,
+          {
+            durationMs: 20_000,
+          },
+        );
       });
   }
   return false;

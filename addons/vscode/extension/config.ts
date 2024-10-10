@@ -9,6 +9,8 @@ import {Internal} from 'isl-server/src/Internal';
 import os from 'node:os';
 import * as vscode from 'vscode';
 
+export const PERSISTED_STORAGE_KEY_PREFIX = 'isl-persisted:';
+
 /**
  * Determine which command to use for `sl`, based on vscode configuration.
  * Changes to this setting require restarting, so it's ok to cache this value
@@ -21,4 +23,9 @@ export function getCLICommand(): string {
     Internal.SLCommand ||
     (os.platform() === 'win32' ? 'sl.exe' : 'sl')
   );
+}
+
+/** Whether the user has configured for files, diffs, and comparisons to open in ViewColumn.Beside instead of ViewColumn.Active. */
+export function shouldOpenBeside(): boolean {
+  return vscode.workspace.getConfiguration('sapling').get<boolean>('isl.openBeside') === true;
 }

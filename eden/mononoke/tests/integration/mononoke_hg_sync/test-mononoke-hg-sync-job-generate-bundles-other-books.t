@@ -13,8 +13,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo foo > a
   $ echo foo > b
   $ hg addremove && hg ci -m 'initial'
@@ -33,34 +33,33 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Make client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client-push --noupdate
 
 Push to Mononoke
   $ cd $TESTTMP/client-push
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q tip
 
   $ mkcommit pushcommit
-  $ hgmn push -r . --to newbook --create -q
+  $ hg push -r . --to newbook --create -q
   $ BOOK_LOC=$(hg log -r newbook -T '{node}')
 
 Force push
   $ hg up -q "min(all())"
   $ mkcommit forcepush
-  $ hgmn push -r . --to newbook --create -q
+  $ hg push -r . --to newbook --create -q
 
 Bookmark move
-  $ hgmn push -r "$BOOK_LOC" --to newbook --pushvar NON_FAST_FORWARD=true
-  pushing rev 1e43292ffbb3 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark newbook
+  $ hg push -r "$BOOK_LOC" --to newbook --pushvar NON_FAST_FORWARD=true
+  pushing rev 1e43292ffbb3 to destination mono:repo bookmark newbook
   searching for changes
   no changes found
   updating bookmark newbook
@@ -72,14 +71,14 @@ Force push of unrelated commit stack containing empty tree
   $ hg commit --amend
   $ mkcommit unrelated2
   $ mkcommit unrelated3
-  $ hgmn push -r . --to newbook --non-forward-move --create --force -q
+  $ hg push -r . --to newbook --non-forward-move --create --force -q
 move back
   $ mononoke_newadmin bookmarks -R repo set newbook "$BOOK_LOC"
   Updating publishing bookmark newbook from 37ea8302245e8e828fa0745759441d4e9cd99cb0e4ffb045096c5fadc3207274 to 9243ee8d4ea76ca29fb3135f85b9596eb51688fd06347983c449ed1eec255345
 
 Delete a bookmark
-  $ hgmn push --delete newbook
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push --delete newbook
+  pushing to mono:repo
   searching for changes
   no changes found
   deleting remote bookmark newbook
@@ -96,53 +95,49 @@ Verify that the entries are in update log
   7|9243EE8D4EA76CA29FB3135F85B9596EB51688FD06347983C449ED1EEC255345||pushrebase
 
 Sync it to another client
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ enable_replay_verification_hook
-  $ cat >> .hg/hgrc <<EOF
-  > [treemanifest]
-  > treeonly=True
-  > EOF
   $ cd $TESTTMP
 
 Sync a creation of a bookmark
-  $ mononoke_hg_sync repo-hg 1 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 1 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [2]* (glob)
 
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ hg log -r newbook -T '{desc}'
   pushcommit (no-eol)
   $ cd -
   $TESTTMP
 
 Sync force push
-  $ mononoke_hg_sync repo-hg 2 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 2 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [3]* (glob)
 
 Sync bookmark move
-  $ mononoke_hg_sync repo-hg 3 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 3 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [4]* (glob)
 
-  $ cd $TESTTMP/repo-hg && hg log -r newbook -T "{desc}\n" && cd -
+  $ cd $TESTTMP/repo && hg log -r newbook -T "{desc}\n" && cd -
   pushcommit
   $TESTTMP
 
 Sync force push of unrelated commit stack containing empty tree
-  $ mononoke_hg_sync repo-hg 4 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 4 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [5]* (glob)
 
-  $ cd $TESTTMP/repo-hg && hg log -r newbook -T "{desc}\n" && cd -
+  $ cd $TESTTMP/repo && hg log -r newbook -T "{desc}\n" && cd -
   unrelated3
   $TESTTMP
 
 ..and move the bookmark back (via mononoke-admin)
-  $ mononoke_hg_sync repo-hg 5 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 5 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [6]* (glob)
 
 Sync deletion of a bookmark
-  $ mononoke_hg_sync repo-hg 6 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync repo 6 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [7]* (glob)
 
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ hg log -r newbook
   abort: unknown revision 'newbook'!
   [255]

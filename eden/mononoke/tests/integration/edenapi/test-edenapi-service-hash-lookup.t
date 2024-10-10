@@ -12,9 +12,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ drawdag << EOS
@@ -44,11 +43,11 @@ Populate test repo
 
 Import and start mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
   $ setup_mononoke_config
   $ start_and_wait_for_mononoke_server
 Check response.
-  $ sl debugapi -e hashlookup -i '["4", "26805aba1e600a82e93661149f2313866a221a7b", "", "ffff"]'
+  $ hg debugapi mono:repo -e hashlookup -i '["4", "26805aba1e600a82e93661149f2313866a221a7b", "", "ffff"]'
   [{"hgids": [bin("426bada5c67598ca65036d57d9e4b64b0c1ce7a0"),
               bin("49cb92066bfd0763fff729c354345650b7428554")],
     "request": {"InclusiveRange": [bin("4000000000000000000000000000000000000000"),

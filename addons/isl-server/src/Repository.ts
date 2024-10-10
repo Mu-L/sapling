@@ -10,6 +10,7 @@ import type {KindOfChange, PollKind} from './WatchForChanges';
 import type {TrackEventName} from './analytics/eventNames';
 import type {ConfigLevel, ResolveCommandConflictOutput} from './commands';
 import type {RepositoryContext} from './serverTypes';
+import type {ExecaError} from 'execa';
 import type {
   CommitInfo,
   Disposable,
@@ -262,6 +263,7 @@ export class Repository {
           if (Internal.runArcanistCommand == null) {
             return Promise.reject(Error('InternalArcanist runner is not supported'));
           }
+          ctx.logger.info('running arcanist command:', normalizedArgs);
           return Internal.runArcanistCommand(cwd, normalizedArgs, handleCommandProgress, signal);
         }
         return Promise.resolve();
@@ -697,14 +699,17 @@ export class Repository {
     execution.stderr?.on('data', data => {
       onProgress('stderr', data.toString());
     });
-    execution.on('exit', exitCode => {
-      onProgress('exit', exitCode || 0);
-    });
     signal.addEventListener('abort', () => {
       ctx.logger.log('kill operation: ', command, cwdRelativeArgs.join(' '));
     });
     handleAbortSignalOnProcess(execution, signal);
-    await execution;
+    try {
+      const result = await execution;
+      onProgress('exit', result.exitCode || 0);
+    } catch (err) {
+      onProgress('exit', isExecaError(err) ? err.exitCode : -1);
+      throw err;
+    }
   }
 
   /**
@@ -782,20 +787,26 @@ export class Repository {
       };
       this.uncommittedChangesEmitter.emit('change', this.uncommittedChanges);
     } catch (err) {
-      this.initialConnectionContext.logger.error('Error fetching files: ', err);
-      if (isExecaError(err)) {
-        if (err.stderr.includes('checkout is currently in progress')) {
+      let error = err;
+      if (isExecaError(error)) {
+        if (error.stderr.includes('checkout is currently in progress')) {
           this.initialConnectionContext.logger.info(
             'Ignoring `sl status` error caused by in-progress checkout',
           );
           return;
         }
       }
+
+      this.initialConnectionContext.logger.error('Error fetching files: ', error);
+      if (isExecaError(error)) {
+        error = simplifyExecaError(error);
+      }
+
       // emit an error, but don't save it to this.uncommittedChanges
       this.uncommittedChangesEmitter.emit('change', {
         fetchStartTimestamp,
         fetchCompletedTimestamp: Date.now(),
-        files: {error: err instanceof Error ? err : new Error(err as string)},
+        files: {error: error instanceof Error ? error : new Error(error as string)},
       });
     }
   });
@@ -886,7 +897,12 @@ export class Repository {
       if (isExecaError(error) && error.stderr.includes('Please check your internet connection')) {
         error = Error('Network request failed. Please check your internet connection.');
       }
+
       this.initialConnectionContext.logger.error('Error fetching commits: ', error);
+      if (isExecaError(error)) {
+        error = simplifyExecaError(error);
+      }
+
       this.smartlogCommitsChangesEmitter.emit('change', {
         fetchStartTimestamp,
         fetchCompletedTimestamp: Date.now(),
@@ -1119,7 +1135,7 @@ export class Repository {
     ctx: RepositoryContext,
     hash: Hash,
     excludedFiles: string[],
-  ): Promise<number> {
+  ): Promise<{sloc: number; strictSloc: number}> {
     const exclusions = excludedFiles.flatMap(file => [
       '-X',
       absolutePathForFileInRepo(file, this) ?? file,
@@ -1134,55 +1150,24 @@ export class Repository {
     ).stdout;
 
     const sloc = this.parseSlocFrom(output);
+    const strictSloc = this.parseStrictSlocFrom(output);
 
-    ctx.logger.info('Fetched SLOC for commit:', hash, output, `SLOC: ${sloc}`);
-    return sloc;
-  }
-
-  public async fetchStrictSignificantLinesOfCode(
-    ctx: RepositoryContext,
-    hash: Hash,
-    excludedFiles: string[],
-  ): Promise<number> {
-    const exclusions = excludedFiles.flatMap(file => [
-      '-X',
-      absolutePathForFileInRepo(file, this) ?? file,
-    ]);
-
-    const output = (
-      await this.runCommand(
-        [
-          'diff',
-          '--stat',
-          '-B',
-          '-X',
-          '**__generated__**',
-          '-X',
-          '**__tests__**',
-          '-X',
-          '**.md',
-          ...exclusions,
-          '-c',
-          hash,
-        ],
-        'SlocCommand',
-        ctx,
-      )
-    ).stdout;
-
-    const sloc = this.parseSlocFrom(output);
-
-    ctx.logger.info('Fetched strict SLOC for commit:', hash, output, `Strict SLOC: ${sloc}`);
-    return sloc;
+    ctx.logger.info(
+      'Fetched SLOC for commit:',
+      hash,
+      output,
+      `SLOC: ${sloc} Strict SLOC: ${strictSloc}`,
+    );
+    return {sloc, strictSloc};
   }
 
   public async fetchPendingAmendSignificantLinesOfCode(
     ctx: RepositoryContext,
     hash: Hash,
     includedFiles: string[],
-  ): Promise<number> {
+  ): Promise<{sloc: number; strictSloc: number}> {
     if (includedFiles.length === 0) {
-      return 0; // don't bother running sl diff if there are no files to include
+      return {sloc: 0, strictSloc: 0}; // don't bother running sl diff if there are no files to include
     }
     const inclusions = includedFiles.flatMap(file => [
       '-I',
@@ -1198,69 +1183,29 @@ export class Repository {
     ).stdout;
 
     if (output.trim() === '') {
-      return 0;
+      return {sloc: 0, strictSloc: 0};
     }
+
     const sloc = this.parseSlocFrom(output);
-
-    ctx.logger.info('Fetched Pending AMEND SLOC for commit:', hash, output, `SLOC: ${sloc}`);
-    return sloc;
-  }
-
-  public async fetchPendingAmendStrictSignificantLinesOfCode(
-    ctx: RepositoryContext,
-    hash: Hash,
-    includedFiles: string[],
-  ): Promise<number> {
-    if (includedFiles.length === 0) {
-      return 0; // don't bother running sl diff if there are no files to include
-    }
-    const inclusions = includedFiles.flatMap(file => [
-      '-I',
-      absolutePathForFileInRepo(file, this) ?? file,
-    ]);
-
-    const output = (
-      await this.runCommand(
-        [
-          'diff',
-          '--stat',
-          '-B',
-          '-X',
-          '**__generated__**',
-          '-X',
-          '**__tests__**',
-          '-X',
-          '**.md',
-          ...inclusions,
-          '-r',
-          '.^',
-        ],
-        'PendingSlocCommand',
-        ctx,
-      )
-    ).stdout;
-
-    if (output.trim() === '') {
-      return 0;
-    }
-    const sloc = this.parseSlocFrom(output);
+    const strictSloc = this.parseStrictSlocFrom(output);
 
     ctx.logger.info(
-      'Fetched Pending AMEND strict SLOC for commit:',
+      'Fetched Pending AMEND SLOC for commit:',
       hash,
       output,
-      `Strict SLOC: ${sloc}`,
+      `SLOC: ${sloc} Strict SLOC: ${strictSloc}`,
     );
-    return sloc;
+
+    return {sloc, strictSloc};
   }
 
   public async fetchPendingSignificantLinesOfCode(
     ctx: RepositoryContext,
     hash: Hash,
     includedFiles: string[],
-  ): Promise<number> {
+  ): Promise<{sloc: number; strictSloc: number}> {
     if (includedFiles.length === 0) {
-      return 0; // don't bother running sl diff if there are no files to include
+      return {sloc: 0, strictSloc: 0}; // don't bother running sl diff if there are no files to include
     }
     const inclusions = includedFiles.flatMap(file => [
       '-I',
@@ -1274,52 +1219,17 @@ export class Repository {
         ctx,
       )
     ).stdout;
+
     const sloc = this.parseSlocFrom(output);
-
-    ctx.logger.info('Fetched Pending SLOC for commit:', hash, output, `SLOC: ${sloc}`);
-    return sloc;
-  }
-
-  public async fetchPendingStrictSignificantLinesOfCode(
-    ctx: RepositoryContext,
-    hash: Hash,
-    includedFiles: string[],
-  ): Promise<number> {
-    if (includedFiles.length === 0) {
-      return 0; // don't bother running sl diff if there are no files to include
-    }
-    const inclusions = includedFiles.flatMap(file => [
-      '-I',
-      absolutePathForFileInRepo(file, this) ?? file,
-    ]);
-
-    const output = (
-      await this.runCommand(
-        [
-          'diff',
-          '--stat',
-          '-B',
-          '-X',
-          '**__generated__**',
-          '-X',
-          '**__tests__**',
-          '-X',
-          '**.md',
-          ...inclusions,
-        ],
-        'PendingSlocCommand',
-        ctx,
-      )
-    ).stdout;
-    const sloc = this.parseSlocFrom(output);
+    const strictSloc = this.parseStrictSlocFrom(output);
 
     ctx.logger.info(
-      'Fetched Pending strict SLOC for commit:',
+      'Fetched Pending SLOC for commit:',
       hash,
       output,
-      `Strict SLOC: ${sloc}`,
+      `SLOC: ${sloc} Strict SLOC: ${strictSloc}`,
     );
-    return sloc;
+    return {sloc, strictSloc};
   }
 
   private parseSlocFrom(output: string) {
@@ -1330,6 +1240,25 @@ export class Repository {
     const insertions = parseInt(diffStatMatch?.[1] ?? '0', 10);
     const deletions = parseInt(diffStatMatch?.[2] ?? '0', 10);
     const sloc = insertions + deletions;
+    return sloc;
+  }
+
+  private parseStrictSlocFrom(output: string) {
+    let sloc = 0;
+    const lines = output.trim().split('\n');
+
+    for (let i = 0; i < lines.length - 1; i++) {
+      const fileChange = lines[i];
+      const [path, lineChange] = fileChange.split('|');
+      const trimmedPath = path.trim();
+
+      if (!trimmedPath.includes('/__tests__/') && !trimmedPath.endsWith('.md')) {
+        const lineChangeMatch = lineChange.match(/\d+/);
+        const lineChangeCount = lineChangeMatch ? parseInt(lineChangeMatch[0]) : 0;
+        sloc += lineChangeCount;
+      }
+    }
+
     return sloc;
   }
 
@@ -1575,4 +1504,11 @@ export function absolutePathForFileInRepo(
 
 function isUnhealthyEdenFs(cwd: string): Promise<boolean> {
   return exists(path.join(cwd, 'README_EDEN.txt'));
+}
+
+/**
+ * Extract the actually useful stderr part of the Execa Error, to avoid the long command args being printed first.
+ * */
+function simplifyExecaError(error: ExecaError): Error {
+  return new Error(error.stderr.trim() || error.message);
 }

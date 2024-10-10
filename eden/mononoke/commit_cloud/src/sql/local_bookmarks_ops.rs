@@ -8,11 +8,13 @@
 use ::sql_ext::mononoke_queries;
 use async_trait::async_trait;
 use clientinfo::ClientRequestInfo;
+use commit_cloud_types::LocalBookmarksMap;
+use commit_cloud_types::WorkspaceLocalBookmark;
 use sql::Connection;
 use sql::Transaction;
 
-use crate::references::local_bookmarks::LocalBookmarksMap;
-use crate::references::local_bookmarks::WorkspaceLocalBookmark;
+use crate::ctx::CommitCloudContext;
+use crate::sql::common::UpdateWorkspaceNameArgs;
 use crate::sql::ops::Delete;
 use crate::sql::ops::Get;
 use crate::sql::ops::GetAsMap;
@@ -41,6 +43,11 @@ mononoke_queries! {
         mysql("INSERT INTO `bookmarks` (`reponame`, `workspace`, `name`, `node`) VALUES ({reponame}, {workspace}, {name}, {commit})")
         sqlite("INSERT INTO `workspacebookmarks` (`reponame`, `workspace`, `name`, `commit`) VALUES ({reponame}, {workspace}, {name}, {commit})")
     }
+    write UpdateWorkspaceName( reponame: String, workspace: String, new_workspace: String) {
+        none,
+        mysql("UPDATE `bookmarks` SET workspace = {new_workspace} WHERE workspace = {workspace} and reponame = {reponame}")
+        sqlite("UPDATE `workspacebookmarks` SET workspace = {new_workspace} WHERE workspace = {workspace} and reponame = {reponame}")
+    }
 }
 
 #[async_trait]
@@ -58,10 +65,7 @@ impl Get<WorkspaceLocalBookmark> for SqlCommitCloud {
         .await?;
         rows.into_iter()
             .map(|(name, commit)| {
-                Ok(WorkspaceLocalBookmark {
-                    name,
-                    commit: changeset_from_bytes(&commit, self.uses_mysql)?,
-                })
+                WorkspaceLocalBookmark::new(name, changeset_from_bytes(&commit, self.uses_mysql)?)
             })
             .collect::<anyhow::Result<Vec<WorkspaceLocalBookmark>>>()
     }
@@ -109,8 +113,8 @@ impl Insert<WorkspaceLocalBookmark> for SqlCommitCloud {
             cri,
             &reponame,
             &workspace,
-            &data.name,
-            &changeset_as_bytes(&data.commit, self.uses_mysql)?,
+            data.name(),
+            &changeset_as_bytes(data.commit(), self.uses_mysql)?,
         )
         .await?;
         Ok(txn)
@@ -119,16 +123,23 @@ impl Insert<WorkspaceLocalBookmark> for SqlCommitCloud {
 
 #[async_trait]
 impl Update<WorkspaceLocalBookmark> for SqlCommitCloud {
-    type UpdateArgs = ();
-
+    type UpdateArgs = UpdateWorkspaceNameArgs;
     async fn update(
         &self,
-        _reponame: String,
-        _workspace: String,
-        _args: Self::UpdateArgs,
-    ) -> anyhow::Result<()> {
-        //To be implemented among other Update queries
-        return Err(anyhow::anyhow!("Not implemented yet"));
+        txn: Transaction,
+        cri: Option<&ClientRequestInfo>,
+        cc_ctx: CommitCloudContext,
+        args: Self::UpdateArgs,
+    ) -> anyhow::Result<(Transaction, u64)> {
+        let (txn, result) = UpdateWorkspaceName::maybe_traced_query_with_transaction(
+            txn,
+            cri,
+            &cc_ctx.reponame,
+            &cc_ctx.workspace,
+            &args.new_workspace,
+        )
+        .await?;
+        Ok((txn, result.affected_rows()))
     }
 }
 

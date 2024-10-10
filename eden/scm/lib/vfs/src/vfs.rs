@@ -111,6 +111,10 @@ impl VFS {
         })
     }
 
+    pub fn exists(&self, path: &RepoPath) -> Result<bool> {
+        Ok(self.join(path).try_exists()?)
+    }
+
     pub fn is_file(&self, path: &RepoPath) -> Result<bool> {
         let filepath = self.inner.auditor.audit(path)?;
         Ok(filepath.is_file())
@@ -283,7 +287,7 @@ impl VFS {
                 // failures not due to a conflicting file would show up here again, so let's not worry
                 // about it.
                 self.clear_conflicts(path).with_context(|| {
-                    format!("can't clear conflicts after handling error \"{:?}\"", e)
+                    format!("can't clear conflicts after handling error \"{:#}\"", e)
                 })?;
 
                 self.write_inner(path, data, flag)

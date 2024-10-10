@@ -10,12 +10,14 @@ mod upload;
 
 use anyhow::Result;
 use bonsai_hg_mapping::BonsaiHgMapping;
+use bookmarks::Bookmarks;
 use clap::Parser;
 use clap::Subcommand;
 use info::CasStoreInfoArgs;
 use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeApp;
 use repo_blobstore::RepoBlobstore;
+use repo_derived_data::RepoDerivedData;
 use repo_identity::RepoIdentity;
 use upload::CasStoreUploadArgs;
 
@@ -42,6 +44,12 @@ pub struct Repo {
 
     #[facet]
     bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    bookmarks: dyn Bookmarks,
+
+    #[facet]
+    repo_derived_data: RepoDerivedData,
 }
 
 #[derive(Subcommand)]

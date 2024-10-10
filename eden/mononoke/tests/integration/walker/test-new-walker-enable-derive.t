@@ -17,9 +17,8 @@ setup configuration
   > amend=
   > EOF
 
-  $ hg init repo-hg
-  $ cd repo-hg || exit 1
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo || exit 1
   $ drawdag <<EOF
   > C
   > |
@@ -30,7 +29,7 @@ setup configuration
 
   $ hg bookmark master_bookmark -r tip
   $ cd ..
-  $ blobimport repo-hg/.hg repo --derived-data-type fsnodes
+  $ blobimport repo/.hg repo --derived-data-type fsnodes
 
   $ default_setup_blobimport "blob_files"
   hg repo

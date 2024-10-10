@@ -24,6 +24,7 @@ use metaconfig_types::CrossRepoCommitValidation;
 use metaconfig_types::DerivedDataConfig;
 use metaconfig_types::DerivedDataTypesConfig;
 use metaconfig_types::GitConcurrencyParams;
+use metaconfig_types::GitConfigs;
 use metaconfig_types::GitDeltaManifestV2Config;
 use metaconfig_types::GitDeltaManifestVersion;
 use metaconfig_types::GlobalrevConfig;
@@ -73,6 +74,7 @@ use repos::RawCrossRepoCommitValidationConfig;
 use repos::RawDerivedDataConfig;
 use repos::RawDerivedDataTypesConfig;
 use repos::RawGitConcurrencyParams;
+use repos::RawGitConfigs;
 use repos::RawGitDeltaManifestV2Config;
 use repos::RawHgSyncConfig;
 use repos::RawHookConfig;
@@ -362,6 +364,7 @@ impl Convert for RawLfsParams {
             generate_lfs_blob_in_hg_sync_job: self
                 .generate_lfs_blob_in_hg_sync_job
                 .unwrap_or(false),
+            use_upstream_lfs_server: self.use_upstream_lfs_server.unwrap_or(false),
         })
     }
 }
@@ -553,6 +556,7 @@ impl Convert for RawDerivedDataConfig {
                 .into_iter()
                 .map(|(s, raw_config)| Ok((s, raw_config.convert()?)))
                 .collect::<Result<_, anyhow::Error>>()?,
+            derivation_queue_scuba_table: self.derivation_queue_scuba_table,
         })
     }
 }
@@ -672,6 +676,7 @@ impl Convert for RawCasSyncConfig {
     fn convert(self) -> Result<Self::Output> {
         Ok(MononokeCasSyncConfig {
             main_bookmark_to_sync: self.main_bookmark_to_sync,
+            sync_all_bookmarks: self.sync_all_bookmarks,
         })
     }
 }
@@ -802,6 +807,23 @@ impl Convert for RawGitConcurrencyParams {
     }
 }
 
+impl Convert for RawGitConfigs {
+    type Output = GitConfigs;
+
+    fn convert(self) -> Result<Self::Output> {
+        let git_concurrency = self.git_concurrency.convert()?;
+        let git_lfs_interpret_pointers = self.git_lfs_interpret_pointers.unwrap_or(false);
+
+        let fetch_message = self.fetch_message;
+
+        Ok(GitConfigs {
+            git_concurrency,
+            git_lfs_interpret_pointers,
+            fetch_message,
+        })
+    }
+}
+
 impl Convert for RawXRepoSyncSourceConfig {
     type Output = XRepoSyncSourceConfig;
 
@@ -833,6 +855,7 @@ impl Convert for RawCommitCloudConfig {
     fn convert(self) -> Result<Self::Output> {
         Ok(CommitCloudConfig {
             mocked_employees: self.mocked_employees,
+            disable_interngraph_notification: self.disable_interngraph_notification,
         })
     }
 }

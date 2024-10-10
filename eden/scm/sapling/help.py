@@ -56,7 +56,7 @@ def listexts(header, exts, indent: int = 1, showdeprecated: bool = False) -> Lis
     """return a text listing of the given extensions"""
     rst = []
     if exts:
-        for name, desc in sorted(pycompat.iteritems(exts)):
+        for name, desc in sorted(exts.items()):
             if not showdeprecated and any(w in desc for w in _exclkeywords):
                 continue
             rst.append("%s:%s: %s\n" % (" " * indent, name, desc))
@@ -391,13 +391,13 @@ class _helpdispatch:
         self.opts = opts
 
         self.commandshelptable = util.sortdict()
-        for cmd, entry in pycompat.iteritems(self.commands.table):
+        for cmd, entry in self.commands.table.items():
             self.commandshelptable[cmd] = (
                 getattr(entry[0], "__rusthelp__", None) or entry
             )
 
         self.commandindex = {}
-        for name, cmd in pycompat.iteritems(self.commandshelptable):
+        for name, cmd in self.commandshelptable.items():
             for n in name.lstrip("^").split("|"):
                 self.commandindex[n] = cmd
 
@@ -607,10 +607,17 @@ class _helpdispatch:
         doc = self._helpcmddoc(cmd[0], pycompat.getdoc(cmd[0]))
         return " :%s: %s\n" % (name, doc)
 
+    def _helpaliasitem(self, name):
+        doc = self.ui.config("alias", f"{name}:doc")
+        if not doc:
+            return None
+        doc = doc.splitlines()[0].strip()
+        return " :%s: %s\n" % (name, doc)
+
     def helplist(self, name, select=None, **opts):
         h = {}
         cmds = {}
-        for c, e in pycompat.iteritems(self.commandshelptable):
+        for c, e in self.commandshelptable.items():
             if select and not select(c):
                 continue
             f = c.lstrip("^").partition("|")[0]
@@ -658,9 +665,10 @@ class _helpdispatch:
 
             sectionrst = []
             for command in commands:
-                cmdrst = self._helpcmditem(command)
-                if cmdrst:
+                if cmdrst := self._helpcmditem(command):
                     sectionrst.append(cmdrst)
+                elif aliasrst := self._helpaliasitem(command):
+                    sectionrst.append(aliasrst)
 
             if sectionrst:
                 rst.append(desc + ":\n\n")
@@ -803,7 +811,7 @@ class _helpdispatch:
                 or (callable(doc) and lowercontains(doc(self.ui)))
             ):
                 results["topics"].append((names[0], header))
-        for cmd, entry in pycompat.iteritems(self.commandshelptable):
+        for cmd, entry in self.commandshelptable.items():
             if len(entry) == 3:
                 summary = entry[2]
             else:
@@ -819,8 +827,8 @@ class _helpdispatch:
                     continue
                 results["commands"].append((cmdname, summary))
         for name, docs in itertools.chain(
-            pycompat.iteritems(extensions.enabled(False)),
-            pycompat.iteritems(extensions.disabled()),
+            extensions.enabled(False).items(),
+            extensions.disabled().items(),
         ):
             if not docs:
                 continue
@@ -833,7 +841,7 @@ class _helpdispatch:
             except ImportError:
                 # debug message would be printed in extensions.load()
                 continue
-            for cmd, entry in pycompat.iteritems(getattr(mod, "cmdtable", {})):
+            for cmd, entry in getattr(mod, "cmdtable", {}).items():
                 if kw in cmd or (len(entry) > 2 and lowercontains(entry[2])):
                     cmdname = cmd.partition("|")[0].lstrip("^")
                     cmddoc = pycompat.getdoc(entry[0])

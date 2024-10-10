@@ -40,7 +40,6 @@ from sapling import (
     commands,
     error,
     extensions,
-    hg,
     json,
     mutation,
     namespaces,
@@ -99,6 +98,8 @@ DESCRIPTION_REGEX: Pattern[str] = re.compile(
     "(?P<callsign>[A-Z]{1,})"  # Callsign
     "(?P<id>[a-f0-9]+)"  # rev
 )
+
+GRAFT_INFO_REGEX: Pattern[str] = re.compile("(?m)^(Grafted from [a-f0-9]+)")
 
 DEFAULT_TIMEOUT = 60
 MAX_CONNECT_RETRIES = 3
@@ -169,13 +170,16 @@ def makebackoutmessage(orig, repo, message: str, node):
     return message
 
 
-def makegraftmessage(orig, ctx, opts):
-    message = orig(ctx, opts)
-    if opts.get("from_path"):
-        message = re.sub(
-            "(?m)^Differential Revision:", "Original Phabricator Diff:", message
-        )
-    return message
+def makegraftmessage(orig, repo, ctx, opts):
+    message = orig(repo, ctx, opts)
+    if not opts.get("from_path"):
+        return message
+
+    # Grafted from e8470334d2058106534ac7d72485e6bfaa76ca01
+    new_message = cmdutil.extract_summary(ctx.repo().ui, message)
+    if revision := diffprops.parserevfromcommitmsg(message):
+        new_message = GRAFT_INFO_REGEX.sub(r"\1 (D%s)" % revision, new_message)
+    return new_message
 
 
 def extsetup(ui) -> None:
@@ -737,7 +741,9 @@ def uisetup(ui) -> None:
 
         extensions.wrapfunction(uimod, "_auto_username", _auto_username)
 
-    ui.setconfig("hooks", "post-pull.marklanded", _("@prog@ debugmarklanded"))
+    ui.setconfig(
+        "hooks", "post-pull.marklanded", _get_shell_cmd(ui, ["debugmarklanded"])
+    )
 
 
 @templater.templatefunc("mirrornode")
@@ -1315,3 +1321,15 @@ def _matchreponames(diffreponame: Optional[str], localreponame: Optional[str]) -
     dilen = len(diffreponame)
     lolen = len(localreponame)
     return dilen <= lolen and diffreponame[-dilen:] == localreponame[-dilen:]
+
+
+def _get_shell_cmd(ui, args: List[str]) -> str:
+    full_args = util.hgcmd()
+    if ui.quiet:
+        full_args.append("-q")
+    if ui.verbose:
+        full_args.append("-v")
+    if ui.debugflag:
+        full_args.append("--debug")
+    full_args += args
+    return " ".join(map(util.shellquote, full_args))

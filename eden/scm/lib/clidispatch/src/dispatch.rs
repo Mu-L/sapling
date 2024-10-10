@@ -20,8 +20,10 @@ use cliparser::parser::StructFlags;
 use cliparser::parser::Value;
 use configloader::config::ConfigSet;
 use configloader::hg::set_pinned;
+use configloader::hg::RepoInfo;
 use configmodel::Config;
 use configmodel::ConfigExt;
+use hgtime::HgTime;
 use repo::repo::Repo;
 
 use crate::abort_if;
@@ -132,6 +134,25 @@ fn initialize_blackbox(optional_repo: &OptionalRepo) -> Result<()> {
     Ok(())
 }
 
+fn initialize_hgtime(config: &dyn Config) -> Result<()> {
+    let mut should_clear = true;
+    if let Some(now_str) = config.get("devel", "default-date") {
+        let now_str = now_str.trim();
+        if !now_str.is_empty() {
+            if let Some(now) = HgTime::parse(now_str) {
+                tracing::info!(?now, "set 'now' for testing");
+                now.set_as_now_for_testing();
+                should_clear = false;
+            }
+        }
+    }
+    if should_clear {
+        tracing::debug!("unset 'now' for testing");
+        HgTime::clear_now_for_testing();
+    }
+    Ok(())
+}
+
 fn initialize_indexedlog(config: &dyn Config) -> Result<()> {
     indexedlog::config::configure(config)?;
     Ok(())
@@ -195,7 +216,9 @@ impl Dispatcher {
             Err(err) => {
                 // If we failed to load the repo, make one last ditch effort to load a repo-less config.
                 // This might allow us to run the network doctor even if this repo's dynamic config is not loadable.
-                if let Ok(config) = configloader::hg::load(None, &pinned_configs(&global_opts)) {
+                if let Ok(config) =
+                    configloader::hg::load(RepoInfo::NoRepo, &pinned_configs(&global_opts))
+                {
                     Err(errors::triage_error(&config, err, None))
                 } else {
                     Err(err)
@@ -240,33 +263,30 @@ impl Dispatcher {
     }
 
     fn load_repoless_config(&self) -> Result<ConfigSet> {
-        configloader::hg::load(None, &pinned_configs(&self.early_global_opts))
+        configloader::hg::load(RepoInfo::NoRepo, &pinned_configs(&self.early_global_opts))
     }
 
-    fn default_command(&self) -> Result<String, UnknownCommand> {
-        // Passing in --verbose also disables this behavior,
+    fn default_command(&self) -> Result<String> {
+        // Passing in --version also disables this behavior,
         // but that option is handled somewhere else
         if self.early_global_opts.help || hgplain::is_plain(None) {
-            return Err(UnknownCommand(String::new()));
+            return Err(UnknownCommand(String::new()).into());
         }
-        let command = if let (OptionalRepo::None(_), Some(command)) = (
-            &self.optional_repo,
-            self.optional_repo
-                .config()
-                .get_nonempty("commands", "naked-default.no-repo"),
+
+        let config = self.optional_repo.config();
+        let no_repo_command = config.get_nonempty("commands", "naked-default.no-repo");
+        let in_repo_command = config.get_nonempty("commands", "naked-default.in-repo");
+
+        match (
+            self.optional_repo.has_repo(),
+            no_repo_command,
+            in_repo_command,
         ) {
-            command
-        } else {
-            // When there is no repo and no default command is specified, users are
-            // unlikely to know what's going on. Because having the in-repo command
-            // is now the expected behavior, we should fall back to that unless
-            // the naked command for no repo is specified.
-            self.optional_repo
-                .config()
-                .get_nonempty("commands", "naked-default.in-repo")
-                .ok_or_else(|| UnknownCommand(String::new()))?
-        };
-        Ok(command.to_string())
+            (false, Some(command), _) => Ok(command.to_string()),
+            (true, _, None) => Err(errors::CommandRequired.into()),
+            (false, None, None) => Err(UnknownCommand(String::new()).into()),
+            (true, _, Some(command)) | (false, None, Some(command)) => Ok(command.to_string()),
+        }
     }
 
     fn prepare_command<'a>(
@@ -281,6 +301,7 @@ impl Dispatcher {
         }
 
         initialize_indexedlog(config)?;
+        initialize_hgtime(config)?;
 
         // Prepare alias handling.
         let alias_lookup = |name: &str| {
@@ -434,7 +455,8 @@ impl Dispatcher {
                 CommandFunc::NoRepo(f) => f(parsed, io, self.optional_repo.config()),
                 CommandFunc::WorkingCopy(f) => {
                     let repo = self.repo_mut()?;
-                    let mut wc = repo.working_copy()?;
+                    let wc = repo.working_copy()?;
+                    let mut wc = wc.write();
                     f(parsed, io, repo, &mut wc)
                 }
             };

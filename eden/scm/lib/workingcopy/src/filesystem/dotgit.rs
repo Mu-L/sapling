@@ -12,7 +12,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use configmodel::Config;
 use context::CoreContext;
-use gitcompat::rungit::RunGitOptions;
+use gitcompat::GitCmd;
+use gitcompat::RepoGit;
 use manifest_tree::TreeManifest;
 use parking_lot::Mutex;
 use pathmatcher::DynMatcher;
@@ -32,9 +33,11 @@ use crate::filesystem::PendingChange;
 pub struct DotGitFileSystem {
     #[allow(unused)]
     treestate: Arc<Mutex<TreeState>>,
+    #[allow(unused)]
     vfs: VFS,
+    #[allow(unused)]
     store: Arc<dyn FileStore>,
-    git: Arc<RunGitOptions>,
+    git: Arc<RepoGit>,
 }
 
 impl DotGitFileSystem {
@@ -44,8 +47,7 @@ impl DotGitFileSystem {
         store: Arc<dyn FileStore>,
         config: &dyn Config,
     ) -> Result<Self> {
-        let mut git = RunGitOptions::from_config(config);
-        git.set_git_dir(vfs.root().join(".git"));
+        let git = RepoGit::from_root_and_config(vfs.root().to_owned(), config);
         let treestate = create_treestate(&git, dot_dir, vfs.case_sensitive())?;
         let treestate = Arc::new(Mutex::new(treestate));
         Ok(DotGitFileSystem {
@@ -58,7 +60,7 @@ impl DotGitFileSystem {
 }
 
 fn create_treestate(
-    git: &RunGitOptions,
+    git: &RepoGit,
     dot_dir: &std::path::Path,
     case_sensitive: bool,
 ) -> Result<TreeState> {
@@ -159,17 +161,16 @@ impl FileSystem for DotGitFileSystem {
 
     fn sparse_matcher(
         &self,
-        manifests: &[Arc<TreeManifest>],
-        dot_dir: &'static str,
+        _manifests: &[Arc<TreeManifest>],
+        _dot_dir: &'static str,
     ) -> Result<Option<DynMatcher>> {
         Ok(None)
     }
 
     fn set_parents(&self, p1: HgId, p2: Option<HgId>, p1_tree: Option<HgId>) -> Result<()> {
         tracing::debug!(p1=?p1, p2=?p2, p1_tree=?p1_tree, "set_parents (DotGitFileSystem)");
-        let p1_hex = p1.to_hex();
-        self.git.call("update-ref", &["HEAD", &p1_hex])?;
-        // TODO: What to do with p2?
+        self.git
+            .set_parents(p1, p2, p1_tree.unwrap_or(*HgId::wdir_id()))?;
         Ok(())
     }
 

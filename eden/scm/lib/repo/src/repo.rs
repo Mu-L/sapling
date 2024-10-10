@@ -17,6 +17,7 @@ use cas_client::CasClient;
 use commits_trait::DagCommits;
 use configloader::config::ConfigSet;
 use configloader::hg::PinnedConfig;
+use configloader::hg::RepoInfo;
 use configloader::Config;
 use configmodel::ConfigExt;
 use eagerepo::EagerRepo;
@@ -34,6 +35,7 @@ pub use repo_minimal_info::read_sharedpath;
 use repo_minimal_info::RepoMinimalInfo;
 use repo_minimal_info::Requirements;
 use repolock::RepoLocker;
+use repourl::RepoUrl;
 use revisionstore::scmstore;
 use revisionstore::scmstore::FileStoreBuilder;
 use revisionstore::scmstore::TreeStoreBuilder;
@@ -42,6 +44,7 @@ use revisionstore::SaplingRemoteApiFileStore;
 use revisionstore::SaplingRemoteApiTreeStore;
 use revsets::errors::RevsetLookupError;
 use revsets::utils as revset_utils;
+use rewrite_macros::cached_field;
 use storemodel::FileStore;
 use storemodel::StoreInfo;
 use storemodel::StoreOutput;
@@ -55,6 +58,7 @@ use workingcopy::workingcopy::WorkingCopy;
 
 use crate::errors;
 use crate::init;
+use crate::trees::CachingTreeStore;
 use crate::trees::TreeManifestResolver;
 
 pub struct Repo {
@@ -76,9 +80,13 @@ pub struct Repo {
     file_scm_store: OnceCell<Arc<scmstore::FileStore>>,
     tree_store: OnceCell<Arc<dyn TreeStore>>,
     tree_scm_store: OnceCell<Arc<scmstore::TreeStore>>,
+    #[cfg(feature = "wdir")]
+    working_copy: OnceCell<Arc<RwLock<WorkingCopy>>>,
     eager_store: Option<EagerRepoStore>,
     locker: Arc<RepoLocker>,
     cas_client: OnceCell<Option<Arc<dyn CasClient>>>,
+    tree_resolver: OnceCell<Arc<dyn ReadTreeManifest + Send + Sync>>,
+    caching_tree_store: OnceCell<Arc<dyn TreeStore>>,
 }
 
 impl Repo {
@@ -139,7 +147,7 @@ impl Repo {
 
         let config = match config {
             Some(config) => config,
-            None => configloader::hg::load(Some(&info), pinned_config)?,
+            None => configloader::hg::load(RepoInfo::Disk(&info), pinned_config)?,
         };
 
         let RepoMinimalInfo {
@@ -184,7 +192,11 @@ impl Repo {
             file_scm_store: Default::default(),
             tree_store: Default::default(),
             tree_scm_store: Default::default(),
+            #[cfg(feature = "wdir")]
+            working_copy: Default::default(),
             eager_store: None,
+            tree_resolver: Default::default(),
+            caching_tree_store: Default::default(),
             locker,
         })
     }
@@ -210,6 +222,8 @@ impl Repo {
         self.invalidate_dag_commits()?;
         self.invalidate_stores()?;
         self.invalidate_metalog()?;
+        #[cfg(feature = "wdir")]
+        self.invalidate_working_copy()?;
         Ok(())
     }
 
@@ -259,22 +273,11 @@ impl Repo {
         self.dot_hg_path.join(self.ident.config_repo_file())
     }
 
+    #[cached_field]
     pub fn metalog(&self) -> Result<Arc<RwLock<MetaLog>>> {
-        self.metalog
-            .get_or_try_init(|| Ok(Arc::new(RwLock::new(self.load_metalog()?))))
-            .cloned()
-    }
-
-    pub fn invalidate_metalog(&self) -> Result<()> {
-        if let Some(ml) = self.metalog.get() {
-            *ml.write() = self.load_metalog()?;
-        }
-        Ok(())
-    }
-
-    fn load_metalog(&self) -> Result<MetaLog> {
         let metalog_path = self.metalog_path();
-        Ok(MetaLog::open_from_env(metalog_path.as_path())?)
+        let metalog = MetaLog::open_from_env(metalog_path.as_path())?;
+        Ok(Arc::new(RwLock::new(metalog)))
     }
 
     pub fn metalog_path(&self) -> PathBuf {
@@ -296,11 +299,22 @@ impl Repo {
 
     /// Private API used by `optional_eden_api` that bypasses checks about whether
     /// SaplingRemoteAPI should be used or not.
-    fn force_construct_eden_api(&self) -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
+    fn force_construct_eden_api(
+        &self,
+        maybe_repo_url: Option<RepoUrl>,
+    ) -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
         let eden_api = self.eden_api.get_or_try_init(
             || -> Result<Arc<dyn SaplingRemoteApi>, SaplingRemoteApiError> {
                 tracing::trace!(target: "repo::eden_api", "creating edenapi");
-                let eden_api = Builder::from_config(&self.config)?.build()?;
+                let mut builder = Builder::from_config(&self.config)?;
+                if let Some(path) = maybe_repo_url {
+                    if path.is_sapling_git() {
+                        if let Ok(url) = path.into_https_url() {
+                            builder = builder.server_url(Some(url));
+                        }
+                    }
+                }
+                let eden_api = builder.build()?;
                 tracing::info!(url=eden_api.url(), path=?self.path, "SaplingRemoteApi built");
                 Ok(eden_api)
             },
@@ -325,24 +339,27 @@ impl Repo {
             tracing::trace!(target: "repo::eden_api", "disabled because edenapi.enable is false");
             return Ok(None);
         }
-        let path = self.config.get("paths", "default");
-        match path {
-            None => {
+        match self.config.get_nonempty_opt::<RepoUrl>("paths", "default") {
+            Err(err) => {
+                tracing::warn!(target: "repo::eden_api", ?err, "disabled because error parsing paths.default");
+                return Ok(None);
+            }
+            Ok(None) => {
                 tracing::trace!(target: "repo::eden_api", "disabled because paths.default is not set");
                 return Ok(None);
             }
-            Some(path) => {
+            Ok(Some(path)) => {
                 // EagerRepo URLs (test:, eager: file path, dummyssh).
                 if EagerRepo::url_to_dir(&path).is_some() {
                     tracing::trace!(target: "repo::eden_api", "using EagerRepo at {}", &path);
-                    return Ok(Some(self.force_construct_eden_api()?));
+                    return Ok(Some(self.force_construct_eden_api(Some(path))?));
                 }
                 // Legacy tests are incompatible with SaplingRemoteAPI.
                 // They use None or file or ssh scheme with dummyssh.
-                if path.starts_with("file:") {
+                if path.scheme() == "file" {
                     tracing::trace!(target: "repo::eden_api", "disabled because paths.default is not set");
                     return Ok(None);
-                } else if path.starts_with("ssh:") {
+                } else if path.scheme() == "ssh" {
                     if let Some(ssh) = self.config.get("ui", "ssh") {
                         if ssh.contains("dummyssh") {
                             tracing::trace!(target: "repo::eden_api", "disabled because paths.default uses ssh scheme and dummyssh is in use");
@@ -364,9 +381,9 @@ impl Repo {
                 }
 
                 tracing::trace!(target: "repo::eden_api", "proceeding with path {}, reponame {:?}", path, self.config.get("remotefilelog", "reponame"));
+                Ok(Some(self.force_construct_eden_api(Some(path))?))
             }
         }
-        Ok(Some(self.force_construct_eden_api()?))
     }
 
     pub fn cas_client(&self) -> Result<Option<Arc<dyn CasClient>>> {
@@ -376,30 +393,11 @@ impl Repo {
             .clone())
     }
 
+    #[cached_field]
     pub fn dag_commits(&self) -> Result<Arc<RwLock<Box<dyn DagCommits + Send + 'static>>>> {
-        Ok(self
-            .dag_commits
-            .get_or_try_init(
-                || -> Result<Arc<RwLock<Box<dyn DagCommits + Send + 'static>>>> {
-                    let info: &dyn StoreInfo = self;
-                    let commits: Box<dyn DagCommits + Send + 'static> =
-                        factory::call_constructor(info)?;
-                    let commits = Arc::new(RwLock::new(commits));
-                    Ok(commits)
-                },
-            )?
-            .clone())
-    }
-
-    pub fn invalidate_dag_commits(&self) -> Result<()> {
-        if let Some(dag_commits) = self.dag_commits.get() {
-            let mut dag_commits = dag_commits.write();
-            let info: &dyn StoreInfo = self;
-            let new_commits: Box<dyn DagCommits + Send + 'static> =
-                factory::call_constructor(info)?;
-            *dag_commits = new_commits;
-        }
-        Ok(())
+        let info: &dyn StoreInfo = self;
+        let commits: Box<dyn DagCommits + Send + 'static> = factory::call_constructor(info)?;
+        Ok(Arc::new(RwLock::new(commits)))
     }
 
     pub fn remote_bookmarks(&self) -> Result<BTreeMap<String, HgId>> {
@@ -545,6 +543,25 @@ impl Repo {
         Ok(ts)
     }
 
+    pub fn caching_tree_store(&self) -> Result<Arc<dyn TreeStore>> {
+        let store = self.caching_tree_store.get_or_try_init(|| {
+            let cache_size = self
+                .config
+                // Trees are typically pretty small (and they are often kept in memory
+                // anyway within a TreeManifest object), so let's pick a sizable
+                // default. Set to 0 to disable caching.
+                .get_or("experimental", "tree-resolver-cache-size", || 10_000)?;
+
+            let inner_store = self.tree_store()?;
+            if cache_size == 0 {
+                return Ok::<_, anyhow::Error>(inner_store);
+            }
+
+            Ok(Arc::new(CachingTreeStore::new(inner_store, cache_size)))
+        });
+        Ok(store?.clone())
+    }
+
     // This should only be used to share stores with Python.
     pub fn tree_scm_store(&self) -> Option<Arc<scmstore::TreeStore>> {
         self.tree_scm_store.get().cloned()
@@ -558,17 +575,16 @@ impl Repo {
     }
 
     pub fn tree_resolver(&self) -> Result<Arc<dyn ReadTreeManifest + Send + Sync>> {
-        Ok(Arc::new(TreeManifestResolver::new(
-            self.dag_commits()?,
-            self.tree_store()?,
-        )))
+        let tr = self.tree_resolver.get_or_try_init(|| {
+            Ok::<_, anyhow::Error>(Arc::new(TreeManifestResolver::new(
+                self.dag_commits()?,
+                self.caching_tree_store()?,
+            )))
+        })?;
+        Ok(tr.clone())
     }
 
-    pub fn resolve_commit(
-        &mut self,
-        treestate: Option<&TreeState>,
-        change_id: &str,
-    ) -> Result<HgId> {
+    pub fn resolve_commit(&self, treestate: Option<&TreeState>, change_id: &str) -> Result<HgId> {
         let dag = self.dag_commits()?;
         let dag = dag.read();
         let metalog = self.metalog()?;
@@ -586,7 +602,7 @@ impl Repo {
     }
 
     pub fn resolve_commit_opt(
-        &mut self,
+        &self,
         treestate: Option<&TreeState>,
         change_id: &str,
     ) -> Result<Option<HgId>> {
@@ -607,27 +623,6 @@ impl Repo {
             tree_store.refresh()?;
         }
         Ok(())
-    }
-
-    #[cfg(feature = "wdir")]
-    pub fn working_copy(&self) -> Result<WorkingCopy, errors::InvalidWorkingCopy> {
-        tracing::trace!(target: "repo::workingcopy", "creating file store");
-        let file_store = self.file_store()?;
-
-        tracing::trace!(target: "repo::workingcopy", "creating tree resolver");
-        let tree_resolver = self.tree_resolver()?;
-        let has_requirement = |s: &str| self.requirements.contains(s);
-
-        Ok(WorkingCopy::new(
-            &self.path,
-            &self.config,
-            self.storage_format(),
-            tree_resolver,
-            file_store,
-            self.locker.clone(),
-            &self.dot_hg_path,
-            &has_requirement,
-        )?)
     }
 
     /// Construct both file and tree store if they are backed by the same storage.
@@ -655,6 +650,33 @@ impl Repo {
                 Ok(Some((file_store, tree_store)))
             }
         }
+    }
+}
+
+#[cfg(feature = "wdir")]
+impl Repo {
+    #[cached_field]
+    pub fn working_copy(&self) -> Result<Arc<RwLock<WorkingCopy>>> {
+        tracing::trace!(target: "repo::workingcopy", "creating file store");
+        let file_store = self.file_store()?;
+
+        tracing::trace!(target: "repo::workingcopy", "creating tree resolver");
+        let tree_resolver = self.tree_resolver()?;
+        let has_requirement = |s: &str| self.requirements.contains(s);
+
+        let wc = WorkingCopy::new(
+            &self.path,
+            &self.config,
+            self.storage_format(),
+            tree_resolver,
+            file_store,
+            self.locker.clone(),
+            &self.dot_hg_path,
+            &has_requirement,
+        )
+        .map_err(errors::InvalidWorkingCopy::from)?;
+
+        Ok(Arc::new(RwLock::new(wc)))
     }
 }
 

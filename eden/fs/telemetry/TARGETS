@@ -37,9 +37,23 @@ cpp_library(
 )
 
 cpp_library(
-    name = "hive_logger",
+    name = "file_access_logger",
     headers = [
-        "IHiveLogger.h",
+        "IFileAccessLogger.h",
+    ],
+    exported_deps = [
+        "//eden/common/telemetry:log_info",
+        "//eden/common/utils:path",
+        "//eden/fs/config:config",
+        "//eden/fs/inodes:inode_number",
+        "//eden/fs/store:context",
+    ],
+)
+
+cpp_library(
+    name = "scribe_logger",
+    headers = [
+        "IScribeLogger.h",
     ],
     exported_deps = [
         "//eden/common/telemetry:log_info",
@@ -69,7 +83,7 @@ cpp_library(
         "FsEventLogger.h",
     ],
     deps = [
-        ":hive_logger",
+        ":scribe_logger",
         "//eden/fs/config:config",
         "//folly:random",
     ],

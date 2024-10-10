@@ -3,17 +3,11 @@
 # This software may be used and distributed according to the terms of the
 # GNU General Public License version 2.
 
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This software may be used and distributed according to the terms of the
-# GNU General Public License version 2.
-
 """
 Default config file for testing
 """
 
 import os
-
 from typing import Optional
 
 
@@ -36,7 +30,6 @@ ignore.test=$RUNTESTDIR/gitignore
 
 [devel]
 all-warnings=True
-collapse-traceback =True
 default-date=0 0
 
 [web]
@@ -56,31 +49,15 @@ use-rust=True
 [workingcopy]
 rust-checkout=True
 
-[extensions]
-treemanifest=
-
-[treemanifest]
-sendtrees=True
-treeonly=True
-rustmanifest=True
-useruststore=True
-
 [remotefilelog]
-reponame=reponame-default
 cachepath=$TESTTMP/default-hgcache
 
 [mutation]
 record=False
 
-[pull]
-httpcommitgraph2=true
-
 [hint]
 ack-match-full-traversal=True
-ack = smartlog-default-command
-
-[scmstore]
-contentstorefallback=True
+ack = smartlog-default-command commitcloud-update-on-move
 
 [experimental]
 use-rust-changelog=True
@@ -95,6 +72,16 @@ use-rust=true
 
 [copytrace]
 dagcopytrace=True
+
+[committemplate]
+commit-message-fields=Summary,"Test Plan",Reviewers,Subscribers,Tasks,Tags,"Differential Revision","Reviewed By"
+summary-field=Summary
+
+[templatealias]
+sl_hash_minlen=9
+
+[cas]
+disable=true
 """
     if use_watchman:
         content += """
@@ -156,6 +143,9 @@ ssh=python {testdir}/dummyssh
 
 [visibility]
 enabled=true
+
+[clone]
+use-rust=true
 """
 
     return content

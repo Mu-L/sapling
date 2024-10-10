@@ -90,11 +90,6 @@ def onetimesetup(ui):
                             visit.append(fp)
 
             shallowtrees = repo.ui.configbool("remotefilelog", "shallowtrees", False)
-            if "treemanifest" in repo.requirements and not shallowtrees:
-                for u, e, s in repo.store.datafiles():
-                    if u.startswith("meta/") and (u.endswith(".i") or u.endswith(".d")):
-                        yield (u, e, s)
-
             for x in repo.store.topfiles():
                 if shallowtrees and x[0][:15] == "00manifesttree.":
                     continue
@@ -179,33 +174,9 @@ def readvalue(repo, path, node):
 
 
 def _loadfileblob(repo, path, node):
-    usesimplecache = repo.ui.configbool("remotefilelog", "simplecacheserverstore")
     cachepath = repo.ui.config("remotefilelog", "servercachepath")
-    if cachepath and usesimplecache:
-        raise error.Abort(
-            "remotefilelog.servercachepath and remotefilelog.simplecacheserverstore can't be both enabled"
-        )
 
     key = os.path.join(path, hex(node))
-
-    # simplecache store for remotefilelogcache
-    if usesimplecache:
-        try:
-            simplecache = extensions.find("simplecache")
-        except KeyError:
-            raise error.Abort(
-                "simplecache extension must be enabled with remotefilelog.simplecacheserverstore enabled"
-            )
-
-        # this function doesn't raise exception
-        text = simplecache.cacheget(key, trivialserializer, repo.ui)
-        if text:
-            return text
-        else:
-            text = readvalue(repo, path, node)
-            # this function doesn't raise exception
-            simplecache.cacheset(key, text, trivialserializer, repo.ui)
-            return text
 
     # on disk store for remotefilelogcache
     if not cachepath:
@@ -418,7 +389,7 @@ def getpack(repo, proto, args, version=1):
         invalidatelinkrev = "invalidatelinkrev" in repo.storerequirements
 
         # Sort the files by name, so we provide deterministic results
-        for filename, nodes in sorted(pycompat.iteritems(files)):
+        for filename, nodes in sorted(files.items()):
             filename = pycompat.decodeutf8(filename)
             args.append([filename, [hex(n) for n in nodes]])
             fl = repo.file(filename)

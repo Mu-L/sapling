@@ -8,7 +8,7 @@ edition = "2021"
 license = "GPLv2+"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-stream = "0.3"
 bytes = { version = "1.6.0", features = ["serde"] }
 futures = { version = "0.3.30", features = ["async-await", "compat"] }
@@ -21,11 +21,12 @@ nom = { version = "3", features = ["verbose-errors"] }
 pin-project = "0.4.30"
 qps = { version = "0.1.0", path = "../server/qps" }
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }
 tokio-util = { version = "0.7.10", features = ["full"] }
 
 [dev-dependencies]
 maplit = "1.0"
 mercurial_types-mocks = { version = "0.1.0", path = "../mercurial/types/mocks" }
+mononoke_macros = { version = "0.1.0", path = "../mononoke_macros" }
 quickcheck = "1.0"

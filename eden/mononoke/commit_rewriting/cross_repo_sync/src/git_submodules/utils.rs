@@ -28,7 +28,6 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use git_types::ObjectKind;
 use itertools::Itertools;
-use live_commit_sync_config::LiveCommitSyncConfig;
 use manifest::bonsai_diff;
 use manifest::BonsaiDiffFileChange;
 use manifest::Entry;
@@ -167,7 +166,7 @@ pub(crate) async fn submodule_diff(
     sm_repo: &impl Repo,
     cs_id: ChangesetId,
     parents: Vec<ChangesetId>,
-) -> Result<impl Stream<Item = Result<BonsaiDiffFileChange<(ContentId, u64)>>>> {
+) -> Result<impl Stream<Item = Result<BonsaiDiffFileChange<(FileType, ContentId, u64)>>>> {
     let fsnode_id = sm_repo
         .repo_derived_data()
         .derive::<RootFsnodeId>(ctx, cs_id)
@@ -199,7 +198,16 @@ pub(crate) async fn submodule_diff(
         sm_repo.repo_blobstore_arc().clone(),
         fsnode_id,
         parent_fsnode_ids,
-    ))
+    )
+    .map_ok(|change| {
+        change.map_leaf(|fsnode| {
+            (
+                fsnode.file_type().clone(),
+                fsnode.content_id().clone(),
+                fsnode.size(),
+            )
+        })
+    }))
 }
 
 /// Returns the content id of the given path if it is a submodule file.
@@ -498,31 +506,19 @@ pub type RepoProvider<'a, R> = Arc<
 /// TODO(T184633369): stop getting all dependencies from history and
 /// use only the most recent on. Maybe read the most recent commits and use
 /// their versions?
-pub async fn get_all_submodule_deps<R>(
+pub async fn get_all_submodule_deps_from_repo_pair<R>(
     ctx: &CoreContext,
     source_repo: Arc<R>,
     target_repo: Arc<R>,
     repo_provider: RepoProvider<'_, R>,
-    live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
 ) -> Result<SubmoduleDeps<R>>
 where
     R: Repo,
 {
-    let source_repo_deps = get_all_possible_repo_submodule_deps(
-        ctx,
-        source_repo,
-        repo_provider.clone(),
-        live_commit_sync_config.clone(),
-    )
-    .await?;
+    let source_repo_deps =
+        get_all_repo_submodule_deps(ctx, source_repo, repo_provider.clone()).await?;
 
-    let target_repo_deps = get_all_possible_repo_submodule_deps(
-        ctx,
-        target_repo,
-        repo_provider,
-        live_commit_sync_config,
-    )
-    .await?;
+    let target_repo_deps = get_all_repo_submodule_deps(ctx, target_repo, repo_provider).await?;
 
     let final_submodule_deps = match (source_repo_deps.dep_map(), target_repo_deps.dep_map()) {
         (Some(dep_map), None) => SubmoduleDeps::ForSync(dep_map.clone()),
@@ -550,30 +546,16 @@ where
 /// TODO(T184633369): stop getting all dependencies from history and
 /// use only the most recent on. Maybe read the most recent commits and use
 /// their versions?
-async fn get_all_possible_repo_submodule_deps<R>(
+pub async fn get_all_repo_submodule_deps<R>(
     ctx: &CoreContext,
     repo: Arc<R>,
     repo_provider: RepoProvider<'_, R>,
-    live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
 ) -> Result<SubmoduleDeps<R>>
 where
     R: Repo,
 {
-    let source_repo_id = repo.repo_identity().id();
-
-    let source_repo_sync_configs = live_commit_sync_config
-        .get_all_commit_sync_config_versions(source_repo_id)
-        .await?;
-
-    let repo_deps_ids = source_repo_sync_configs
-        .into_values()
-        .filter_map(|mut cfg| {
-            cfg.small_repos
-                .remove(&source_repo_id)
-                .map(|small_repo_cfg| small_repo_cfg.submodule_config.submodule_dependencies)
-        })
-        .flatten()
-        .collect::<HashMap<_, _>>();
+    let repo_deps_ids: HashMap<NonRootMPath, RepositoryId> =
+        repo.repo_cross_repo().submodule_dep_ids().as_ref().clone();
 
     let submodule_deps_to_load = repo_deps_ids.len();
 

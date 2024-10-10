@@ -1,5 +1,4 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("sapling")
 
@@ -22,6 +21,7 @@ rust_library(
         "fbsource//third-party/rust:regex-automata",
         "fbsource//third-party/rust:thiserror",
         "fbsource//third-party/rust:tracing",
+        "//eden/scm/lib/pathmatcher/types:pathmatcher-types",
         "//eden/scm/lib/types:types",
         "//eden/scm/lib/util:util",
     ],

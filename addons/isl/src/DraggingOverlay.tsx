@@ -9,8 +9,8 @@ import type {DragHandler} from './DragHandle';
 
 import * as stylex from '@stylexjs/stylex';
 import {ViewportOverlay} from 'isl-components/ViewportOverlay';
+import {getZoomLevel} from 'isl-components/zoom';
 import React, {useEffect, useRef} from 'react';
-import {getZoomLevel} from 'shared/zoom';
 
 const styles = stylex.create({
   draggingElement: {
@@ -85,7 +85,9 @@ export function DraggingOverlay(props: DraggingOverlayProps) {
         </div>
         {hint != null && (
           <div {...stylex.props(styles.hint)}>
-            <span className="tooltip">{hint}</span>
+            <span className="tooltip" style={{height: 'fit-content'}}>
+              {hint}
+            </span>
           </div>
         )}
       </div>

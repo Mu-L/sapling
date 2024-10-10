@@ -14,26 +14,46 @@ use anyhow::Result;
 use async_recursion::async_recursion;
 use blobstore::Blobstore;
 use blobstore::Loadable;
+use bonsai_hg_mapping::BonsaiHgMapping;
+use bookmarks::Bookmarks;
+use commit_graph::CommitGraph;
 use commit_graph::CommitGraphRef;
+use commit_graph::CommitGraphWriter;
 use context::CoreContext;
 use fbinit::FacebookInit;
+use filestore::FilestoreConfig;
 use fixtures::TestRepoFixture;
-use futures::stream;
 use futures::TryStreamExt;
 use itertools::Itertools;
 use manifest::ManifestOps;
+use mononoke_macros::mononoke;
 use mononoke_types::basename_suffix_skeleton_manifest_v3::BssmV3Directory;
 use mononoke_types::basename_suffix_skeleton_manifest_v3::BssmV3Entry;
 use mononoke_types::ChangesetIdPrefix;
 use mononoke_types::ChangesetIdsResolvedFromPrefix;
 use mononoke_types::MPathElement;
+use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedData;
 use repo_derived_data::RepoDerivedDataRef;
+use repo_identity::RepoIdentity;
 use skeleton_manifest::RootSkeletonManifestId;
 
 use crate::derive_from_predecessor::inner_derive_from_predecessor;
 use crate::path::BssmPath;
 use crate::RootBssmV3DirectoryId;
+
+#[facet::container]
+struct TestRepo(
+    dyn BonsaiHgMapping,
+    dyn Bookmarks,
+    CommitGraph,
+    dyn CommitGraphWriter,
+    RepoDerivedData,
+    RepoBlobstore,
+    FilestoreConfig,
+    RepoIdentity,
+);
 
 #[async_recursion]
 async fn validate(
@@ -74,7 +94,7 @@ async fn validate(
 
 async fn test_for_fixture<F: TestRepoFixture + Send>(fb: FacebookInit) -> Result<()> {
     let ctx = &CoreContext::test_mock(fb);
-    let repo = F::getrepo(fb).await;
+    let repo: TestRepo = F::get_repo(fb).await;
     let derived_data = repo.repo_derived_data();
     let blobstore = repo.repo_blobstore();
     let all_commits = repo
@@ -86,8 +106,8 @@ async fn test_for_fixture<F: TestRepoFixture + Send>(fb: FacebookInit) -> Result
         other => anyhow::bail!("Unexpected number of commits: {:?}", other),
     };
     let visited = &RwLock::new(HashSet::new());
-    stream::iter(all_commits.into_iter().map(anyhow::Ok))
-        .try_for_each_concurrent(None, |cs_id| async move {
+    repo.commit_graph()
+        .process_topologically(ctx, all_commits, |cs_id| async move {
             let bssm_v3_dir_id = derived_data
                 .derive::<RootBssmV3DirectoryId>(ctx, cs_id)
                 .await?;
@@ -132,7 +152,7 @@ async fn test_for_fixture<F: TestRepoFixture + Send>(fb: FacebookInit) -> Result
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_bssm_v3_repo_fixtures(fb: FacebookInit) {
     futures::try_join!(
         test_for_fixture::<fixtures::Linear>(fb),

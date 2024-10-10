@@ -22,6 +22,8 @@ use clap::ValueEnum;
 use cmdlib_displaying::hexdump;
 use context::CoreContext;
 use futures::TryStreamExt;
+use git_types::GDMV2Entry;
+use git_types::GitDeltaManifestV2;
 use git_types::Tree as GitTree;
 use mercurial_types::HgAugmentedManifestEntry;
 use mercurial_types::HgAugmentedManifestEnvelope;
@@ -32,12 +34,16 @@ use mercurial_types::ShardedHgAugmentedManifest;
 use mononoke_types::basename_suffix_skeleton_manifest_v3::BssmV3Directory;
 use mononoke_types::basename_suffix_skeleton_manifest_v3::BssmV3Entry;
 use mononoke_types::blame_v2::BlameV2;
+use mononoke_types::case_conflict_skeleton_manifest::CaseConflictSkeletonManifest;
+use mononoke_types::case_conflict_skeleton_manifest::CcsmEntry;
 use mononoke_types::deleted_manifest_v2::DeletedManifestV2;
 use mononoke_types::fastlog_batch::FastlogBatch;
 use mononoke_types::fsnode::Fsnode;
 use mononoke_types::sharded_map::ShardedMapNode;
 use mononoke_types::sharded_map_v2::ShardedMapV2Node;
 use mononoke_types::skeleton_manifest::SkeletonManifest;
+use mononoke_types::skeleton_manifest_v2::SkeletonManifestV2;
+use mononoke_types::skeleton_manifest_v2::SkeletonManifestV2Entry;
 use mononoke_types::test_manifest::TestManifest;
 use mononoke_types::test_sharded_manifest::TestShardedManifest;
 use mononoke_types::test_sharded_manifest::TestShardedManifestEntry;
@@ -87,7 +93,11 @@ pub enum DecodeAs {
     ShardedHgAugmentedManifestMapNode,
     ShardedHgAugmentedManifest,
     GitTree,
+    GitDeltaManifestV2MapNode,
+    GitDeltaManifestV2,
     SkeletonManifest,
+    SkeletonManifestV2MapNode,
+    SkeletonManifestV2,
     Fsnode,
     ContentMetadataV2,
     Alias,
@@ -99,6 +109,8 @@ pub enum DecodeAs {
     BlameV2,
     BasenameSuffixSkeletonManifestV3MapNode,
     BasenameSuffixSkeletonManifestV3,
+    CaseConflictSkeletonManifestMapNode,
+    CaseConflictSkeletonManifest,
     ChangesetInfo,
     TestManifest,
     TestShardedManifest,
@@ -124,7 +136,11 @@ impl DecodeAs {
                 ),
                 ("hgaugmentedmanifest.", DecodeAs::HgAugmentedManifest),
                 ("git.tree.", DecodeAs::GitTree),
+                ("gdm2.map2node.", DecodeAs::GitDeltaManifestV2MapNode),
+                ("gdm2.", DecodeAs::GitDeltaManifestV2),
                 ("skeletonmanifest.", DecodeAs::SkeletonManifest),
+                ("skmf2.map2node.", DecodeAs::SkeletonManifestV2MapNode),
+                ("skmf2.", DecodeAs::SkeletonManifestV2),
                 ("fsnode.", DecodeAs::Fsnode),
                 ("content_metadata2.", DecodeAs::ContentMetadataV2),
                 ("alias.", DecodeAs::Alias),
@@ -142,6 +158,11 @@ impl DecodeAs {
                     DecodeAs::BasenameSuffixSkeletonManifestV3MapNode,
                 ),
                 ("bssm3.", DecodeAs::BasenameSuffixSkeletonManifestV3),
+                (
+                    "ccsm.map2node.",
+                    DecodeAs::CaseConflictSkeletonManifestMapNode,
+                ),
+                ("ccsm.", DecodeAs::CaseConflictSkeletonManifest),
                 ("testmanifest.", DecodeAs::TestManifest),
                 (
                     "testshardedmanifest.map2node.",
@@ -233,6 +254,20 @@ async fn decode(
             }
         }
         DecodeAs::GitTree => Decoded::try_display(GitTree::try_from(data)),
+        DecodeAs::GitDeltaManifestV2 => {
+            Decoded::try_debug(GitDeltaManifestV2::from_bytes(&data.into_raw_bytes()))
+        }
+        DecodeAs::GitDeltaManifestV2MapNode => Decoded::try_debug(
+            ShardedMapV2Node::<GDMV2Entry>::from_bytes(&data.into_raw_bytes()),
+        ),
+        DecodeAs::SkeletonManifestV2 => {
+            Decoded::try_debug(SkeletonManifestV2::from_bytes(&data.into_raw_bytes()))
+        }
+        DecodeAs::SkeletonManifestV2MapNode => {
+            Decoded::try_debug(ShardedMapV2Node::<SkeletonManifestV2Entry>::from_bytes(
+                &data.into_raw_bytes(),
+            ))
+        }
         DecodeAs::SkeletonManifest => {
             Decoded::try_debug(SkeletonManifest::from_bytes(data.into_raw_bytes().as_ref()))
         }
@@ -267,6 +302,14 @@ async fn decode(
         DecodeAs::BasenameSuffixSkeletonManifestV3MapNode => Decoded::try_debug(
             ShardedMapV2Node::<BssmV3Entry>::from_bytes(&data.into_raw_bytes()),
         ),
+        DecodeAs::CaseConflictSkeletonManifest => Decoded::try_debug(
+            CaseConflictSkeletonManifest::from_bytes(&data.into_raw_bytes()),
+        ),
+        DecodeAs::CaseConflictSkeletonManifestMapNode => {
+            Decoded::try_debug(ShardedMapV2Node::<CcsmEntry>::from_bytes(
+                &data.into_raw_bytes(),
+            ))
+        }
         DecodeAs::ChangesetInfo => {
             Decoded::try_debug(ChangesetInfo::from_bytes(&data.into_raw_bytes()))
         }

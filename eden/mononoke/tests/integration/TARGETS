@@ -6,7 +6,7 @@ load(
     "dott_test",
 )
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 buck_filegroup(
     name = "test_fixtures",
@@ -19,7 +19,6 @@ buck_filegroup(
         "commitsync/flipped_config.toml",
         "fixtures/repo_with_newline_author_commit.tar.xz",
         "gitexport_library.sh",
-        "just_knobs.json",
         "library.sh",
         "library-commit.sh",
         "library-git-lfs.sh",
@@ -101,8 +100,9 @@ dott_test(
     name = "bonsai-verify",
     dott_files = ["test-bonsai-verify.t"],
     deps = [
-        "//eden/mononoke:blobimport",
         "//eden/mononoke:bonsai_verify",
+        "//eden/mononoke/tools/admin:newadmin",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 
@@ -110,8 +110,8 @@ dott_test(
     name = "check-git-wc",
     dott_files = ["test-check-git-wc.t"],
     deps = [
-        "//eden/mononoke:blobimport",
         "//eden/mononoke:check_git_wc",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 
@@ -122,8 +122,8 @@ dott_test(
     ]),
     deps = [
         "//eden/mononoke:admin",
-        "//eden/mononoke:blobimport",
         "//eden/mononoke:mononoke",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 
@@ -154,10 +154,10 @@ dott_test(
             "test-cache-warmup-microwave.t",
         ],
     deps = [
-        "//eden/mononoke:blobimport",
         "//eden/mononoke:mononoke",
         "//eden/mononoke/microwave:builder",
         "//eden/mononoke/tools/admin:newadmin",
+        "//eden/mononoke/tools/testtool:testtool",
     ],
 )
 

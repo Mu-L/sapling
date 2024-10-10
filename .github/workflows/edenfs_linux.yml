@@ -50,14 +50,14 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests glog
     - name: Fetch googletest
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests googletest
-    - name: Fetch python-six
-      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests python-six
     - name: Fetch zstd
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests zstd
     - name: Fetch boost
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests boost
     - name: Fetch double-conversion
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests double-conversion
+    - name: Fetch fast_float
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests fast_float
     - name: Fetch libdwarf
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests libdwarf
     - name: Fetch libevent
@@ -86,6 +86,10 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests sqlite3
     - name: Fetch zlib
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests zlib
+    - name: Fetch openssl
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests openssl
+    - name: Fetch liboqs
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests liboqs
     - name: Fetch autoconf
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests autoconf
     - name: Fetch automake
@@ -144,14 +148,14 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests glog
     - name: Build googletest
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests googletest
-    - name: Build python-six
-      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests python-six
     - name: Build zstd
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests zstd
     - name: Build boost
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests boost
     - name: Build double-conversion
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests double-conversion
+    - name: Build fast_float
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests fast_float
     - name: Build libdwarf
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests libdwarf
     - name: Build libevent
@@ -180,6 +184,10 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests sqlite3
     - name: Build zlib
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests zlib
+    - name: Build openssl
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests openssl
+    - name: Build liboqs
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests liboqs
     - name: Build autoconf
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --free-up-disk --no-tests autoconf
     - name: Build automake
@@ -224,7 +232,7 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --no-tests --src-dir=. eden  --project-install-prefix eden:/usr/local
     - name: Copy artifacts
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fixup-dyn-deps --strip --src-dir=. eden _artifacts/linux  --project-install-prefix eden:/usr/local --final-install-prefix /usr/local
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v4
       with:
         name: eden
         path: _artifacts

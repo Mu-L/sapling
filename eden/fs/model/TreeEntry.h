@@ -19,7 +19,7 @@
 #include "eden/fs/model/ObjectId.h"
 
 namespace facebook::eden {
-class BlobMetadata;
+class BlobAuxData;
 
 /**
  * Represents the allowed types of entries in version control trees.
@@ -46,6 +46,8 @@ struct EntryAttributes {
   std::optional<folly::Try<uint64_t>> size;
   std::optional<folly::Try<std::optional<TreeEntryType>>> type;
   std::optional<folly::Try<std::optional<ObjectId>>> objectId;
+  std::optional<folly::Try<uint64_t>> digestSize;
+  std::optional<folly::Try<Hash32>> digestHash;
 };
 
 /**

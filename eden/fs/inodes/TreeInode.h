@@ -17,6 +17,7 @@
 #include "eden/fs/inodes/DirEntry.h"
 #include "eden/fs/inodes/InodeBase.h"
 #include "eden/fs/model/Tree.h"
+#include "eden/fs/model/TreeAuxDataFwd.h"
 
 namespace facebook::eden {
 
@@ -219,6 +220,24 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
   }
 
   std::optional<ObjectId> getObjectId() const override;
+
+  /**
+   * Get the digest hash for this inode.
+   */
+  ImmediateFuture<std::optional<Hash32>> getDigestHash(
+      const ObjectFetchContextPtr& fetchContext);
+
+  /**
+   * Get the digest size for this inode.
+   */
+  ImmediateFuture<std::optional<uint64_t>> getDigestSize(
+      const ObjectFetchContextPtr& fetchContext);
+
+  /**
+   * Get the tree aux data for this inode.
+   */
+  ImmediateFuture<std::optional<TreeAuxData>> getTreeAuxData(
+      const ObjectFetchContextPtr& fetchContext);
 
   FileInodePtr symlink(
       PathComponentPiece name,
@@ -517,6 +536,10 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    */
   void childWasStat(bool isFile, const ObjectFetchContext& context);
 
+  uint64_t getInMemoryDescendants();
+
+  void increaseInMemoryDescendants(int64_t inc);
+
  private:
   class TreeRenameLocks;
   class IncompleteInodeLoad;
@@ -791,6 +814,14 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
    */
   std::shared_ptr<CheckoutAction> processCheckoutEntry(
       CheckoutContext* ctx,
+      TreeInodeState& state,
+      const Tree::value_type* oldScmEntry,
+      const Tree::value_type* newScmEntry,
+      std::vector<IncompleteInodeLoad>& pendingLoads,
+      bool& wasDirectoryListModified);
+
+  std::shared_ptr<CheckoutAction> processCheckoutEntryImpl(
+      CheckoutContext* ctx,
       TreeInodeState& contents,
       const Tree::value_type* oldScmEntry,
       const Tree::value_type* newScmEntry,
@@ -921,9 +952,16 @@ class TreeInode final : public InodeBaseMetadata<DirContents> {
   };
 
   /**
-   * Only prefetch children metadata once.
+   * Only prefetch children aux data once.
    */
   std::atomic<PrefetchState> prefetchState_{NeverEnumerated};
+
+  /**
+   * This number is not guarenteed to be completely accurate as it is modified
+   * by the descendant using getParentRacy. It is currently only used for
+   * reporting checkout progress to Sapling, so this is okay for that purpose.
+   */
+  std::atomic<int64_t> inMemoryDescendants_;
 };
 
 /**

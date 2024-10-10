@@ -279,7 +279,7 @@ fn schedule_fill_filenode(
     key: &CacheKey<FilenodeInfo>,
     filenode: FilenodeInfo,
 ) {
-    let serialized = compact_protocol::serialize(&filenode.into_thrift());
+    let serialized = compact_protocol::serialize(filenode.into_thrift());
 
     // Quite unlikely that single filenode will be bigger than MEMCACHE_VALUE_MAX_SIZE
     // It's probably not even worth logging it
@@ -359,7 +359,7 @@ async fn fill_history(
             .collect::<Vec<_>>();
 
         let pointers = try_join_all(write_chunks_fut).await?;
-        compact_protocol::serialize(&thrift::FilenodeInfoList::Pointers(pointers))
+        compact_protocol::serialize(thrift::FilenodeInfoList::Pointers(pointers))
     };
 
     let root_key = keygen.key(&key.key);
@@ -407,6 +407,7 @@ pub mod test {
     use fbinit::FacebookInit;
     use mercurial_types_mocks::nodehash::ONES_CSID;
     use mercurial_types_mocks::nodehash::ONES_FNID;
+    use mononoke_macros::mononoke;
     use mononoke_types::RepoPath;
     use mononoke_types_mocks::repo::REPO_ZERO;
     use path_hash::PathWithHash;
@@ -469,7 +470,7 @@ pub mod test {
         Ok(r)
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_store_filenode(_fb: FacebookInit) -> Result<(), Error> {
         let cache = RemoteCache::new_mock();
         let path = RepoPath::file("copiedto")?;
@@ -489,7 +490,7 @@ pub mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_store_short_history(_fb: FacebookInit) -> Result<(), Error> {
         let cache = RemoteCache::new_mock();
         let path = RepoPath::file("copiedto")?;
@@ -506,7 +507,7 @@ pub mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_store_long_history(_fb: FacebookInit) -> Result<(), Error> {
         let cache = RemoteCache::new_mock();
         let path = RepoPath::file("copiedto")?;
@@ -526,7 +527,7 @@ pub mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_store_too_long_history(_fb: FacebookInit) -> Result<(), Error> {
         let cache = RemoteCache::new_mock();
         let path = RepoPath::file("copiedto")?;

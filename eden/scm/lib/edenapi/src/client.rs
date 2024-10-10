@@ -18,6 +18,7 @@ use anyhow::format_err;
 use async_trait::async_trait;
 use clientinfo::ClientInfo;
 use clientinfo_async::get_client_request_info_task_local;
+use edenapi_types::cloud::SmartlogDataResponse;
 use edenapi_types::make_hash_lookup_request;
 use edenapi_types::AlterSnapshotRequest;
 use edenapi_types::AlterSnapshotResponse;
@@ -30,6 +31,8 @@ use edenapi_types::BonsaiChangesetContent;
 use edenapi_types::BookmarkEntry;
 use edenapi_types::BookmarkRequest;
 use edenapi_types::CloneData;
+use edenapi_types::CloudShareWorkspaceRequest;
+use edenapi_types::CloudShareWorkspaceResponse;
 use edenapi_types::CloudWorkspaceRequest;
 use edenapi_types::CloudWorkspacesRequest;
 use edenapi_types::CommitGraphEntry;
@@ -60,8 +63,12 @@ use edenapi_types::FileRequest;
 use edenapi_types::FileResponse;
 use edenapi_types::FileSpec;
 use edenapi_types::GetReferencesParams;
+use edenapi_types::GetSmartlogByVersionParams;
+use edenapi_types::GetSmartlogParams;
 use edenapi_types::HgFilenodeData;
 use edenapi_types::HgMutationEntryContent;
+use edenapi_types::HistoricalVersionsParams;
+use edenapi_types::HistoricalVersionsResponse;
 use edenapi_types::HistoryEntry;
 use edenapi_types::HistoryRequest;
 use edenapi_types::HistoryResponseChunk;
@@ -73,6 +80,8 @@ use edenapi_types::LookupResponse;
 use edenapi_types::LookupResult;
 use edenapi_types::PushVar;
 use edenapi_types::ReferencesDataResponse;
+use edenapi_types::RenameWorkspaceRequest;
+use edenapi_types::RenameWorkspaceResponse;
 use edenapi_types::SaplingRemoteApiServerError;
 use edenapi_types::ServerError;
 use edenapi_types::SetBookmarkRequest;
@@ -84,6 +93,8 @@ use edenapi_types::ToWire;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
 use edenapi_types::TreeRequest;
+use edenapi_types::UpdateArchiveParams;
+use edenapi_types::UpdateArchiveResponse;
 use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadBonsaiChangesetRequest;
 use edenapi_types::UploadHgChangeset;
@@ -112,7 +123,7 @@ use minibytes::Bytes;
 use parking_lot::Once;
 use progress_model::AggregatingProgressBar;
 use progress_model::ProgressBar;
-use repo_name::encode_repo_name;
+use repourl::encode_repo_name;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use types::HgId;
@@ -138,44 +149,50 @@ const MAX_CONCURRENT_HASH_LOOKUPS_PER_REQUEST: usize = 1000;
 const MAX_CONCURRENT_BLAMES_PER_REQUEST: usize = 10;
 const MAX_ERROR_MSG_LEN: usize = 500;
 
-static REQUESTS_INFLIGHT: Counter = Counter::new("edenapi.req_inflight");
-static FILES_ATTRS_INFLIGHT: Counter = Counter::new("edenapi.files_attrs_inflight");
+static REQUESTS_INFLIGHT: Counter = Counter::new_counter("edenapi.req_inflight");
+static FILES_ATTRS_INFLIGHT: Counter = Counter::new_counter("edenapi.files_attrs_inflight");
 
 mod paths {
-    pub const HEALTH_CHECK: &str = "health_check";
-    pub const FILES2: &str = "files2";
-    pub const HISTORY: &str = "history";
-    pub const TREES: &str = "trees";
-    pub const COMMIT_REVLOG_DATA: &str = "commit/revlog_data";
-    pub const CLONE_DATA: &str = "clone";
-    pub const PULL_FAST_FORWARD: &str = "pull_fast_forward_master";
-    pub const PULL_LAZY: &str = "pull_lazy";
-    pub const COMMIT_LOCATION_TO_HASH: &str = "commit/location_to_hash";
-    pub const COMMIT_HASH_TO_LOCATION: &str = "commit/hash_to_location";
-    pub const COMMIT_HASH_LOOKUP: &str = "commit/hash_lookup";
-    pub const COMMIT_GRAPH_V2: &str = "commit/graph_v2";
-    pub const COMMIT_GRAPH_SEGMENTS: &str = "commit/graph_segments";
-    pub const COMMIT_MUTATIONS: &str = "commit/mutations";
-    pub const COMMIT_TRANSLATE_ID: &str = "commit/translate_id";
-    pub const BOOKMARKS: &str = "bookmarks";
-    pub const SET_BOOKMARK: &str = "bookmarks/set";
-    pub const LAND_STACK: &str = "land";
-    pub const LOOKUP: &str = "lookup";
-    pub const UPLOAD: &str = "upload/";
-    pub const UPLOAD_FILENODES: &str = "upload/filenodes";
-    pub const UPLOAD_TREES: &str = "upload/trees";
-    pub const UPLOAD_CHANGESETS: &str = "upload/changesets";
-    pub const UPLOAD_BONSAI_CHANGESET: &str = "upload/changeset/bonsai";
-    pub const EPHEMERAL_PREPARE: &str = "ephemeral/prepare";
-    pub const FETCH_SNAPSHOT: &str = "snapshot";
     pub const ALTER_SNAPSHOT: &str = "snapshot/alter";
-    pub const DOWNLOAD_FILE: &str = "download/file";
     pub const BLAME: &str = "blame";
+    pub const BOOKMARKS: &str = "bookmarks";
+    pub const CLONE_DATA: &str = "clone";
+    pub const CLOUD_HISTORICAL_VERSIONS: &str = "cloud/historical_versions";
+    pub const CLOUD_REFERENCES: &str = "cloud/references";
+    pub const CLOUD_RENAME_WORKSPACE: &str = "cloud/rename_workspace";
+    pub const CLOUD_SHARE_WORKSPACE: &str = "cloud/share_workspace";
+    pub const CLOUD_SMARTLOG_BY_VERSION: &str = "cloud/smartlog_by_version";
+    pub const CLOUD_SMARTLOG: &str = "cloud/smartlog";
+    pub const CLOUD_UPDATE_ARCHIVE: &str = "cloud/update_archive";
+    pub const CLOUD_UPDATE_REFERENCES: &str = "cloud/update_references";
     pub const CLOUD_WORKSPACE: &str = "cloud/workspace";
     pub const CLOUD_WORKSPACES: &str = "cloud/workspaces";
-    pub const CLOUD_UPDATE_REFERENCES: &str = "cloud/update_references";
-    pub const CLOUD_REFERENCES: &str = "cloud/references";
+    pub const COMMIT_GRAPH_SEGMENTS: &str = "commit/graph_segments";
+    pub const COMMIT_GRAPH_V2: &str = "commit/graph_v2";
+    pub const COMMIT_HASH_LOOKUP: &str = "commit/hash_lookup";
+    pub const COMMIT_HASH_TO_LOCATION: &str = "commit/hash_to_location";
+    pub const COMMIT_LOCATION_TO_HASH: &str = "commit/location_to_hash";
+    pub const COMMIT_MUTATIONS: &str = "commit/mutations";
+    pub const COMMIT_REVLOG_DATA: &str = "commit/revlog_data";
+    pub const COMMIT_TRANSLATE_ID: &str = "commit/translate_id";
+    pub const DOWNLOAD_FILE: &str = "download/file";
+    pub const EPHEMERAL_PREPARE: &str = "ephemeral/prepare";
+    pub const FETCH_SNAPSHOT: &str = "snapshot";
+    pub const FILES2: &str = "files2";
+    pub const HEALTH_CHECK: &str = "health_check";
+    pub const HISTORY: &str = "history";
+    pub const LAND_STACK: &str = "land";
+    pub const LOOKUP: &str = "lookup";
+    pub const PULL_FAST_FORWARD: &str = "pull_fast_forward_master";
+    pub const PULL_LAZY: &str = "pull_lazy";
+    pub const SET_BOOKMARK: &str = "bookmarks/set";
     pub const SUFFIXQUERY: &str = "suffix_query";
+    pub const TREES: &str = "trees";
+    pub const UPLOAD_BONSAI_CHANGESET: &str = "upload/changeset/bonsai";
+    pub const UPLOAD_CHANGESETS: &str = "upload/changesets";
+    pub const UPLOAD_FILENODES: &str = "upload/filenodes";
+    pub const UPLOAD_TREES: &str = "upload/trees";
+    pub const UPLOAD: &str = "upload/";
 }
 
 #[derive(Clone)]
@@ -472,7 +489,7 @@ impl Client {
         attributes: Option<TreeAttributes>,
     ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
     {
-        tracing::info!("Requesting fetching of {} tree(s)", keys.len());
+        tracing::info!("Fetching {} tree(s)", keys.len());
 
         if keys.is_empty() {
             return Ok(Response::empty());
@@ -486,7 +503,8 @@ impl Client {
             manifest_blob: attrs.manifest_blob,
             parents: attrs.parents,
             child_metadata: attrs.child_metadata,
-            augmented_trees: attrs.augmented_trees || self.config().augmented_trees,
+            augmented_trees: attrs.augmented_trees
+                || (self.config().augmented_trees && attrs.child_metadata),
         };
 
         let try_route_consistently = self.config().try_route_consistently;
@@ -521,10 +539,7 @@ impl Client {
         &self,
         reqs: Vec<FileSpec>,
     ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
-        tracing::info!(
-            "Requesting fetching of content and attributes for {} file(s)",
-            reqs.len()
-        );
+        tracing::info!("Fetching content and attributes for {} file(s)", reqs.len());
 
         if reqs.is_empty() {
             return Ok(Response::empty());
@@ -1136,6 +1151,116 @@ impl Client {
 
         self.fetch_single::<ReferencesDataResponse>(request).await
     }
+
+    async fn cloud_smartlog_attempt(
+        &self,
+        data: GetSmartlogParams,
+    ) -> Result<SmartlogDataResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud smartlog for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_SMARTLOG)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<SmartlogDataResponse>(request).await
+    }
+
+    async fn cloud_share_workspace_attempt(
+        &self,
+        data: CloudShareWorkspaceRequest,
+    ) -> Result<CloudShareWorkspaceResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting share workspace '{}' in the repo '{}'",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_SHARE_WORKSPACE)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<CloudShareWorkspaceResponse>(request)
+            .await
+    }
+
+    async fn cloud_update_archive_attempt(
+        &self,
+        data: UpdateArchiveParams,
+    ) -> Result<UpdateArchiveResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud update archive for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_UPDATE_ARCHIVE)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<UpdateArchiveResponse>(request).await
+    }
+
+    async fn cloud_rename_workspace_attempt(
+        &self,
+        data: RenameWorkspaceRequest,
+    ) -> Result<RenameWorkspaceResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud rename workspace for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_RENAME_WORKSPACE)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<RenameWorkspaceResponse>(request).await
+    }
+
+    async fn cloud_smartlog_by_version_attempt(
+        &self,
+        data: GetSmartlogByVersionParams,
+    ) -> Result<SmartlogDataResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud smartlog for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_SMARTLOG_BY_VERSION)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<SmartlogDataResponse>(request).await
+    }
+
+    async fn cloud_historical_versions_attempt(
+        &self,
+        data: HistoricalVersionsParams,
+    ) -> Result<HistoricalVersionsResponse, SaplingRemoteApiError> {
+        tracing::info!(
+            "Requesting cloud historical versions for the workspace '{}' in the repo '{}' ",
+            data.workspace,
+            data.reponame
+        );
+        let url = self.build_url(paths::CLOUD_HISTORICAL_VERSIONS)?;
+        let request = self
+            .configure_request(self.inner.client.post(url))?
+            .cbor(&data.to_wire())
+            .map_err(SaplingRemoteApiError::RequestSerializationFailed)?;
+
+        self.fetch_single::<HistoricalVersionsResponse>(request)
+            .await
+    }
 }
 
 #[async_trait]
@@ -1182,11 +1307,6 @@ impl SaplingRemoteApi for Client {
         &self,
         reqs: Vec<FileSpec>,
     ) -> Result<Response<FileResponse>, SaplingRemoteApiError> {
-        tracing::info!(
-            "Requesting content and attributes for {} file(s)",
-            reqs.len()
-        );
-
         let prog = self.inner.file_progress.create_or_extend(reqs.len() as u64);
 
         RetryableFileAttrs::new(reqs)
@@ -1215,8 +1335,6 @@ impl SaplingRemoteApi for Client {
         attributes: Option<TreeAttributes>,
     ) -> Result<Response<Result<TreeEntry, SaplingRemoteApiServerError>>, SaplingRemoteApiError>
     {
-        tracing::info!("Requesting {} tree(s)", keys.len());
-
         let prog = self.inner.tree_progress.create_or_extend(keys.len() as u64);
 
         RetryableTrees::new(keys, attributes)
@@ -1783,6 +1901,54 @@ impl SaplingRemoteApi for Client {
         data: UpdateReferencesParams,
     ) -> Result<ReferencesDataResponse, SaplingRemoteApiError> {
         self.with_retry(|this| this.cloud_update_references_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_smartlog(
+        &self,
+        data: GetSmartlogParams,
+    ) -> Result<SmartlogDataResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_smartlog_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_share_workspace(
+        &self,
+        data: CloudShareWorkspaceRequest,
+    ) -> Result<CloudShareWorkspaceResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_share_workspace_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_update_archive(
+        &self,
+        data: UpdateArchiveParams,
+    ) -> Result<UpdateArchiveResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_update_archive_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_rename_workspace(
+        &self,
+        data: RenameWorkspaceRequest,
+    ) -> Result<RenameWorkspaceResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_rename_workspace_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_smartlog_by_version(
+        &self,
+        data: GetSmartlogByVersionParams,
+    ) -> Result<SmartlogDataResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_smartlog_by_version_attempt(data.clone()).boxed())
+            .await
+    }
+
+    async fn cloud_historical_versions(
+        &self,
+        data: HistoricalVersionsParams,
+    ) -> Result<HistoricalVersionsResponse, SaplingRemoteApiError> {
+        self.with_retry(|this| this.cloud_historical_versions_attempt(data.clone()).boxed())
             .await
     }
 

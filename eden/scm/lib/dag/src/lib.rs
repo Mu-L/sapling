@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 #![allow(clippy::iter_nth_zero, for_loops_over_fallibles)]
+#![allow(unexpected_cfgs)]
 
 //! # dag
 //!
@@ -24,6 +25,7 @@ pub mod iddagstore;
 pub mod idmap;
 mod idset;
 mod integrity;
+pub(crate) mod lifecycle;
 pub mod ops;
 pub mod protocol;
 #[cfg(any(test, feature = "render"))]

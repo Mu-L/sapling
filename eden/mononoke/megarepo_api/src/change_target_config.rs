@@ -24,6 +24,7 @@ use megarepo_mapping::CommitRemappingState;
 use megarepo_mapping::SourceName;
 use metaconfig_types::RepoConfigArc;
 use mononoke_api::Mononoke;
+use mononoke_api::MononokeRepo;
 use mononoke_api::RepoContext;
 use mononoke_types::ChangesetId;
 use mutable_renames::MutableRenames;
@@ -145,22 +146,22 @@ fn diff_configs(
 /// M - move commits
 /// S - source commits that need to be merged
 /// ```
-pub struct ChangeTargetConfig<'a> {
+pub struct ChangeTargetConfig<'a, R> {
     pub megarepo_configs: &'a Arc<dyn MononokeMegarepoConfigs>,
-    pub mononoke: &'a Arc<Mononoke>,
+    pub mononoke: &'a Arc<Mononoke<R>>,
     pub mutable_renames: &'a Arc<MutableRenames>,
 }
 
-impl<'a> MegarepoOp for ChangeTargetConfig<'a> {
-    fn mononoke(&self) -> &Arc<Mononoke> {
+impl<'a, R> MegarepoOp<R> for ChangeTargetConfig<'a, R> {
+    fn mononoke(&self) -> &Arc<Mononoke<R>> {
         self.mononoke
     }
 }
 
-impl<'a> ChangeTargetConfig<'a> {
+impl<'a, R: MononokeRepo> ChangeTargetConfig<'a, R> {
     pub fn new(
         megarepo_configs: &'a Arc<dyn MononokeMegarepoConfigs>,
-        mononoke: &'a Arc<Mononoke>,
+        mononoke: &'a Arc<Mononoke<R>>,
         mutable_renames: &'a Arc<MutableRenames>,
     ) -> Self {
         Self {
@@ -210,7 +211,7 @@ impl<'a> ChangeTargetConfig<'a> {
             })?;
         let (old_remapping_state, old_config) = find_target_sync_config(
             ctx,
-            target_repo.inner_repo(),
+            target_repo.repo(),
             target_location,
             target,
             self.megarepo_configs,
@@ -252,7 +253,7 @@ impl<'a> ChangeTargetConfig<'a> {
                 &target_repo,
                 &diff,
                 &changesets_to_merge,
-                new_config.version.clone(),
+                &new_config,
                 message.clone(),
                 self.mutable_renames,
                 target.bookmark.to_owned(),
@@ -283,7 +284,7 @@ impl<'a> ChangeTargetConfig<'a> {
                 &additions_merge,
                 old_target_cs,
                 &new_remapping_state,
-                Some(new_config.version),
+                Some(&new_config),
             )
             .await?;
         let mut scuba = ctx.scuba().clone();
@@ -294,7 +295,7 @@ impl<'a> ChangeTargetConfig<'a> {
 
         // Derrive all the necessary data before moving the bookmark
         let derived_data_types = target_repo
-            .inner_repo()
+            .repo()
             .repo_derived_data()
             .active_config()
             .types
@@ -302,7 +303,7 @@ impl<'a> ChangeTargetConfig<'a> {
             .copied()
             .collect::<Vec<_>>();
         target_repo
-            .inner_repo()
+            .repo()
             .repo_derived_data()
             .manager()
             .derive_bulk(ctx, &[final_merge], None, &derived_data_types, None)
@@ -311,7 +312,7 @@ impl<'a> ChangeTargetConfig<'a> {
         // Move bookmark
         self.move_bookmark_conditionally(
             ctx,
-            target_repo.inner_repo(),
+            target_repo.repo(),
             target_bookmark.to_string(),
             (target_location, final_merge),
         )
@@ -327,10 +328,10 @@ impl<'a> ChangeTargetConfig<'a> {
     async fn create_commit_with_new_sources(
         &self,
         ctx: &CoreContext,
-        repo: &RepoContext,
+        repo: &RepoContext<R>,
         diff: &SyncTargetConfigChanges,
         changesets_to_merge: &BTreeMap<SourceName, ChangesetId>,
-        sync_config_version: SyncConfigVersion,
+        sync_target_config: &SyncTargetConfig,
         message: Option<String>,
         mutable_renames: &Arc<MutableRenames>,
         bookmark: String,
@@ -347,7 +348,7 @@ impl<'a> ChangeTargetConfig<'a> {
         let moved_commits = self
             .create_move_commits(
                 ctx,
-                repo.inner_repo(),
+                repo.repo(),
                 &sources_to_add,
                 changesets_to_merge,
                 mutable_renames,
@@ -362,10 +363,10 @@ impl<'a> ChangeTargetConfig<'a> {
         Ok(Some(
             self.create_merge_commits(
                 ctx,
-                repo.inner_repo(),
+                repo.repo(),
                 moved_commits,
                 false, /* write_commit_remapping_state */
-                sync_config_version,
+                sync_target_config,
                 message,
                 bookmark,
             )
@@ -383,7 +384,7 @@ impl<'a> ChangeTargetConfig<'a> {
         new_version: &SyncConfigVersion,
         (expected_target_location, actual_target_location): (ChangesetId, ChangesetId),
         changesets_to_merge: &BTreeMap<SourceName, ChangesetId>,
-        repo: &RepoContext,
+        repo: &RepoContext<R>,
     ) -> Result<ChangesetId, MegarepoError> {
         // Bookmark points a non-expected commit - let's see if changeset it points to was created
         // by a previous change_target_config call
@@ -420,6 +421,7 @@ mod test {
     use anyhow::Error;
     use maplit::btreemap;
     use megarepo_config::Target;
+    use mononoke_macros::mononoke;
     use mononoke_types::RepositoryId;
     use mononoke_types_mocks::changesetid::ONES_CSID;
     use mononoke_types_mocks::changesetid::THREES_CSID;
@@ -435,7 +437,7 @@ mod test {
             .collect()
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_diff_configs() -> Result<(), Error> {
         let repo_id = RepositoryId::new(1);
         let target = Target {

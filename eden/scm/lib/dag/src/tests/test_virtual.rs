@@ -14,11 +14,13 @@ use nonblocking::non_blocking_result as r;
 use crate::ops::DagAddHeads;
 use crate::ops::DagPersistent;
 use crate::ops::IdConvert;
+use crate::ops::IdMapSnapshot;
 use crate::tests::dbg;
 use crate::tests::DrawDag;
 use crate::tests::TestDag;
 use crate::DagAlgorithm;
 use crate::Result;
+use crate::Set;
 use crate::VertexListWithOptions;
 use crate::VertexOptions;
 
@@ -151,6 +153,102 @@ fn test_setting_managed_virtual_group_clears_existing_virtual_group() -> Result<
     };
     r(dag.import_pull_data(data, VertexListWithOptions::default()))?;
     assert!(r(dag.contains_vertex_name(&"wdir".into()))?);
+
+    Ok(())
+}
+
+#[test]
+fn test_setting_managed_virtual_group_clears_snapshot() -> Result<()> {
+    let parents: Vec<(Vertex, Vec<Vertex>)> =
+        vec![("N".into(), vec![]), ("W".into(), vec!["B".into()])];
+
+    let mut dag = TestDag::draw("A..C");
+    dag.insert_virtual("C..E");
+
+    // Populate the snapshot caches.
+    let _dag_snapshot = dag.dag_snapshot()?;
+    let _id_map_snapshot = dag.id_map_snapshot()?;
+
+    // Update virtual group.
+    r(dag.set_managed_virtual_group(Some(parents.clone())))?;
+
+    // Take new snapshot - they should include the virtual group changes.
+    let dag_snapshot = dag.dag_snapshot()?;
+    let id_map_snapshot = dag.id_map_snapshot()?;
+    let b_children =
+        r(dag_snapshot.children(Set::from_static_names(vec![Vertex::copy_from(b"B")])))?;
+    assert_eq!(dbg(b_children), "<spans [W+V1, C+N2]>");
+
+    let wdir_id = r(id_map_snapshot.vertex_id_optional(&Vertex::copy_from(b"W")))?;
+    assert!(wdir_id.is_some());
+
+    // Remove virtual group.
+    r(dag.set_managed_virtual_group(Some(Vec::new())))?;
+    let dag_snapshot = dag.dag_snapshot()?;
+    let id_map_snapshot = dag.id_map_snapshot()?;
+    let b_children =
+        r(dag_snapshot.children(Set::from_static_names(vec![Vertex::copy_from(b"B")])))?;
+    assert_eq!(dbg(b_children), "<spans [C+N2]>");
+    let wdir_id = r(id_map_snapshot.vertex_id_optional(&Vertex::copy_from(b"W")))?;
+    assert!(wdir_id.is_none());
+
+    // Re-insert virtual group.
+    r(dag.set_managed_virtual_group(Some(parents)))?;
+    let b_children = r(dag.children(Set::from_static_names(vec![Vertex::copy_from(b"B")])))?;
+    assert_eq!(dbg(b_children), "<spans [W+V1, C+N2]>");
+    let wdir_id = r(dag.vertex_id_optional(&Vertex::copy_from(b"W")))?;
+    assert!(wdir_id.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_setting_managed_virtual_group_on_lazy_graph() -> Result<()> {
+    let server = TestDag::draw("A..E  # master: E");
+    let mut client = server.client_cloned_data().await;
+
+    let parents: Vec<(Vertex, Vec<Vertex>)> =
+        vec![("N".into(), vec![]), ("W".into(), vec!["B".into()])];
+    client.set_managed_virtual_group(Some(parents)).await?;
+
+    // Does not trigger virutal vertex (N, W) lookups.
+    assert_eq!(client.output(), ["resolve names: [B], heads: [E]"]);
+
+    // Client should see the virtual group, and be able to query it.
+    assert_eq!(dbg(client.virtual_group().await?), "<spans [N:W+V0:V1]>");
+    let b_children = client
+        .children(Set::from_static_names(vec![Vertex::copy_from(b"B")]))
+        .await?;
+    assert_eq!(dbg(b_children), "<spans [W+V1, 2]>");
+    let wdir_id = client.vertex_id_optional(&Vertex::copy_from(b"W")).await?;
+    assert!(wdir_id.is_some());
+
+    // Snapshots should include the virtual group too.
+    let dag_snapshot = client.dag_snapshot()?;
+    let id_map_snapshot = client.id_map_snapshot()?;
+    assert_eq!(
+        dbg(dag_snapshot.virtual_group().await?),
+        "<spans [N:W+V0:V1]>"
+    );
+    let b_children =
+        r(dag_snapshot.children(Set::from_static_names(vec![Vertex::copy_from(b"B")])))?;
+    assert_eq!(dbg(b_children), "<spans [W+V1, 2]>");
+    let wdir_id = r(id_map_snapshot.vertex_id_optional(&Vertex::copy_from(b"W")))?;
+    assert!(wdir_id.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reassign_group_of_virtual_parent() -> Result<()> {
+    let mut dag = TestDag::draw("A..C");
+    dag.flush("").await;
+
+    let parents: Vec<(Vertex, Vec<Vertex>)> = vec![("V".into(), vec!["B".into()])];
+    dag.set_managed_virtual_group(Some(parents)).await?;
+
+    // Reassign virtual V's parent B from NonMaster to Master.
+    dag.flush("C").await;
 
     Ok(())
 }

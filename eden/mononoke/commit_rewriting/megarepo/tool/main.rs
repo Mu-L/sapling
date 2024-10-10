@@ -14,7 +14,12 @@ use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use blobstore_factory::MetadataSqlFactory;
+use bonsai_git_mapping::BonsaiGitMapping;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
+use bonsai_hg_mapping::BonsaiHgMapping;
 use bookmarks::BookmarkKey;
+use bookmarks::BookmarkUpdateLog;
+use bookmarks::Bookmarks;
 use borrowed::borrowed;
 use cached_config::ConfigStore;
 use clap::ArgMatches;
@@ -25,10 +30,11 @@ use cmdlib::args::MononokeMatches;
 use cmdlib::helpers;
 use cmdlib_x_repo::create_commit_syncer_from_matches;
 use cmdlib_x_repo::repo_provider_from_matches;
+use commit_graph::CommitGraph;
+use commit_graph::CommitGraphWriter;
 use context::CoreContext;
-use cross_repo_sync::create_commit_syncer_lease;
 use cross_repo_sync::find_toposorted_unsynced_ancestors;
-use cross_repo_sync::get_all_submodule_deps;
+use cross_repo_sync::get_all_submodule_deps_from_repo_pair;
 use cross_repo_sync::verify_working_copy_with_version;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
@@ -38,8 +44,9 @@ use cross_repo_sync::ConcreteRepo as CrossRepo;
 use cross_repo_sync::Source;
 use cross_repo_sync::Target;
 use fbinit::FacebookInit;
+use filenodes::Filenodes;
+use filestore::FilestoreConfig;
 use fsnodes::RootFsnodeId;
-use futures::compat::Future01CompatExt;
 use futures::future::try_join;
 use futures::future::try_join_all;
 use futures::Stream;
@@ -50,53 +57,6 @@ use live_commit_sync_config::LiveCommitSyncConfig;
 use manifest::Entry;
 use manifest::ManifestOps;
 use manifest::PathOrPrefix;
-use metaconfig_types::CommitSyncConfigVersion;
-use metaconfig_types::MetadataDatabaseConfig;
-use mononoke_types::path::MPath;
-use mononoke_types::ChangesetId;
-use mononoke_types::FileChange;
-use mononoke_types::NonRootMPath;
-use mononoke_types::RepositoryId;
-use movers::get_small_to_large_mover;
-use movers::Mover;
-use pushredirect::SqlPushRedirectionConfigBuilder;
-use regex::Regex;
-use repo_blobstore::RepoBlobstoreRef;
-use repo_identity::RepoIdentityRef;
-use slog::info;
-use slog::warn;
-#[cfg(fbcode_build)]
-use sql_ext::facebook::MyAdmin;
-use sql_ext::replication::NoReplicaLagMonitor;
-use sql_ext::replication::ReplicaLagMonitor;
-use sql_ext::replication::WaitForReplicationConfig;
-use sql_query_config::SqlQueryConfig;
-use synced_commit_mapping::EquivalentWorkingCopyEntry;
-use synced_commit_mapping::SqlSyncedCommitMapping;
-use synced_commit_mapping::SyncedCommitMapping;
-use synced_commit_mapping::SyncedCommitMappingEntry;
-use synced_commit_mapping::WorkingCopyEquivalence;
-use tokio::fs::read_to_string;
-use tokio::fs::File;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::BufReader;
-
-mod catchup;
-mod cli;
-mod gradual_merge;
-mod manual_commit_sync;
-mod merging;
-mod sync_diamond_merge;
-
-use bonsai_git_mapping::BonsaiGitMapping;
-use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
-use bonsai_hg_mapping::BonsaiHgMapping;
-use bookmarks::BookmarkUpdateLog;
-use bookmarks::Bookmarks;
-use commit_graph::CommitGraph;
-use commit_graph::CommitGraphWriter;
-use filenodes::Filenodes;
-use filestore::FilestoreConfig;
 use megarepolib::chunking::even_chunker_with_max_size;
 use megarepolib::chunking::parse_chunking_hint;
 use megarepolib::chunking::path_chunker_from_hint;
@@ -112,16 +72,45 @@ use megarepolib::perform_stack_move;
 use megarepolib::pre_merge_delete::create_pre_merge_delete;
 use megarepolib::pre_merge_delete::PreMergeDelete;
 use megarepolib::working_copy::get_working_copy_paths_by_prefixes;
+use metaconfig_types::CommitSyncConfigVersion;
+use metaconfig_types::MetadataDatabaseConfig;
 use metaconfig_types::RepoConfig;
+use mononoke_types::path::MPath;
+use mononoke_types::ChangesetId;
+use mononoke_types::FileChange;
+use mononoke_types::NonRootMPath;
+use mononoke_types::RepositoryId;
+use movers::get_small_to_large_mover;
+use movers::Mover;
 use mutable_counters::MutableCounters;
 use phases::Phases;
 use pushrebase_mutation_mapping::PushrebaseMutationMapping;
+use pushredirect::SqlPushRedirectionConfigBuilder;
+use regex::Regex;
 use repo_blobstore::RepoBlobstore;
+use repo_blobstore::RepoBlobstoreRef;
 use repo_bookmark_attrs::RepoBookmarkAttrs;
 use repo_cross_repo::RepoCrossRepo;
 use repo_derived_data::RepoDerivedData;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentity;
+use repo_identity::RepoIdentityRef;
+use slog::info;
+use slog::warn;
+#[cfg(fbcode_build)]
+use sql_ext::facebook::MyAdmin;
+use sql_ext::replication::NoReplicaLagMonitor;
+use sql_ext::replication::ReplicaLagMonitor;
+use sql_ext::replication::WaitForReplicationConfig;
+use sql_query_config::SqlQueryConfig;
+use synced_commit_mapping::EquivalentWorkingCopyEntry;
+use synced_commit_mapping::SyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMappingEntry;
+use synced_commit_mapping::WorkingCopyEquivalence;
+use tokio::fs::read_to_string;
+use tokio::fs::File;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
 
 use crate::cli::cs_args_from_matches;
 use crate::cli::get_catchup_head_delete_commits_cs_args_factory;
@@ -182,6 +171,13 @@ use crate::cli::VERSION;
 use crate::cli::WAIT_SECS;
 use crate::merging::perform_merge;
 
+mod catchup;
+mod cli;
+mod gradual_merge;
+mod manual_commit_sync;
+mod merging;
+mod sync_diamond_merge;
+
 #[derive(Clone)]
 #[facet::container]
 pub struct Repo(
@@ -213,7 +209,7 @@ async fn run_move<'a>(
 ) -> Result<(), Error> {
     let origin_repo =
         RepositoryId::new(args::get_i32_opt(sub_m, ORIGIN_REPO).expect("Origin repo is missing"));
-    let resulting_changeset_args = cs_args_from_matches(sub_m);
+    let resulting_changeset_args = cs_args_from_matches(sub_m)?;
     let move_parent = sub_m.value_of(CHANGESET).unwrap().to_owned();
 
     let mapping_version_name = sub_m
@@ -234,13 +230,10 @@ async fn run_move<'a>(
     let max_num_of_moves_in_commit: Option<NonZeroU64> =
         args::get_and_parse_opt(sub_m, MAX_NUM_OF_MOVES_IN_COMMIT);
 
-    let (repo, resulting_changeset_args) = try_join(
-        args::not_shardmanager_compatible::open_repo::<Repo>(
-            ctx.fb,
-            &ctx.logger().clone(),
-            matches,
-        ),
-        resulting_changeset_args.compat(),
+    let repo = args::not_shardmanager_compatible::open_repo::<Repo>(
+        ctx.fb,
+        &ctx.logger().clone(),
+        matches,
     )
     .await?;
 
@@ -280,14 +273,11 @@ async fn run_merge<'a>(
 ) -> Result<(), Error> {
     let first_parent = sub_m.value_of(FIRST_PARENT).unwrap().to_owned();
     let second_parent = sub_m.value_of(SECOND_PARENT).unwrap().to_owned();
-    let resulting_changeset_args = cs_args_from_matches(sub_m);
-    let (repo, resulting_changeset_args) = try_join(
-        args::not_shardmanager_compatible::open_repo::<Repo>(
-            ctx.fb,
-            &ctx.logger().clone(),
-            matches,
-        ),
-        resulting_changeset_args.compat(),
+    let resulting_changeset_args = cs_args_from_matches(sub_m)?;
+    let repo = args::not_shardmanager_compatible::open_repo::<Repo>(
+        ctx.fb,
+        &ctx.logger().clone(),
+        matches,
     )
     .await?;
 
@@ -326,12 +316,6 @@ async fn run_sync_diamond_merge<'a>(
 
     let source_repo = args::open_repo_with_repo_id(ctx.fb, ctx.logger(), source_repo_id, matches);
     let target_repo = args::open_repo_with_repo_id(ctx.fb, ctx.logger(), target_repo_id, matches);
-    let mapping = args::not_shardmanager_compatible::open_source_sql::<SqlSyncedCommitMapping>(
-        ctx.fb,
-        config_store,
-        matches,
-    )
-    .await?;
 
     let merge_commit_hash = sub_m.value_of(COMMIT_HASH).unwrap().to_owned();
     let (source_repo, target_repo): (Repo, Repo) = try_join(source_repo, target_repo).await?;
@@ -348,21 +332,17 @@ async fn run_sync_diamond_merge<'a>(
     .await
     .context("building live_commit_sync_config")?;
 
-    let caching = matches.caching();
-    let x_repo_syncer_lease = create_commit_syncer_lease(ctx.fb, caching)?;
-
     let live_commit_sync_config = Arc::new(live_commit_sync_config);
 
     let repo_provider = repo_provider_from_matches(ctx, matches);
 
     let source_repo_arc = Arc::new(source_repo);
     let target_repo_arc = Arc::new(target_repo);
-    let submodule_deps = get_all_submodule_deps(
+    let submodule_deps = get_all_submodule_deps_from_repo_pair(
         ctx,
         source_repo_arc.clone(),
         target_repo_arc.clone(),
         repo_provider,
-        live_commit_sync_config.clone(),
     )
     .await?;
 
@@ -372,10 +352,8 @@ async fn run_sync_diamond_merge<'a>(
         target_repo_arc.as_ref(),
         submodule_deps,
         source_merge_cs_id,
-        mapping,
         bookmark,
         live_commit_sync_config,
-        x_repo_syncer_lease,
     )
     .await
     .map(|_| ())
@@ -476,7 +454,7 @@ async fn run_history_fixup_delete<'a>(
 
     let fixup_bcs_id = {
         let hash = sub_m.value_of(COMMIT_HASH).unwrap().to_owned();
-        helpers::csid_resolve(ctx, repo.clone(), hash).await?
+        helpers::csid_resolve(ctx, &repo, hash).await?
     };
 
     let correct_bcs_id = {
@@ -484,7 +462,7 @@ async fn run_history_fixup_delete<'a>(
             .value_of(COMMIT_HASH_CORRECT_HISTORY)
             .unwrap()
             .to_owned();
-        helpers::csid_resolve(ctx, repo.clone(), hash).await?
+        helpers::csid_resolve(ctx, &repo, hash).await?
     };
     let paths_file = sub_m.value_of(PATHS_FILE).unwrap().to_owned();
     let s = read_to_string(&paths_file).await?;
@@ -610,7 +588,7 @@ async fn run_bonsai_merge<'a>(
     )
     .await?;
 
-    let cs_args = cs_args_from_matches(sub_m).compat().await?;
+    let cs_args = cs_args_from_matches(sub_m)?;
 
     let merge_cs_id =
         create_and_save_bonsai(ctx, &repo, vec![p1, p2], Default::default(), cs_args).await?;
@@ -1067,7 +1045,7 @@ async fn run_backfill_noop_mapping<'a>(
         .then({
             borrowed!(commit_syncer, ctx);
             move |chunk| async move {
-                let mapping = &commit_syncer.mapping;
+                let mapping = commit_syncer.get_mapping();
                 let chunk: Result<Vec<_>, Error> = chunk.into_iter().collect();
                 let chunk = chunk?;
                 let len = chunk.len();
@@ -1195,7 +1173,7 @@ async fn run_diff_mapping_versions<'a>(
 async fn process_stream_and_wait_for_replication<'a, R: cross_repo_sync::Repo>(
     ctx: &CoreContext,
     matches: &MononokeMatches<'a>,
-    commit_syncer: &CommitSyncer<SqlSyncedCommitMapping, R>,
+    commit_syncer: &CommitSyncer<R>,
     mut s: impl Stream<Item = Result<u64>> + std::marker::Unpin,
 ) -> Result<(), Error> {
     let config_store = matches.config_store();
@@ -1360,7 +1338,7 @@ async fn run_delete_no_longer_bound_files_from_large_repo<'a>(
     }
     info!(ctx.logger(), "need to delete {} paths", to_delete.len());
 
-    let resulting_changeset_args = cs_args_from_matches(sub_m).compat().await?;
+    let resulting_changeset_args = cs_args_from_matches(sub_m)?;
     let deletion_cs_id = create_and_save_bonsai(
         ctx,
         large_repo,
@@ -1380,7 +1358,7 @@ async fn run_delete_no_longer_bound_files_from_large_repo<'a>(
 
 async fn find_mover_for_commit<R: cross_repo_sync::Repo>(
     ctx: &CoreContext,
-    commit_syncer: &CommitSyncer<SqlSyncedCommitMapping, R>,
+    commit_syncer: &CommitSyncer<R>,
     cs_id: ChangesetId,
 ) -> Result<Mover, Error> {
     let maybe_sync_outcome = commit_syncer.get_commit_sync_outcome(ctx, cs_id).await?;
@@ -1402,7 +1380,7 @@ async fn find_mover_for_commit<R: cross_repo_sync::Repo>(
 }
 
 async fn get_live_commit_sync_config(
-    ctx: &CoreContext,
+    _ctx: &CoreContext,
     fb: FacebookInit,
     matches: &MononokeMatches<'_>,
     config_store: &ConfigStore,
@@ -1422,11 +1400,7 @@ async fn get_live_commit_sync_config(
         .await?;
     let push_redirection_config = builder.build(Arc::new(SqlQueryConfig { caching: None }));
 
-    CfgrLiveCommitSyncConfig::new_with_xdb(
-        ctx.logger(),
-        config_store,
-        Arc::new(push_redirection_config),
-    )
+    CfgrLiveCommitSyncConfig::new(config_store, Arc::new(push_redirection_config))
 }
 
 #[fbinit::main]

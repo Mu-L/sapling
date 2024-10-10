@@ -15,7 +15,7 @@
 //! At the moment there two main limitations:
 //! 1) Syncing of some merge commits is not supported
 //! 2) Root commits and their descendants that are not merged into a main line
-//! aren't going to be synced. For example,
+//!    aren't going to be synced. For example,
 //
 //! ```text
 //!   O <- main bookmark
@@ -61,6 +61,11 @@ use bulk_derivation::BulkDerivation;
 use clientinfo::ClientEntryPoint;
 use clientinfo::ClientInfo;
 use context::CoreContext;
+use context::SessionContainer;
+use cross_repo_sync::log_debug;
+use cross_repo_sync::log_error;
+use cross_repo_sync::log_info;
+use cross_repo_sync::log_warning;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
 use cross_repo_sync::CommitSyncer;
@@ -95,10 +100,6 @@ use repo_identity::RepoIdentityRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sharding::XRepoSyncProcess;
 use sharding::XRepoSyncProcessExecutor;
-use slog::debug;
-use slog::info;
-use slog::warn;
-use synced_commit_mapping::SyncedCommitMapping;
 
 use crate::cli::ForwardSyncerArgs;
 use crate::cli::TailCommandArgs;
@@ -120,10 +121,10 @@ const SM_CLEANUP_TIMEOUT_SECS: u64 = 60;
 
 /// Sync and all of its unsynced ancestors **if the given commit has at least
 /// one synced ancestor**.
-async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static>(
+async fn run_in_single_commit_mode(
     ctx: &CoreContext,
     bcs: ChangesetId,
-    commit_syncer: CommitSyncer<M, Repo>,
+    commit_syncer: CommitSyncer<Arc<Repo>>,
     scuba_sample: MononokeScubaSampleBuilder,
     maybe_bookmark: Option<BookmarkKey>,
     common_bookmarks: HashSet<BookmarkKey>,
@@ -131,18 +132,20 @@ async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static>(
     new_version: Option<CommitSyncConfigVersion>,
     unsafe_force_rewrite_parent_to_target_bookmark: bool,
 ) -> Result<(), Error> {
-    info!(
-        ctx.logger(),
-        "Checking if {} is already synced {}->{}",
-        bcs,
-        commit_syncer.repos.get_source_repo().repo_identity().id(),
-        commit_syncer.repos.get_target_repo().repo_identity().id()
+    log_info(
+        ctx,
+        format!(
+            "Checking if {} is already synced {}->{}",
+            bcs,
+            commit_syncer.repos.get_source_repo().repo_identity().id(),
+            commit_syncer.repos.get_target_repo().repo_identity().id(),
+        ),
     );
     if commit_syncer
         .commit_sync_outcome_exists(ctx, Source(bcs))
         .await?
     {
-        info!(ctx.logger(), "{} is already synced", bcs);
+        log_info(ctx, format!("{} is already synced", bcs));
         return Ok(());
     }
 
@@ -162,36 +165,38 @@ async fn run_in_single_commit_mode<M: SyncedCommitMapping + Clone + 'static>(
     .await;
 
     if res.is_ok() {
-        info!(ctx.logger(), "successful sync");
+        log_info(ctx, "successful sync");
     }
     res.map(|_| ())
 }
 
-async fn run_in_initial_import_mode_for_single_head<M: SyncedCommitMapping + Clone + 'static>(
+async fn run_in_initial_import_mode_for_single_head(
     ctx: &CoreContext,
     bcs: ChangesetId,
-    commit_syncer: &CommitSyncer<M, Repo>,
+    commit_syncer: &CommitSyncer<Arc<Repo>>,
     config_version: CommitSyncConfigVersion,
     scuba_sample: MononokeScubaSampleBuilder,
     disable_progress_bar: bool,
     no_automatic_derivation: bool,
     derivation_batch_size: usize,
 ) -> Result<()> {
-    info!(
-        ctx.logger(),
-        "Checking if {} is already synced {}->{}",
-        bcs,
-        commit_syncer.repos.get_source_repo().repo_identity().id(),
-        commit_syncer.repos.get_target_repo().repo_identity().id()
+    log_info(
+        ctx,
+        format!(
+            "Checking if {} is already synced {}->{}",
+            bcs,
+            commit_syncer.repos.get_source_repo().repo_identity().id(),
+            commit_syncer.repos.get_target_repo().repo_identity().id()
+        ),
     );
     if commit_syncer
         .commit_sync_outcome_exists(ctx, Source(bcs))
         .await?
     {
-        info!(ctx.logger(), "{} is already synced", bcs);
+        log_info(ctx, format!("{} is already synced", bcs));
         return Ok(());
     }
-    let _ = sync_commits_for_initial_import(
+    let res = sync_commits_for_initial_import(
         ctx,
         commit_syncer,
         scuba_sample.clone(),
@@ -201,18 +206,24 @@ async fn run_in_initial_import_mode_for_single_head<M: SyncedCommitMapping + Clo
         no_automatic_derivation,
         derivation_batch_size,
     )
-    .await?;
-    info!(ctx.logger(), "successful sync of head {}", bcs);
+    .await;
+
+    if let Err(e) = res {
+        log_error(ctx, format!("Initial import failed: {e:#?}"));
+        return Err(e);
+    }
+
+    log_info(ctx, format!("successful sync of head {}", bcs));
     Ok(())
 }
 
 /// Run the initial import of a small repo into a large repo.
 /// It will sync a specific commit (i.e. head commit) and all of its ancestors
 /// if commit is notprovided
-async fn run_in_initial_import_mode<M: SyncedCommitMapping + Clone + 'static>(
+async fn run_in_initial_import_mode(
     ctx: &CoreContext,
     bcs_ids: Vec<ChangesetId>,
-    commit_syncer: CommitSyncer<M, Repo>,
+    commit_syncer: CommitSyncer<Arc<Repo>>,
     config_version: CommitSyncConfigVersion,
     scuba_sample: MononokeScubaSampleBuilder,
     disable_progress_bar: bool,
@@ -235,19 +246,19 @@ async fn run_in_initial_import_mode<M: SyncedCommitMapping + Clone + 'static>(
     Ok(())
 }
 
-enum TailingArgs<M, R> {
-    CatchUpOnce(CommitSyncer<M, R>),
-    LoopForever(CommitSyncer<M, R>),
+enum TailingArgs<R> {
+    CatchUpOnce(CommitSyncer<R>),
+    LoopForever(CommitSyncer<R>),
 }
 
-async fn run_in_tailing_mode<M: SyncedCommitMapping + Clone + 'static>(
+async fn run_in_tailing_mode(
     ctx: &CoreContext,
     target_mutable_counters: ArcMutableCounters,
     common_pushrebase_bookmarks: HashSet<BookmarkKey>,
     base_scuba_sample: MononokeScubaSampleBuilder,
     backpressure_params: BackpressureParams,
     derived_data_types: Vec<DerivableType>,
-    tailing_args: TailingArgs<M, Repo>,
+    tailing_args: TailingArgs<Arc<Repo>>,
     sleep_duration: Duration,
     maybe_bookmark_regex: Option<Regex>,
     pushrebase_rewrite_dates: PushrebaseRewriteDates,
@@ -340,9 +351,9 @@ async fn run_in_tailing_mode<M: SyncedCommitMapping + Clone + 'static>(
     Ok(())
 }
 
-async fn tail<M: SyncedCommitMapping + Clone + 'static>(
+async fn tail(
     ctx: &CoreContext,
-    commit_syncer: &CommitSyncer<M, Repo>,
+    commit_syncer: &CommitSyncer<Arc<Repo>>,
     target_mutable_counters: &ArcMutableCounters,
     mut scuba_sample: MononokeScubaSampleBuilder,
     common_pushrebase_bookmarks: &HashSet<BookmarkKey>,
@@ -381,7 +392,7 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
         Ok(false)
     } else {
         scuba_sample.add("queue_size", remaining_entries);
-        info!(ctx.logger(), "queue size is {}", remaining_entries);
+        log_info(ctx, format!("queue size is {}", remaining_entries));
 
         for entry in log_entries {
             let entry_id = entry.id;
@@ -428,9 +439,12 @@ async fn tail<M: SyncedCommitMapping + Clone + 'static>(
                     .await?;
                 }
             } else {
-                info!(
-                    ctx.logger(),
-                    "skipping log entry #{} for {}", entry.id, entry.bookmark_name
+                log_info(
+                    ctx,
+                    format!(
+                        "skipping log entry #{} for {}",
+                        entry.id, entry.bookmark_name,
+                    ),
                 );
                 let mut scuba_sample = scuba_sample.clone();
                 scuba_sample.add("source_bookmark_name", format!("{}", entry.bookmark_name));
@@ -476,7 +490,7 @@ async fn maybe_apply_backpressure(
                     match maybe_counter {
                         Some(counter) => {
                             let bookmark_update_log = repo.bookmark_update_log();
-                            debug!(ctx.logger(), "repo {}, counter {}", repo_id, counter);
+                            log_debug(ctx, format!("repo {}, counter {}", repo_id, counter));
                             bookmark_update_log
                                 .count_further_bookmark_log_entries(
                                     ctx.clone(),
@@ -486,9 +500,9 @@ async fn maybe_apply_backpressure(
                                 .await
                         }
                         None => {
-                            warn!(
-                                ctx.logger(),
-                                "backsyncer counter not found for repo {}!", repo_id,
+                            log_warning(
+                                ctx,
+                                format!("backsyncer counter not found for repo {}!", repo_id),
                             );
                             Ok(0)
                         }
@@ -514,9 +528,7 @@ async fn maybe_apply_backpressure(
     Ok(())
 }
 
-fn format_counter<M: SyncedCommitMapping + Clone + 'static, R>(
-    commit_syncer: &CommitSyncer<M, R>,
-) -> String
+fn format_counter<R>(commit_syncer: &CommitSyncer<R>) -> String
 where
     R: RepoIdentityRef + cross_repo_sync::Repo,
 {
@@ -582,22 +594,24 @@ impl BackpressureParams {
 #[fbinit::main]
 fn main(fb: FacebookInit) -> Result<()> {
     let app = create_app(fb)?;
-    let ctx = app.new_basic_context();
 
-    let mut metadata: Metadata = ctx.session().metadata().clone();
+    let mut metadata = Metadata::default();
     metadata.add_client_info(ClientInfo::default_with_entry_point(
         ClientEntryPoint::MegarepoForwardsyncer,
     ));
 
-    let ctx = ctx.with_mutated_scuba(|mut scuba| {
-        scuba.add_metadata(&metadata);
-        scuba
-    });
+    let mut scuba = app.environment().scuba_sample_builder.clone();
+    scuba.add_metadata(&metadata);
 
-    info!(
-        ctx.logger(),
-        "Starting session with id {}",
-        metadata.session_id()
+    let session_container = SessionContainer::builder(fb)
+        .metadata(Arc::new(metadata))
+        .build();
+
+    let ctx = session_container.new_context(app.logger().clone(), scuba);
+
+    log_info(
+        &ctx,
+        format!("Starting session with id {}", ctx.metadata().session_id(),),
     );
 
     app.run_with_monitoring_and_logging(

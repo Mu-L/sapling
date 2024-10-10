@@ -9,12 +9,8 @@
   $ setup_common_config $REPOTYPE
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ BUNDLE_PATH="${TESTTMP}/repo_bundle.bundle"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
 Setup repository starting with empty tree and ending with empty tree
   $ testtool_drawdag -R repo --derive-all --no-default-files <<EOF

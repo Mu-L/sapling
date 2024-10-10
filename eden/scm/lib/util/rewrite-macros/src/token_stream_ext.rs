@@ -7,15 +7,18 @@
 
 use std::str::FromStr;
 
+use proc_macro2::Delimiter;
 use proc_macro2::Group;
 use proc_macro2::Punct;
 use proc_macro2::Spacing;
 use proc_macro2::TokenStream;
 use proc_macro2::TokenTree;
 use tree_pattern_match::find_all;
+use tree_pattern_match::matches_full;
 use tree_pattern_match::replace_all;
 use tree_pattern_match::Match;
 use tree_pattern_match::Placeholder;
+use tree_pattern_match::PlaceholderExt as _;
 use tree_pattern_match::Replace;
 
 use crate::prelude::Item;
@@ -30,6 +33,7 @@ pub(crate) trait FindReplace {
         self.replace_with(pat, replace.to_items())
     }
     fn find_all(&self, pat: impl ToItems) -> Vec<Match<TokenInfo>>;
+    fn matches_full(&self, pat: impl ToItems) -> Option<Match<TokenInfo>>;
 }
 
 pub(crate) trait AngleBracket {
@@ -44,6 +48,14 @@ pub(crate) trait ToItems {
 
 pub(crate) trait ToTokens {
     fn to_tokens(self) -> TokenStream;
+}
+
+pub(crate) trait MatchExt {
+    fn captured_tokens(&self, name: &str) -> TokenStream;
+}
+
+pub(crate) trait PlaceholderExt {
+    fn disallow_group_match(self, name: &'static str) -> Self;
 }
 
 impl ToItems for TokenStream {
@@ -180,6 +192,12 @@ impl FindReplace for TokenStream {
         let pat = pat.to_items();
         find_all(&items, &pat)
     }
+
+    fn matches_full(&self, pat: impl ToItems) -> Option<Match<TokenInfo>> {
+        let items = self.to_items();
+        let pat = pat.to_items();
+        matches_full(&items, &pat)
+    }
 }
 
 impl FindReplace for Vec<Item> {
@@ -191,6 +209,11 @@ impl FindReplace for Vec<Item> {
     fn find_all(&self, pat: impl ToItems) -> Vec<Match<TokenInfo>> {
         let pat = pat.to_items();
         find_all(self, &pat)
+    }
+
+    fn matches_full(&self, pat: impl ToItems) -> Option<Match<TokenInfo>> {
+        let pat = pat.to_items();
+        matches_full(self, &pat)
     }
 }
 
@@ -237,6 +260,24 @@ impl AngleBracket for Vec<Item> {
             }
         }
         result
+    }
+}
+
+impl MatchExt for Match<TokenInfo> {
+    fn captured_tokens(&self, name: &str) -> TokenStream {
+        match self.captures.get(name) {
+            None => TokenStream::new(),
+            Some(v) => v.to_tokens(),
+        }
+    }
+}
+
+impl PlaceholderExt for Vec<Item> {
+    fn disallow_group_match(self, name: &'static str) -> Self {
+        self.with_placeholder_matching_items([(name,
+            (|item: &Item| !matches!(item, Item::Tree(TokenInfo::Group(d), _) if *d == Delimiter::Brace))
+                as fn(&Item) -> bool,
+        )])
     }
 }
 

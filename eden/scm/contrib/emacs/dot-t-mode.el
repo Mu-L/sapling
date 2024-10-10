@@ -50,7 +50,7 @@
       (2 font-lock-keyword-face nil t)))
 
     ;; in "$ hg foo", "hg" is builtin, "foo" is function.
-    ("^\\s-+\\$\\s-.*?+\\_<\\(hg\\|sl\\)\\_>.*? \\([a-z]+\\)[[:space:]$]"
+    ("^\\s-+\\$\\s-.*?+\\_<\\(hg\\|sl\\)\\_>.*? \\(\\w+\\)[[:space:]$]"
      (1 font-lock-builtin-face)
      (2 font-lock-function-name-face))
 
@@ -58,7 +58,7 @@
     ("^  \\$" (" -[^[:space:]]+" nil nil (0 font-lock-variable-name-face)))
 
     ;; In "$ ENV=var foo", "$" is keyword, "foo" is function.
-    ("^\\s-+\\$\\(?:[[:space:]]\\|[A-Z]+=[^[:space:]]+\\)+.*?\\([a-z]+\\)"
+    ("^\\s-+\\$\\(?:[[:space:]]\\|[A-Z]+=[^[:space:]]+\\)+.*?\\([a-z]\\w+\\)"
      (1 font-lock-function-name-face))
 
     ;; In "foo.bar=", "foo.bar" is variable name.
@@ -135,11 +135,9 @@
 
   (add-to-list 'compilation-error-regexp-alist 'dot-t)
   ;; Make `"/some/path.py", line 123` into a link.
-  (add-to-list 'compilation-error-regexp-alist-alist
-               '(dot-t . ("\"\\([^\"]+\\)\", line \\([0-9]+\\)" 1 2)))
   ;; Make `/some/path.py:123` into a link.
   (add-to-list 'compilation-error-regexp-alist-alist
-               '(dot-t . ("\\(/.*\\.py\\):\\([0-9]+\\)" 1 2)))
+               '(dot-t . ("\\(/.*?\\.py\\)\\(?:\", line \\|:\\)\\([0-9]+\\)" 1 2)))
 
   (add-hook 'compilation-filter-hook #'ansi-color-compilation-filter nil t))
 
@@ -154,7 +152,7 @@ Add prefix arg to run with --fix.
     (when (file-remote-p file)
       (setq file (tramp-file-name-localname (tramp-dissect-file-name file))))
 
-    (if (save-excursion (goto-char (point-min)) (search-forward "#debugruntest-incompatible" nil t))
+    (if (save-excursion (goto-char (point-min)) (search-forward-regexp "#debugruntest-incompatible\\|#require fsmonitor" nil t))
         (let ((run-tests-py (concat (locate-dominating-file file "run-tests.py") "run-tests.py")))
           (setq args (list run-tests-py
                            "--noprogress"

@@ -13,6 +13,8 @@ use blobstore_factory::BlobstoreOptions;
 use blobstore_factory::ReadOnlyStorage;
 use cached_config::ConfigStore;
 use clap::ValueEnum;
+use clientinfo::ClientEntryPoint;
+use commit_graph_types::environment::CommitGraphOptions;
 use derived_data_remote::RemoteDerivationOptions;
 use fbinit::FacebookInit;
 use megarepo_config::MononokeMegarepoConfigsOptions;
@@ -61,6 +63,8 @@ pub enum BookmarkCacheDerivedData {
     HgOnly,
     /// Only wait for git derived data - the option used mainly by Mononoke Git Server.
     GitOnly,
+    /// Wait for both hg and git derived data - the option used mainly by Mononoke Server.
+    HgAndGit,
     /// Wait for all derived data types - mainly used by Mononoke SCS Server.
     AllKinds,
     /// Don't wait for any derived data - advance bookmarks as they move.
@@ -123,4 +127,6 @@ pub struct MononokeEnvironment {
     pub bookmark_cache_options: BookmarkCacheOptions,
     /// Function determining whether given repo (identified by name) should be loaded
     pub filter_repos: Option<Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>>,
+    pub commit_graph_options: CommitGraphOptions,
+    pub client_entry_point_for_service: ClientEntryPoint,
 }

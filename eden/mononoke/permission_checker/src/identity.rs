@@ -98,13 +98,20 @@ pub trait MononokeIdentitySetExt {
 
     fn username(&self) -> Option<&str>;
     fn identity_type_filtered_concat(&self, id_type: &str) -> Option<String>;
-    fn main_client_identity(&self) -> String;
+    fn main_client_identity(&self, sandcastle_alias: Option<&str>) -> String;
 
     fn to_string(&self) -> String;
 }
 
-#[test]
-fn test_ipv6_identity() {
-    let id = MononokeIdentity::from_str("MACHINE:2621:10d:c1a8:12c9::1162").unwrap();
-    assert_eq!(id.id_data(), "2621:10d:c1a8:12c9::1162");
+#[cfg(test)]
+mod tests {
+    use mononoke_macros::mononoke;
+
+    use super::*;
+
+    #[mononoke::test]
+    fn test_ipv6_identity() {
+        let id = MononokeIdentity::from_str("MACHINE:2621:10d:c1a8:12c9::1162").unwrap();
+        assert_eq!(id.id_data(), "2621:10d:c1a8:12c9::1162");
+    }
 }

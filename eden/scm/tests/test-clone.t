@@ -3,7 +3,6 @@
 #require no-eden
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
   $ setconfig clone.use-rust=1
 
 #testcases rustcheckout pythoncheckout
@@ -37,7 +36,7 @@ Create a non-inlined filelog:
 Default operation:
 
   $ hg clone . ../b
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd ../b
 
@@ -68,7 +67,7 @@ Default destination:
   $ cd ../d
   $ hg clone ../a
   destination directory: a
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd a
   $ hg cat a
@@ -78,7 +77,7 @@ Default destination:
 Check that we drop the 'file:' from the path before writing the .hgrc:
 
   $ hg clone file:a e
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ grep 'file:' e/.hg/hgrc
   [1]
@@ -96,7 +95,7 @@ Use --pull:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ hg -R g verify
   warning: verify does not actually check anything in this repo
@@ -112,7 +111,7 @@ Clone to '.':
   $ mkdir h
   $ cd h
   $ hg clone ../a .
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd ..
 
@@ -169,7 +168,7 @@ Testing --noupdate with --updaterev (must abort):
 Testing clone -u:
 
   $ hg clone -u . a ua
-  updating to branch default
+  updating to 7bc8ee83a26fd5fa6374a25e8f8248ea074e16a3
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has both heads:
@@ -204,7 +203,7 @@ Testing clone --pull -u:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to 7bc8ee83a26fd5fa6374a25e8f8248ea074e16a3
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has both heads:
@@ -235,7 +234,7 @@ Same revision checked out in repo a and ua:
 Testing clone -u <branch>:
 
   $ hg clone -u stable a ua
-  updating to branch default
+  updating to 4f44d5743f52b70e278b04871eab353996595b1d
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has both heads:
@@ -269,7 +268,7 @@ Branch 'stable' is checked out:
 Testing default checkout:
 
   $ hg clone a ua
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has both heads:
@@ -293,7 +292,7 @@ Repo ua has both heads:
 Testing #<bookmark> (no longer works):
 
   $ hg clone -u . a#stable ua
-  updating to branch default
+  updating to 7bc8ee83a26fd5fa6374a25e8f8248ea074e16a3
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has branch 'stable' and 'default' (was changed in fd511e9eeea6):
@@ -327,7 +326,7 @@ Testing -u -r <branch>:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to 7bc8ee83a26fd5fa6374a25e8f8248ea074e16a3
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has branch 'stable' and 'default' (was changed in fd511e9eeea6):
@@ -356,7 +355,7 @@ Testing -r <branch>:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to 4f44d5743f52b70e278b04871eab353996595b1d
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Repo ua has branch 'stable' and 'default' (was changed in fd511e9eeea6):

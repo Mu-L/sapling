@@ -2,7 +2,6 @@
 #require no-eden
 
   $ eagerepo
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
 
@@ -10,7 +9,6 @@
 
   $ clone master shallow --noupdate
   $ cd shallow
-  $ setconfig treemanifest.useruststore=True
 
   $ echo x > x
   $ hg commit -qAm x

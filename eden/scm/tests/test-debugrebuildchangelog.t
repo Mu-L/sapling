@@ -1,15 +1,10 @@
 
 #require no-eden
 
-
-This is needed to avoid treemanifestserver extension "leaking" into client repos.
-#inprocess-hg-incompatible
-
   $ configure modern
   $ enable shelve
 
-  $ newrepo server --config extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  $ setconfig treemanifest.server=true extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
+  $ newrepo server
   $ drawdag << 'EOS'
   > C
   > |
@@ -22,7 +17,7 @@ This is needed to avoid treemanifestserver extension "leaking" into client repos
 Clone:
 
   $ cd $TESTTMP
-  $ hg clone --no-shallow --stream ssh://user@dummy/server client
+  $ hg clone --no-shallow --stream ssh://user@dummy/server client --traceback --config devel.collapse-traceback=false
   streaming all changes
   * (glob)
   transferred * bytes in 0.0 seconds (*) (glob)
@@ -30,7 +25,7 @@ Clone:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to tip
   3 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Add drafts:

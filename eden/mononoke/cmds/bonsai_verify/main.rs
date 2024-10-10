@@ -19,40 +19,78 @@ use std::time::Instant;
 use anyhow::format_err;
 use anyhow::Error;
 use anyhow::Result;
-use blobrepo::BlobRepo;
+use blobrepo_override::DangerousOverride;
 use blobrepo_utils::BonsaiMFVerify;
 use blobrepo_utils::BonsaiMFVerifyResult;
+use blobstore::Blobstore;
 use blobstore::Loadable;
+use bonsai_hg_mapping::BonsaiHgMapping;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
 use clap::Parser;
 use clap::Subcommand;
 use cloned::cloned;
+use commit_graph::CommitGraph;
 use commit_graph::CommitGraphRef;
 use context::CoreContext;
 use failure_ext::DisplayChain;
 use fbinit::FacebookInit;
-use futures::compat::Future01CompatExt;
 use futures::future;
 use futures::future::TryFutureExt;
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use futures_old::future::Either;
-use futures_old::future::{self as old_future};
-use futures_old::Future;
-use futures_old::Stream;
 use lock_ext::LockExt;
 use mercurial_derivation::get_manifest_from_bonsai;
 use mercurial_derivation::DeriveHgChangeset;
 use mercurial_types::HgChangesetId;
 use mononoke_app::args::RepoArgs;
 use mononoke_app::MononokeAppBuilder;
+use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreArc;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedData;
 use slog::debug;
 use slog::error;
 use slog::info;
 use slog::warn;
 use slog::Logger;
+
+#[facet::container]
+#[derive(Clone)]
+struct Repo {
+    #[facet]
+    bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    commit_graph: CommitGraph,
+
+    #[facet]
+    repo_derived_data: RepoDerivedData,
+
+    #[facet]
+    repo_blobstore: RepoBlobstore,
+}
+
+impl DangerousOverride<Arc<dyn Blobstore>> for Repo {
+    fn dangerous_override<F>(&self, modify: F) -> Self
+    where
+        F: FnOnce(Arc<dyn Blobstore>) -> Arc<dyn Blobstore>,
+    {
+        let blobstore = RepoBlobstore::new_with_wrapped_inner_blobstore(
+            self.repo_blobstore.as_ref().clone(),
+            modify,
+        );
+        let repo_derived_data = Arc::new(
+            self.repo_derived_data
+                .with_replaced_blobstore(blobstore.clone()),
+        );
+        let repo_blobstore = Arc::new(blobstore);
+        Self {
+            repo_blobstore,
+            repo_derived_data,
+            ..self.clone()
+        }
+    }
+}
 
 #[derive(Parser)]
 struct CommandArgs {
@@ -108,7 +146,7 @@ fn main(fb: FacebookInit) -> Result<()> {
     let app = MononokeAppBuilder::new(fb).build::<CommandArgs>()?;
     let args: CommandArgs = app.args()?;
     let runtime = app.runtime();
-    let repo = runtime.block_on(app.open_repo(&args.repo))?;
+    let repo: Repo = runtime.block_on(app.open_repo(&args.repo))?;
     let logger = app.logger();
     let ctx = CoreContext::new_with_logger(fb, logger.clone());
 
@@ -126,7 +164,7 @@ fn subcommand_round_trip(
     ctx: CoreContext,
     logger: Logger,
     runtime: &tokio::runtime::Handle,
-    repo: BlobRepo,
+    repo: Repo,
     args: RoundTrip,
 ) -> Result<()> {
     let config = config::get_config(args.config).expect("getting configuration failed");
@@ -143,7 +181,7 @@ fn subcommand_round_trip(
     // matter much.
     let (end_sender, end_receiver) = ::std::sync::mpsc::channel();
 
-    let verify_fut = old_future::lazy(|| {
+    let verify_fut = async {
         let logger = logger.clone();
         let valid = valid.clone();
         let invalid = invalid.clone();
@@ -161,75 +199,78 @@ fn subcommand_round_trip(
         bonsai_verify
             .verify(start_points)
             .and_then({
-                cloned!(ctx, logger);
+                cloned!(ctx, logger, valid, invalid, ignored);
                 move |(result, meta)| {
-                    let logger =
-                        logger.new(slog::o!["changeset_id" => format!("{}", meta.changeset_id)]);
+                    cloned!(ctx, logger, valid, invalid, ignored, end_sender);
+                    async move {
+                        let logger = logger
+                            .new(slog::o!["changeset_id" => format!("{}", meta.changeset_id)]);
 
-                    if !result.is_ignored() {
-                        let followed = follow_limit - meta.follow_remaining;
-                        if followed % 10000 == 0 {
-                            info!(
-                                logger,
-                                "Followed {} changesets, {} remaining",
-                                followed,
-                                meta.follow_remaining,
-                            );
-                        }
-                        if meta.follow_remaining == 0 {
-                            end_sender
-                                .send(meta.changeset_id)
-                                .expect("end_receiver is still alive");
-                        }
-                    }
-
-                    match &result {
-                        BonsaiMFVerifyResult::Valid { .. } => {
-                            debug!(logger, "VALID");
-                            valid.fetch_add(1, Ordering::Relaxed);
-                            Either::A(old_future::ok(()))
-                        }
-                        BonsaiMFVerifyResult::ValidDifferentId(difference) => {
-                            debug!(
-                                logger,
-                                "VALID but with a different hash: \
-                                expected manifest ID: {}, roundtrip ID: {}",
-                                difference.expected_mf_id,
-                                difference.roundtrip_mf_id,
-                            );
-                            valid.fetch_add(1, Ordering::Relaxed);
-                            Either::A(old_future::ok(()))
-                        }
-                        BonsaiMFVerifyResult::Invalid(difference) => {
-                            warn!(logger, "INVALID");
-                            info!(
-                                logger, "manifest hash differs";
-                                "expected manifest ID" => difference.expected_mf_id,
-                                "roundtrip ID" => difference.roundtrip_mf_id,
-                            );
-                            invalid.fetch_add(1, Ordering::Relaxed);
-                            if print_changes {
-                                let logger = logger.clone();
-                                let diff_fut = difference
-                                    .changes(ctx.clone())
-                                    .map(move |changed_entry| {
-                                        info!(logger, "Change: {:?}", changed_entry,);
-                                    })
-                                    .collect()
-                                    .map(|_| ());
-                                Either::B(diff_fut)
-                            } else {
-                                Either::A(old_future::ok(()))
+                        if !result.is_ignored() {
+                            let followed = follow_limit - meta.follow_remaining;
+                            if followed % 10000 == 0 {
+                                info!(
+                                    logger,
+                                    "Followed {} changesets, {} remaining",
+                                    followed,
+                                    meta.follow_remaining,
+                                );
+                            }
+                            if meta.follow_remaining == 0 {
+                                end_sender
+                                    .send(meta.changeset_id)
+                                    .expect("end_receiver is still alive");
                             }
                         }
-                        BonsaiMFVerifyResult::Ignored(..) => {
-                            ignored.fetch_add(1, Ordering::Relaxed);
-                            Either::A(old_future::ok(()))
+
+                        match &result {
+                            BonsaiMFVerifyResult::Valid { .. } => {
+                                debug!(logger, "VALID");
+                                valid.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            }
+                            BonsaiMFVerifyResult::ValidDifferentId(difference) => {
+                                debug!(
+                                    logger,
+                                    "VALID but with a different hash: \
+                                expected manifest ID: {}, roundtrip ID: {}",
+                                    difference.expected_mf_id,
+                                    difference.roundtrip_mf_id,
+                                );
+                                valid.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            }
+                            BonsaiMFVerifyResult::Invalid(difference) => {
+                                warn!(logger, "INVALID");
+                                info!(
+                                    logger, "manifest hash differs";
+                                    "expected manifest ID" => difference.expected_mf_id,
+                                    "roundtrip ID" => difference.roundtrip_mf_id,
+                                );
+                                invalid.fetch_add(1, Ordering::Relaxed);
+                                if print_changes {
+                                    let logger = logger.clone();
+                                    difference
+                                        .changes(ctx.clone())
+                                        .inspect_ok(move |changed_entry| {
+                                            info!(logger, "Change: {:?}", changed_entry);
+                                        })
+                                        .try_collect::<Vec<_>>()
+                                        .await?;
+                                    Ok(())
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            BonsaiMFVerifyResult::Ignored(..) => {
+                                ignored.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            }
                         }
                     }
                 }
             })
-            .then(move |res| {
+            .map(move |res| {
                 // collect() below will stop after the first error, but we care about all errors.
                 // So report them now and keep returning Ok.
                 if let Err(err) = &res {
@@ -239,10 +280,11 @@ fn subcommand_round_trip(
                 Ok::<_, ()>(())
             })
             // collect to turn the stream into a future that will finish when the stream is done
-            .collect()
-    });
+            .collect::<Vec<_>>()
+            .await
+    };
 
-    let _ = runtime.block_on(verify_fut.compat());
+    let _ = runtime.block_on(verify_fut);
 
     let end_points: Vec<_> = end_receiver.into_iter().collect();
     process::exit(summarize(
@@ -301,7 +343,7 @@ fn summarize(
 fn subcommmand_hg_manifest_verify(
     ctx: &CoreContext,
     runtime: &tokio::runtime::Handle,
-    repo: &BlobRepo,
+    repo: &Repo,
     args: HgManifest,
 ) -> Result<()> {
     let total = &AtomicUsize::new(0);

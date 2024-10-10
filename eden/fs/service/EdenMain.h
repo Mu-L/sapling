@@ -17,7 +17,8 @@
 namespace facebook::eden {
 
 class EdenConfig;
-class IHiveLogger;
+class IFileAccessLogger;
+class IScribeLogger;
 struct SessionInfo;
 
 /**
@@ -53,7 +54,10 @@ class EdenMain {
   virtual void prepareConfig(EdenConfig&) {}
   virtual void cleanup() = 0;
   virtual ActivityRecorderFactory getActivityRecorderFactory() = 0;
-  virtual std::shared_ptr<IHiveLogger> getHiveLogger(
+  virtual std::shared_ptr<IFileAccessLogger> getFileAccessLogger(
+      SessionInfo sessionInfo,
+      std::shared_ptr<EdenConfig> edenConfig) = 0;
+  virtual std::shared_ptr<IScribeLogger> getScribeLogger(
       SessionInfo sessionInfo,
       std::shared_ptr<EdenConfig> edenConfig) = 0;
 
@@ -88,7 +92,10 @@ class DefaultEdenMain : public EdenMain {
   void prepare(const EdenServer& server) override;
   void cleanup() override {}
   ActivityRecorderFactory getActivityRecorderFactory() override;
-  std::shared_ptr<IHiveLogger> getHiveLogger(
+  std::shared_ptr<IFileAccessLogger> getFileAccessLogger(
+      SessionInfo sessionInfo,
+      std::shared_ptr<EdenConfig> edenConfig) override;
+  std::shared_ptr<IScribeLogger> getScribeLogger(
       SessionInfo sessionInfo,
       std::shared_ptr<EdenConfig> edenConfig) override;
 };

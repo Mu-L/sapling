@@ -12,10 +12,6 @@
   $ setup_common_config $REPOTYPE
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
 # Setup git repository
   $ mkdir -p "$GIT_REPO_ORIGIN"
@@ -72,7 +68,7 @@
   $ git commit -qam "Commit for new branch"
 # Delete an existing branch
   $ git branch -d branch_to_be_deleted
-  error: branch 'branch_to_be_deleted' not found
+  error: branch 'branch_to_be_deleted' not found* (glob)
   [1]
 
 # Push all the changes made so far

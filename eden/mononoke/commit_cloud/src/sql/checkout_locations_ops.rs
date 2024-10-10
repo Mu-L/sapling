@@ -10,25 +10,18 @@ use std::path::PathBuf;
 use ::sql_ext::mononoke_queries;
 use async_trait::async_trait;
 use clientinfo::ClientRequestInfo;
+use commit_cloud_types::WorkspaceCheckoutLocation;
 use mercurial_types::HgChangesetId;
 use mononoke_types::Timestamp;
 use sql::Connection;
 use sql::Transaction;
 
+use crate::ctx::CommitCloudContext;
+use crate::sql::common::UpdateWorkspaceNameArgs;
 use crate::sql::ops::Get;
 use crate::sql::ops::Insert;
 use crate::sql::ops::SqlCommitCloud;
 use crate::sql::ops::Update;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct WorkspaceCheckoutLocation {
-    pub hostname: String,
-    pub commit: HgChangesetId,
-    pub checkout_path: PathBuf,
-    pub shared_path: PathBuf,
-    pub timestamp: Timestamp,
-    pub unixname: String,
-}
 
 mononoke_queries! {
     pub(crate) read GetCheckoutLocations(reponame: String, workspace: String) -> (String, String, String, HgChangesetId, Timestamp, String) {
@@ -85,6 +78,11 @@ mononoke_queries! {
             {shared_path},
             {unixname},
             {timestamp})")
+    }
+
+    write UpdateWorkspaceName( reponame: String, workspace: String, new_workspace: String) {
+        none,
+        "UPDATE checkoutlocations SET workspace = {new_workspace} WHERE workspace = {workspace} and reponame = {reponame}"
     }
 
 }
@@ -146,14 +144,22 @@ impl Insert<WorkspaceCheckoutLocation> for SqlCommitCloud {
 
 #[async_trait]
 impl Update<WorkspaceCheckoutLocation> for SqlCommitCloud {
-    type UpdateArgs = ();
+    type UpdateArgs = UpdateWorkspaceNameArgs;
     async fn update(
         &self,
-        _reponame: String,
-        _workspace: String,
-        _args: Self::UpdateArgs,
-    ) -> anyhow::Result<()> {
-        // Checkout locations update op endpoint is never used
-        unimplemented!("delete is not implemented for checkout locations")
+        txn: Transaction,
+        cri: Option<&ClientRequestInfo>,
+        cc_ctx: CommitCloudContext,
+        args: Self::UpdateArgs,
+    ) -> anyhow::Result<(Transaction, u64)> {
+        let (txn, result) = UpdateWorkspaceName::maybe_traced_query_with_transaction(
+            txn,
+            cri,
+            &cc_ctx.reponame,
+            &cc_ctx.workspace,
+            &args.new_workspace,
+        )
+        .await?;
+        Ok((txn, result.affected_rows()))
     }
 }

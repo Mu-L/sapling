@@ -37,8 +37,9 @@ cpp_library(
         "//eden/fs/store:store",
         "//eden/fs/store/filter:hg_sparse_filter",
         "//eden/fs/store/hg:sapling_backing_store",
-        "//eden/fs/telemetry:hive_logger",
+        "//eden/fs/telemetry:file_access_logger",
         "//eden/fs/telemetry:log_info",
+        "//eden/fs/telemetry:scribe_logger",
         "//eden/fs/utils:win_stacktrace",
         "//fb303:function_stat_handler",
         "//fb303:logging",
@@ -72,6 +73,11 @@ cpp_binary(
             "/STACK:2097152",  # This was picked arbitrarily as 2 MB
         ],
     }),
+    metadata = {
+        "buck.cfg_modifiers": [
+            "fbcode//eden/scm/lib/backingstore:edenfs-include-cas",
+        ],
+    },
     os_deps = [
         (
             "linux",
@@ -79,14 +85,16 @@ cpp_binary(
                 "//eden/fs/store/facebook/http:http",
                 "//eden/fs/store/facebook/recas:recas",
                 "//eden/fs/telemetry/facebook:activity_recorder",
-                "//eden/fs/telemetry/facebook:hive_logger",
+                "//eden/fs/telemetry/facebook:file_access_logger",
+                "//eden/fs/telemetry/facebook:scribe_logger",
             ],
         ),
         (
             "macos",
             [
                 "//eden/fs/telemetry/facebook:activity_recorder",
-                "//eden/fs/telemetry/facebook:hive_logger",
+                "//eden/fs/telemetry/facebook:file_access_logger",
+                "//eden/fs/telemetry/facebook:scribe_logger",
             ],
         ),
     ],
@@ -96,13 +104,15 @@ cpp_binary(
         "//blake3:blake3-constants-cpp2-types",
         "//common/base:build_info",
         "//common/fbwhoami:fb_who_am_i",
+        "//common/init:folly_global_counters",
         "//common/init:light",
         "//common/network:hostname",
         "//common/services/cpp:build_values",
         "//eden/fs/config:config",
         "//eden/fs/inodes:inodes",
         "//eden/fs/telemetry:activity_recorder",
-        "//eden/fs/telemetry:hive_logger",
+        "//eden/fs/telemetry:file_access_logger",
+        "//eden/fs/telemetry:scribe_logger",
         "//eden/fs/telemetry/facebook:logview_util",
         "//fb303:function_stat_handler",
         "//fb303:logging",
@@ -211,50 +221,6 @@ cpp_library(
 )
 
 cpp_library(
-    name = "edenfs_smartplatform_service",
-    srcs = [
-        "facebook/EdenFSSmartPlatformServiceEndpoint.cpp",
-    ],
-    headers = [
-        "facebook/EdenFSSmartPlatformServiceEndpoint.h",
-    ],
-    os_deps = [
-        (
-            "linux",
-            [
-                "//servicerouter/client/cpp2:cpp2",
-                "//smart/edenfs/edenfs_service:service-if-cpp2-clients",
-            ],
-        ),
-        (
-            "macos",
-            [
-                "//c2p/secure_thrift/cpp/client:secure_thrift",
-                "//smart/edenfs/edenfs_service:service-if-cpp2-clients",
-            ],
-        ),
-        (
-            "windows",
-            [
-                "//eden/fs/prjfs:prjfs",
-                "//c2p/secure_thrift/cpp/client:secure_thrift",
-                "//smart/edenfs/edenfs_service:service-if-cpp2-clients",
-            ],
-        ),
-    ],
-    deps = [
-        "//eden/common/utils:utils",
-        "//eden/fs/config:config",
-        "//folly/logging:logging",
-    ],
-    exported_deps = [
-        ":usage_service",
-        "//eden/fs:config",
-        "//folly/futures:core",
-    ],
-)
-
-cpp_library(
     name = "startup_logger",
     srcs = [
         "StartupLogger.cpp",
@@ -351,41 +317,21 @@ cpp_library(
         "ThriftPermissionChecker.cpp",
     ],
     os_deps = [
-        # TODO: The edenfs_smartplatform_service dependency fans out to a ton
-        # of other dependencies, slowing down OSS builds and tests. We ideally
-        # should move it to facebook/main.cpp to avoid the cost in unit tests
-        # and OSS builds and tests.
-        (
-            "linux",
-            [
-                ":edenfs_smartplatform_service",
-            ],
-        ),
         (
             "macos",
             [
-                ":edenfs_smartplatform_service",
+                "//folly:subprocess",
             ],
         ),
         (
             "windows",
             [
-                ":edenfs_smartplatform_service",
                 "//eden/fs/notifications:windows_notifier",
             ],
         ),
     ],
     deps = [
-        "fbsource//third-party/cpptoml:cpptoml",
-        "fbsource//third-party/fmt:fmt",
-        ":startup_logger",
-        ":startup_status_subscriber",
-        ":thrift-streaming-cpp2-types",
-        ":thrift_get_object_impl",
-        ":thrift_glob_impl",
-        ":thrift_startup_status_subscriber",
-        ":thrift_util",
-        ":usage_service",
+        "//common/fb303/cpp:thread_pool_executor_counters",  # @manual
         "//eden/common/telemetry:log_info",
         "//eden/common/telemetry:structured_logger_factory",
         "//eden/common/utils:enum",
@@ -397,23 +343,30 @@ cpp_library(
         "//eden/fs/config:config",
         "//eden/fs/fuse:fuse",
         "//eden/fs/journal:journal",
-        "//eden/fs/model:model",
         "//eden/fs/model/git:gitignore",
+        "//eden/fs/model:model",
         "//eden/fs/nfs:nfs_server",
         "//eden/fs/nfs:nfsd3",
         "//eden/fs/notifications:command_notifier",
         "//eden/fs/notifications:null_notifier",
         "//eden/fs/privhelper:interface",
         "//eden/fs/prjfs:prjfs",
+        # TODO: The edenfs_smartplatform_service dependency fans out to a ton
+        # of other dependencies, slowing down OSS builds and tests. We ideally
+        # should move it to facebook/main.cpp to avoid the cost in unit tests
+        # and OSS builds and tests.
+        "//eden/fs/service/facebook:edenfs_smartplatform_service",  # @manual
+        "//eden/fs/service/facebook:server_observer",  # @manual
+        "//eden/fs/store/filter:glob_filter",
+        "//eden/fs/store/hg:sapling_backing_store",
         "//eden/fs/store:context",
         "//eden/fs/store:filtered_backing_store",
         "//eden/fs/store:rocksdb",
         "//eden/fs/store:sqlite",
         "//eden/fs/store:store",
-        "//eden/fs/store/filter:glob_filter",
-        "//eden/fs/store/hg:sapling_backing_store",
-        "//eden/fs/telemetry:hive_logger",
+        "//eden/fs/telemetry:file_access_logger",
         "//eden/fs/telemetry:log_info",
+        "//eden/fs/telemetry:scribe_logger",
         "//eden/fs/telemetry:structured_logger",
         "//eden/fs/telemetry:task_trace",
         "//eden/fs/utils:clock",
@@ -425,29 +378,40 @@ cpp_library(
         "//eden/fs/utils:proc_util",
         "//eden/fs/utils:source_location",
         "//fb303:service_data",
+        "//folly/chrono:conv",
+        "//folly/executors/thread_factory:named_thread_factory",
+        "//folly/executors:cpu_thread_pool_executor",
+        "//folly/executors:serial_executor",
+        "//folly/futures:core",
+        "//folly/io/async:async_signal_handler",
+        "//folly/json:dynamic",
+        "//folly/logging:logging",
+        "//folly/portability:gflags",
+        "//folly/portability:sys_types",
         "//folly:conv",
         "//folly:exception",
         "//folly:file_util",
         "//folly:random",
         "//folly:stop_watch",
         "//folly:string",
-        "//folly/chrono:conv",
-        "//folly/executors:cpu_thread_pool_executor",
-        "//folly/executors:serial_executor",
-        "//folly/executors/thread_factory:named_thread_factory",
-        "//folly/futures:core",
-        "//folly/io/async:async_signal_handler",
-        "//folly/logging:logging",
-        "//folly/portability:gflags",
-        "//folly/portability:sys_types",
         "//thrift/lib/cpp/concurrency:thread_manager",
         "//thrift/lib/cpp/util:enum_utils",
-        "//thrift/lib/cpp2:server",
         "//thrift/lib/cpp2/async:server_stream",
         "//thrift/lib/cpp2/server:cpp2_conn_context",
         "//thrift/lib/cpp2/server:parallel_concurrency_controller",
         "//thrift/lib/cpp2/server:round_robin_request_pile",
         "//thrift/lib/cpp2/server:separallel_concurrency_controller",
+        "//thrift/lib/cpp2:server",
+        ":startup_logger",
+        ":startup_status_subscriber",
+        ":thrift-streaming-cpp2-types",
+        ":thrift_get_object_impl",
+        ":thrift_glob_impl",
+        ":thrift_startup_status_subscriber",
+        ":thrift_util",
+        ":usage_service",
+        "fbsource//third-party/cpptoml:cpptoml",
+        "fbsource//third-party/fmt:fmt",
     ],
     exported_deps = [
         ":thrift-cpp2-types",

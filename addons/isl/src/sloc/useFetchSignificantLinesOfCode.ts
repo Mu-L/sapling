@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import type {CommitInfo} from '../types';
+import type {CommitInfo, RepoRelativePath, SlocInfo} from '../types';
 import type {Atom, Getter} from 'jotai';
 import type {Loadable} from 'jotai/vanilla/utils/loadable';
 
@@ -16,19 +16,20 @@ import {pageVisibility} from '../codeReview/CodeReviewInfo';
 import {atomFamilyWeak, lazyAtom} from '../jotaiUtils';
 import {isFullyOrPartiallySelected} from '../partialSelection';
 import {uncommittedChangesWithPreviews} from '../previews';
+import {commitByHash} from '../serverAPIState';
 import {GeneratedStatus} from '../types';
 import {MAX_FILES_ALLOWED_FOR_DIFF_STAT} from './diffStatConstants';
 import {atom, useAtomValue} from 'jotai';
 import {loadable} from 'jotai/utils';
 import {useRef} from 'react';
 
-const getGeneratedFiles = (files: string[]): string[] => {
+const getGeneratedFiles = (files: ReadonlyArray<RepoRelativePath>): Array<RepoRelativePath> => {
   const generatedStatuses = getGeneratedFilesFrom(files);
 
   return files.reduce<string[]>((filtered, path) => {
     // check if the file should be excluded
     // the __generated__ pattern is included in the exclusions, so we don't need to include it here
-    if (path.match(/__generated__/) && generatedStatuses[path] === GeneratedStatus.Manual) {
+    if (path.match(/__generated__/) || generatedStatuses[path] === GeneratedStatus.Generated) {
       filtered.push(path);
     }
 
@@ -36,44 +37,22 @@ const getGeneratedFiles = (files: string[]): string[] => {
   }, []);
 };
 
-const getNonSignificantFiles = (files: string[]): string[] => {
+const filterGeneratedFiles = (files: ReadonlyArray<RepoRelativePath>): Array<RepoRelativePath> => {
   const generatedStatuses = getGeneratedFilesFrom(files);
 
-  return files.reduce<string[]>((filtered, path) => {
-    // check if the file should be excluded
-    // the __generated__ pattern is included in the exclusions, so we don't need to include it here
-    const shouldExclude =
-      (!path.match(/__generated__/) && generatedStatuses[path] !== GeneratedStatus.Manual) ||
-      path.match(/__tests__/) ||
-      path.endsWith('.md');
-
-    if (shouldExclude && !filtered.includes(path)) {
-      filtered.push(path);
-    }
-
-    return filtered;
-  }, []);
-};
-
-const filterNonSignificantFiles = (files: string[]): string[] => {
-  const generatedStatuses = getGeneratedFilesFrom(files);
-
-  return files.filter(path => {
-    const shouldExclude =
-      (!path.match(/__generated__/) && generatedStatuses[path] !== GeneratedStatus.Manual) ||
-      path.match(/__tests__/) ||
-      path.endsWith('.md');
-
-    return !shouldExclude;
-  });
+  return files.filter(
+    path => !path.match(/__generated__/) && generatedStatuses[path] !== GeneratedStatus.Generated,
+  );
 };
 
 async function fetchSignificantLinesOfCode(
   commit: Readonly<CommitInfo>,
-  additionalFilesToExclude: Readonly<string[]> = [],
-  getExcludedFiles: (files: string[]) => string[] = getGeneratedFiles,
-) {
-  const filesToQueryGeneratedStatus = commit.filesSample.map(f => f.path);
+  additionalFilesToExclude: ReadonlyArray<RepoRelativePath> = [],
+  getExcludedFiles: (
+    files: ReadonlyArray<RepoRelativePath>,
+  ) => Array<RepoRelativePath> = getGeneratedFiles,
+): Promise<SlocInfo> {
+  const filesToQueryGeneratedStatus = commit.filePathsSample;
   const excludedFiles = getExcludedFiles(filesToQueryGeneratedStatus);
 
   serverAPI.postMessage({
@@ -82,65 +61,29 @@ async function fetchSignificantLinesOfCode(
     excludedFiles: [...excludedFiles, ...additionalFilesToExclude],
   });
 
-  const loc = await serverAPI
+  const slocData = await serverAPI
     .nextMessageMatching('fetchedSignificantLinesOfCode', message => message.hash === commit.hash)
-    .then(result => result.linesOfCode);
+    .then(result => ({
+      sloc: result.result.value?.linesOfCode,
+      strictSloc: result.result.value?.strictLinesOfCode,
+    }));
 
-  return loc.value;
+  return slocData;
 }
 
-async function fetchStrictSignificantLinesOfCode(
-  commit: Readonly<CommitInfo>,
-  additionalFilesToExclude: Readonly<string[]> = [],
-  getExcludedFiles: (files: string[]) => string[] = getGeneratedFiles,
-) {
-  const filesToQueryGeneratedStatus = commit.filesSample.map(f => f.path);
-  const excludedFiles = getExcludedFiles(filesToQueryGeneratedStatus);
-
-  serverAPI.postMessage({
-    type: 'fetchStrictSignificantLinesOfCode',
-    hash: commit.hash,
-    excludedFiles: [...excludedFiles, ...additionalFilesToExclude],
-  });
-
-  const loc = await serverAPI
-    .nextMessageMatching(
-      'fetchedStrictSignificantLinesOfCode',
-      message => message.hash === commit.hash,
-    )
-    .then(result => result.linesOfCode);
-
-  return loc.value;
-}
-
-const commitSloc = atomFamilyWeak((_hash: string) => {
+const commitSlocFamily = atomFamilyWeak((hash: string) => {
   return lazyAtom(async get => {
-    const commits = get(commitInfoViewCurrentCommits);
-    if (commits == null || commits.length > 1) {
+    const commit = get(commitByHash(hash));
+    if (commit == null) {
       return undefined;
     }
-    const [commit] = commits;
     if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
+      return undefined;
+    }
+    if (commit.optimisticRevset != null) {
       return undefined;
     }
     const sloc = await fetchSignificantLinesOfCode(commit);
-    return sloc;
-  }, undefined);
-});
-
-const strictCommitSloc = atomFamilyWeak((_hash: string) => {
-  return lazyAtom(async get => {
-    const commits = get(commitInfoViewCurrentCommits);
-    if (commits == null || commits.length > 1) {
-      return undefined;
-    }
-    const [commit] = commits;
-    if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
-      return undefined;
-    }
-
-    const sloc = await fetchStrictSignificantLinesOfCode(commit);
-
     return sloc;
   }, undefined);
 });
@@ -166,23 +109,23 @@ const fetchPendingAmendSloc = async (
   get: Getter,
   includedFiles: string[],
   requestId: number,
-  excludeNonSignificantFiles: boolean = false,
-) => {
+): Promise<SlocInfo | undefined> => {
   const commits = get(commitInfoViewCurrentCommits);
   if (commits == null || commits.length > 1) {
     return undefined;
   }
   const [commit] = commits;
-  if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
+  if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT || commit.optimisticRevset != null) {
     return undefined;
   }
 
-  if (includedFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
+  const filteredFiles = filterGeneratedFiles(includedFiles);
+  if (filteredFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
     return undefined;
   }
 
-  if (includedFiles.length === 0) {
-    return 0;
+  if (filteredFiles.length === 0) {
+    return {sloc: 0, strictSloc: 0};
   }
 
   //the calculation here is a bit tricky but in nutshell it is:
@@ -193,14 +136,12 @@ const fetchPendingAmendSloc = async (
   // this way we won't show the split suggestions when the net effect of the amend will actually reduce SLOC (reverting for example)
 
   //pass in the selected files to be excluded.
-  const unselectedCommittedSloc = excludeNonSignificantFiles
-    ? await fetchSignificantLinesOfCode(commit, includedFiles)
-    : await fetchStrictSignificantLinesOfCode(commit, includedFiles);
+  const unselectedCommittedSlocInfo = await fetchSignificantLinesOfCode(commit, includedFiles);
 
   serverAPI.postMessage({
     type: 'fetchPendingAmendSignificantLinesOfCode',
     hash: commit.hash,
-    includedFiles,
+    includedFiles: filteredFiles,
     requestId,
   });
 
@@ -209,66 +150,25 @@ const fetchPendingAmendSloc = async (
       'fetchedPendingAmendSignificantLinesOfCode',
       message => message.requestId === requestId && message.hash === commit.hash,
     )
-    .then(result => result.linesOfCode);
+    .then(result => ({
+      sloc: result.result.value?.linesOfCode,
+      strictSloc: result.result.value?.strictLinesOfCode,
+    }));
 
-  if (unselectedCommittedSloc === undefined) {
-    return pendingLoc.value;
+  if (unselectedCommittedSlocInfo === undefined) {
+    return pendingLoc;
   }
 
-  if (pendingLoc.value === undefined) {
-    return unselectedCommittedSloc;
+  if (pendingLoc === undefined) {
+    return unselectedCommittedSlocInfo;
   }
 
-  return unselectedCommittedSloc + pendingLoc.value;
-};
+  const slocInfo = {
+    sloc: (unselectedCommittedSlocInfo.sloc ?? 0) + (pendingLoc.sloc ?? 0),
+    strictSloc: (unselectedCommittedSlocInfo.strictSloc ?? 0) + (pendingLoc.strictSloc ?? 0),
+  };
 
-const fetchPendingAmendStrictSloc = async (
-  get: Getter,
-  includedFiles: string[],
-  requestId: number,
-) => {
-  const commits = get(commitInfoViewCurrentCommits);
-  if (commits == null || commits.length > 1) {
-    return undefined;
-  }
-  const [commit] = commits;
-  if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
-    return undefined;
-  }
-
-  if (includedFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
-    return undefined;
-  }
-
-  if (includedFiles.length === 0) {
-    return 0;
-  }
-
-  const unselectedCommittedSloc = await fetchStrictSignificantLinesOfCode(commit, includedFiles);
-
-  serverAPI.postMessage({
-    type: 'fetchPendingAmendStrictSignificantLinesOfCode',
-    hash: commit.hash,
-    includedFiles,
-    requestId,
-  });
-
-  const pendingLoc = await serverAPI
-    .nextMessageMatching(
-      'fetchedPendingAmendStrictSignificantLinesOfCode',
-      message => message.requestId === requestId && message.hash === commit.hash,
-    )
-    .then(result => result.linesOfCode);
-
-  if (unselectedCommittedSloc === undefined) {
-    return pendingLoc.value;
-  }
-
-  if (pendingLoc.value === undefined) {
-    return unselectedCommittedSloc;
-  }
-
-  return unselectedCommittedSloc + pendingLoc.value;
+  return slocInfo;
 };
 
 let pendingAmendRequestId = 0;
@@ -277,16 +177,14 @@ const pendingAmendSlocAtom = atom(async get => {
   return fetchPendingAmendSloc(get, selectedFiles, pendingAmendRequestId++);
 });
 
-let strictPendingAmendRequestId = 0;
-const strictPendingAmendSlocAtom = atom(async get => {
-  const selectedFiles = get(selectedFilesAtom);
-  return fetchPendingAmendStrictSloc(get, selectedFiles, strictPendingAmendRequestId++);
-});
-
 /**
  * FETCH PENDING SLOC
  */
-const fetchPendingSloc = async (get: Getter, includedFiles: string[], requestId: number) => {
+const fetchPendingSloc = async (
+  get: Getter,
+  includedFiles: string[],
+  requestId: number,
+): Promise<SlocInfo | undefined> => {
   // this atom makes use of the fact that jotai will only use the most recently created request (ignoring older requests)
   // to avoid race conditions when the response from an older request is sent after a newer one
   // so for example:
@@ -307,68 +205,33 @@ const fetchPendingSloc = async (get: Getter, includedFiles: string[], requestId:
     return undefined;
   }
 
-  if (includedFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
+  const filteredFiles = filterGeneratedFiles(includedFiles);
+  if (filteredFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
     return undefined;
   }
 
-  if (includedFiles.length === 0) {
-    return 0;
+  if (filteredFiles.length === 0) {
+    return {sloc: 0, strictSloc: 0};
   }
 
   serverAPI.postMessage({
     type: 'fetchPendingSignificantLinesOfCode',
     hash: commit.hash,
-    includedFiles,
+    includedFiles: filteredFiles,
     requestId,
   });
 
-  const pendingLoc = await serverAPI
+  const pendingLocData = await serverAPI
     .nextMessageMatching(
       'fetchedPendingSignificantLinesOfCode',
       message => message.requestId === requestId && message.hash === commit.hash,
     )
-    .then(result => result.linesOfCode);
+    .then(result => ({
+      sloc: result.result.value?.linesOfCode,
+      strictSloc: result.result.value?.strictLinesOfCode,
+    }));
 
-  return pendingLoc.value;
-};
-
-const fetchPendingStrictSloc = async (get: Getter, includedFiles: string[], requestId: number) => {
-  // we don't want to fetch the pending changes if the page is hidden
-  const pageIsHidden = get(pageVisibility) === 'hidden';
-  const commits = get(commitInfoViewCurrentCommits);
-
-  if (pageIsHidden || commits == null || commits.length > 1) {
-    return undefined;
-  }
-
-  const [commit] = commits;
-  if (commit.totalFileCount > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
-    return undefined;
-  }
-
-  if (includedFiles.length > MAX_FILES_ALLOWED_FOR_DIFF_STAT) {
-    return undefined;
-  }
-
-  if (includedFiles.length === 0) {
-    return 0;
-  }
-
-  serverAPI.postMessage({
-    type: 'fetchPendingStrictSignificantLinesOfCode',
-    hash: commit.hash,
-    includedFiles,
-    requestId,
-  });
-
-  const pendingLoc = await serverAPI
-    .nextMessageMatching(
-      'fetchedPendingStrictSignificantLinesOfCode',
-      message => message.requestId === requestId && message.hash === commit.hash,
-    )
-    .then(result => result.linesOfCode);
-
-  return pendingLoc.value;
+  return pendingLocData;
 };
 
 let pendingRequestId = 0;
@@ -378,56 +241,47 @@ const pendingChangesSlocAtom = atom(async get => {
   return fetchPendingSloc(get, selectedFiles, pendingRequestId++);
 });
 
-let strictPendingRequestId = 0;
+const pendingAmendSlocLoadableAtom = loadable(pendingAmendSlocAtom);
+const pendingChangesSlocLoadableAtom = loadable(pendingChangesSlocAtom);
 
-const strictPendingChangeSlocAtom = atom(async get => {
-  const selectedFiles = get(selectedFilesAtom);
-  return fetchPendingStrictSloc(get, selectedFiles, strictPendingRequestId++);
-});
-
-const pendingAmendChangesSloc = loadable(pendingAmendSlocAtom);
-const strictPendingAmendChangesSloc = loadable(strictPendingAmendSlocAtom);
-const pendingChangesSloc = loadable(pendingChangesSlocAtom);
-const strictPendingChangesSloc = loadable(strictPendingChangeSlocAtom);
-
-function useFetchWithPrevious(
-  atom: Atom<Loadable<Promise<number | undefined>>>,
-): number | undefined {
-  const previous = useRef<number | undefined>(undefined);
+function useFetchWithPrevious(atom: Atom<Loadable<Promise<SlocInfo | undefined>>>): {
+  slocInfo: SlocInfo | undefined;
+  isLoading: boolean;
+} {
+  const previous = useRef<SlocInfo | undefined>(undefined);
   const results = useAtomValue(atom);
   if (results.state === 'hasError') {
     throw results.error;
   }
   if (results.state === 'loading') {
     //using the previous value in the loading state to avoid flickering / jankiness in the UI
-    return previous.current;
+    return {slocInfo: previous.current, isLoading: true};
   }
 
   previous.current = results.data;
 
-  return results.data;
+  return {slocInfo: results.data, isLoading: false};
 }
 
 export function useFetchSignificantLinesOfCode(commit: CommitInfo) {
-  return useAtomValue(commitSloc(commit.hash));
-}
+  const loadableAtom = loadable(commitSlocFamily(commit.hash));
+  const result = useAtomValue(loadableAtom);
 
-export function useFetchStrictSignificantLinesOfCode(commit: CommitInfo) {
-  return useAtomValue(strictCommitSloc(commit.hash));
+  if (result.state === 'hasError') {
+    throw result.error;
+  }
+
+  if (result.state === 'loading') {
+    return {slocInfo: undefined, isLoading: true};
+  }
+
+  return {slocInfo: result.data, isLoading: false};
 }
 
 export function useFetchPendingSignificantLinesOfCode() {
-  return useFetchWithPrevious(pendingChangesSloc);
-}
-
-export function useFetchStrictPendingSignificantLinesOfCode() {
-  return useFetchWithPrevious(strictPendingChangesSloc);
+  return useFetchWithPrevious(pendingChangesSlocLoadableAtom);
 }
 
 export function useFetchPendingAmendSignificantLinesOfCode() {
-  return useFetchWithPrevious(pendingAmendChangesSloc);
-}
-
-export function useFetchStrictPendingAmendSignificantLinesOfCode() {
-  return useFetchWithPrevious(strictPendingAmendChangesSloc);
+  return useFetchWithPrevious(pendingAmendSlocLoadableAtom);
 }

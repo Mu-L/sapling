@@ -59,9 +59,13 @@ export const browserPlatformImpl = {
       return null;
     }
   },
-  setPersistedState<T>(key: string, value: T): void {
+  setPersistedState<T>(key: string, value: T | undefined): void {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      if (value === undefined) {
+        localStorage.removeItem(key);
+      } else {
+        localStorage.setItem(key, JSON.stringify(value));
+      }
     } catch {}
   },
   clearPersistedState(): void {
@@ -71,7 +75,17 @@ export const browserPlatformImpl = {
   },
   getAllPersistedState(): Json | undefined {
     try {
-      return {...localStorage};
+      return Object.fromEntries(
+        Object.entries({...localStorage})
+          .map(([key, value]: [string, unknown]) => {
+            try {
+              return [key, JSON.parse(value as string)];
+            } catch {
+              return null;
+            }
+          })
+          .filter((e): e is [string, Json] => e != null),
+      );
     } catch {
       return undefined;
     }

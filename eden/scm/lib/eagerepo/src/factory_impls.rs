@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use storemodel::SerializationFormat;
 use storemodel::StoreInfo;
 use storemodel::StoreOutput;
 
@@ -27,11 +28,15 @@ pub(crate) fn init() {
             //
             // The pure Rust logic does not understand revlog but fine with eagerepo.
             // Note: The Python logic might still want to use the non-eager storage
-            // like filescmstore/pyremotestore etc.
+            // like filescmstore etc.
             let store_path = info.store_path();
+            let format = match info.has_requirement("git") {
+                true => SerializationFormat::Git,
+                false => SerializationFormat::Hg,
+            };
             // The hgcommits/v1 path shares objects with commits.
             // Maybe it should be renamed to hg-objects.
-            let store = EagerRepoStore::open(&store_path.join("hgcommits").join("v1"))?;
+            let store = EagerRepoStore::open(&store_path.join("hgcommits").join("v1"), format)?;
             let store = Arc::new(store);
             Ok(Some(Box::new(store) as Box<dyn StoreOutput>))
         } else {

@@ -23,9 +23,8 @@ setup configuration
   $ enable amend
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > A X
   > EOF
@@ -35,14 +34,13 @@ setup repo
 
 blobimport
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 clone
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ enable remotenames
 
 make more commits
@@ -59,15 +57,15 @@ make more commits
 
 fast-forward the bookmark
   $ hg up -q $B
-  $ hgmn push -r . --to main
-  pushing rev 112478962961 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main
+  pushing rev 112478962961 to destination mono:repo bookmark main
   searching for changes
   updating bookmark main
 
 fast-forward the bookmark over a commit that fails the hook
   $ hg up -q $D
-  $ hgmn push -r . --to main
-  pushing rev 7ff4b7c298ec to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main
+  pushing rev 7ff4b7c298ec to destination mono:repo bookmark main
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -84,15 +82,15 @@ fast-forward the bookmark over a commit that fails the hook
   [255]
 
 bypass the hook, the push will now work
-  $ hgmn push -r . --to main --pushvar ALLOW_LARGE_FILES=true
-  pushing rev 7ff4b7c298ec to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --pushvar ALLOW_LARGE_FILES=true
+  pushing rev 7ff4b7c298ec to destination mono:repo bookmark main
   searching for changes
   updating bookmark main
 
 attempt a non-fast-forward move, it should fail
   $ hg up -q $F
-  $ hgmn push -r . --to main --non-forward-move
-  pushing rev af09fbbc2f05 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --non-forward-move
+  pushing rev af09fbbc2f05 to destination mono:repo bookmark main
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -131,8 +129,8 @@ attempt a non-fast-forward move, it should fail
   [255]
 
 allow the non-forward move
-  $ hgmn push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true
-  pushing rev af09fbbc2f05 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true
+  pushing rev af09fbbc2f05 to destination mono:repo bookmark main
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -149,16 +147,16 @@ allow the non-forward move
   [255]
 
 bypass the hook too, and it should work
-  $ hgmn push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true --pushvar ALLOW_LARGE_FILES=true
-  pushing rev af09fbbc2f05 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true --pushvar ALLOW_LARGE_FILES=true
+  pushing rev af09fbbc2f05 to destination mono:repo bookmark main
   searching for changes
   updating bookmark main
 
 attempt a move to a completely unrelated commit (no common ancestor), with an ancestor that
 fails the hook
   $ hg up -q $Z
-  $ hgmn push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true
-  pushing rev e3295448b1ef to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true
+  pushing rev e3295448b1ef to destination mono:repo bookmark main
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -175,7 +173,7 @@ fails the hook
   [255]
 
 bypass the hook, and it should work
-  $ hgmn push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true --pushvar ALLOW_LARGE_FILES=true
-  pushing rev e3295448b1ef to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark main
+  $ hg push -r . --to main --non-forward-move --pushvar NON_FAST_FORWARD=true --pushvar ALLOW_LARGE_FILES=true
+  pushing rev e3295448b1ef to destination mono:repo bookmark main
   searching for changes
   updating bookmark main

@@ -12,9 +12,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ drawdag << EOS
@@ -51,7 +50,7 @@ Populate test repo
 
 Blobimport test repo.
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ setup_mononoke_config
@@ -75,7 +74,7 @@ Create and send request.
   > ]
   > EOF
 
-  $ sl debugapi -e commithashtolocation -f master_heads -f hgids
+  $ hg debugapi mono:repo -e commithashtolocation -f master_heads -f hgids
   [{"hgid": bin("a194cadd16930608adaa649035ad4c16930cbd0f"),
     "result": {"Ok": {"distance": 0,
                       "descendant": bin("a194cadd16930608adaa649035ad4c16930cbd0f")}}},

@@ -48,7 +48,7 @@ Fine extension: remotefilelog
 Fine extension: treemanifest
 
   $ newclientrepo >/dev/null
-  $ setconfig extensions.treemanifest= remotefilelog.reponame=x
+  $ setconfig remotefilelog.reponame=x
   $ hg log -r . -T '{node}\n'
   0000000000000000000000000000000000000000
   __del__ called
@@ -59,7 +59,7 @@ Fine extension: treemanifest
 Fine extension: treemanifest only
 
   $ newclientrepo >/dev/null
-  $ setconfig extensions.treemanifest= treemanifest.treeonly=1 remotefilelog.reponame=x
+  $ setconfig remotefilelog.reponame=x
   $ hg log -r . -T '{manifest % "{node}"}\n'
   0000000000000000000000000000000000000000
   __del__ called
@@ -139,20 +139,16 @@ Somehow problematic: With many extensions
   > rage=
   > rebase =
   > rebase=
-  > remotefilelog =
-  > remotefilelog=
   > remotenames=
   > reset=
   > sampling=
   > shelve=
   > sigtrace=
-  > simplecache=
   > smartlog=
   > sparse=
   > stat=
   > traceprof=
   > treedirstate=
-  > treemanifest=
   > tweakdefaults=
   > undo=
   > 
@@ -162,9 +158,6 @@ Somehow problematic: With many extensions
   > [remotefilelog]
   > reponame = x
   > cachepath = $TESTTMP/cache
-  > 
-  > [treemanifest]
-  > treeonly=True
   > 
   > [fbscmquery]
   > host=example.com

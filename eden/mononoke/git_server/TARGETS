@@ -1,11 +1,11 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "git_server",
     srcs = glob(["src/**/*.rs"]),
+    test_deps = ["//eden/mononoke/mononoke_macros:mononoke_macros"],
     deps = [
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-recursion",
@@ -35,6 +35,7 @@ rust_binary(
         "//common/rust/shed/cloned:cloned",
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/futures_stats:futures_stats",
+        "//common/rust/shed/justknobs_stub:justknobs",
         "//common/rust/shed/secure_utils:secure_utils",
         "//common/rust/shed/stats:stats",
         "//eden/mononoke/blobrepo:repo_blobstore",
@@ -54,7 +55,7 @@ rust_binary(
         "//eden/mononoke/git/packetline:packetline",
         "//eden/mononoke/git/packfile:packfile",
         "//eden/mononoke/git/protocol:protocol",
-        "//eden/mononoke/git_push_redirect:git_push_redirect",
+        "//eden/mononoke/git_source_of_truth:git_source_of_truth",
         "//eden/mononoke/gotham_ext:gotham_ext",
         "//eden/mononoke/metaconfig:metaconfig_parser",
         "//eden/mononoke/metaconfig:metaconfig_types",

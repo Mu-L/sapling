@@ -32,12 +32,12 @@ use unbundle::PushRedirector;
 
 use crate::errors::MononokeError;
 use crate::repo::RepoContext;
-use crate::Repo;
+use crate::MononokeRepo;
 
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     async fn convert_old_bookmark_value(
         &self,
-        redirector: &PushRedirector<Repo>,
+        redirector: &PushRedirector<R>,
         bookmark_value: Large<Option<ChangesetId>>,
     ) -> anyhow::Result<Small<Option<ChangesetId>>> {
         let large_cs_id = match bookmark_value {
@@ -70,7 +70,7 @@ impl RepoContext {
     }
     async fn convert_outcome(
         &self,
-        redirector: &PushRedirector<Repo>,
+        redirector: &PushRedirector<R>,
         outcome: Large<PushrebaseOutcome>,
         _bookmark: BookmarkKey,
     ) -> Result<Small<PushrebaseOutcome>, MononokeError> {
@@ -136,7 +136,7 @@ impl RepoContext {
         // changesets.   These are the commits that are ancestors of the head
         // commit and descendants of the base commit.
         let ctx = self.ctx();
-        let blobstore = self.blob_repo().repo_blobstore();
+        let blobstore = self.repo().repo_blobstore();
         let changesets: HashSet<_> = self
             .repo()
             .commit_graph()
@@ -158,7 +158,7 @@ impl RepoContext {
 
         let outcome = if let Some(redirector) = self.push_redirector.as_ref() {
             // run hooks on small repo
-            bookmarks_movement::run_hooks(
+            bookmarks_movement::run_changeset_hooks(
                 ctx,
                 self.hook_manager().as_ref(),
                 &bookmark,
@@ -176,7 +176,7 @@ impl RepoContext {
             // Land the mapped changesets on the large repo
             let outcome = normal_pushrebase(
                 self.ctx(),
-                &redirector.repo.inner,
+                &redirector.repo,
                 small_to_large.into_values().collect(),
                 &large_bookmark,
                 pushvars,
@@ -195,7 +195,7 @@ impl RepoContext {
         } else {
             normal_pushrebase(
                 self.ctx(),
-                self.inner_repo(),
+                self.repo(),
                 changesets,
                 &bookmark,
                 pushvars,

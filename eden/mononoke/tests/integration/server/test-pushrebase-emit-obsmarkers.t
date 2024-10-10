@@ -9,7 +9,7 @@
 setup configuration
   $ export EMIT_OBSMARKERS=1
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 setup_common_config
+  $ setup_common_config
   $ cd $TESTTMP
 
 setup common configuration
@@ -19,9 +19,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > C
   > |
@@ -35,18 +34,16 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Clone the repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
 Push commits that will be obsoleted
@@ -64,7 +61,7 @@ Push commits that will be obsoleted
   ├─╯
   o  A [public;rev=0;426bada5c675]
   $
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev 0c67ec8c24b9 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 2 commits for upload
   edenapi: queue 2 files for upload
@@ -103,7 +100,7 @@ Push commits that will not be obsoleted
   │
   o  A [public;rev=0;426bada5c675]
   $
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev 6398085ceb9d to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload

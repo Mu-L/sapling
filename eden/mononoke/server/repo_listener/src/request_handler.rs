@@ -30,8 +30,10 @@ use hgproto::HgProtoHandler;
 use maplit::hashmap;
 use maplit::hashset;
 use mononoke_api::Mononoke;
+use mononoke_api::Repo;
 use mononoke_configs::MononokeConfigs;
 use qps::Qps;
+use rate_limiting::LoadShedResult;
 use rate_limiting::Metric;
 use rate_limiting::RateLimitEnvironment;
 use repo_client::RepoClient;
@@ -65,7 +67,7 @@ define_stats! {
 pub async fn request_handler(
     fb: FacebookInit,
     reponame: String,
-    mononoke: Arc<Mononoke>,
+    mononoke: Arc<Mononoke<Repo>>,
     configs: Arc<MononokeConfigs>,
     _security_checker: &ConnectionSecurityChecker,
     stdio: Stdio,
@@ -119,12 +121,16 @@ pub async fn request_handler(
 
     let rate_limiter = rate_limiter.map(|r| r.get_rate_limiter());
     if let Some(ref rate_limiter) = rate_limiter {
-        if let Err(err) = {
+        if let LoadShedResult::Fail(err) = {
             let main_client_id = metadata
                 .client_info()
                 .and_then(|client_info| client_info.request_info.clone())
                 .and_then(|request_info| request_info.main_id);
-            rate_limiter.check_load_shed(metadata.identities(), main_client_id.as_deref())
+            rate_limiter.check_load_shed(
+                metadata.identities(),
+                main_client_id.as_deref(),
+                &mut scuba,
+            )
         } {
             scuba.log_with_msg("Request rejected due to load shedding", format!("{}", err));
             error!(conn_log, "Request rejected due to load shedding: {}", err; "remote" => "true");

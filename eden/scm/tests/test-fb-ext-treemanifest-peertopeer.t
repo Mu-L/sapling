@@ -1,6 +1,5 @@
 #chg-compatible
 #debugruntest-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ CACHEDIR=`pwd`/hgcache
 
@@ -10,10 +9,6 @@ Create server
   $ hginit master
   $ cd master
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [treemanifest]
-  > server=True
   > [remotefilelog]
   > server=True
   > EOF
@@ -51,15 +46,18 @@ Create client1 - it will have both server commits
   > cachepath=$CACHEDIR
   > EOF
 
+  $ hg debugdumpindexedlog .hg/store/manifests/indexedlogdatastore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
+  6
+
   $ echo a > a
   $ mkdir dir
   $ echo b > dir/b
   $ hg commit -Aqm 'initial commit'
 
   $ hg debugdumpindexedlog .hg/store/manifests/indexedlogdatastore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  8
   $ hg debugdumpindexedlog .hg/store/manifests/indexedloghistorystore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  8
   $ clearcache
 
 Pushing p2p with sendtrees=True puts the received packs in the local pack store
@@ -100,9 +98,9 @@ Pushing p2p with sendtrees=True puts the received packs in the local pack store
   
   $ mv ../client2/.hg/hgrc.bak ../client2/.hg/hgrc
   $ hg debugdumpindexedlog ../client2/.hg/store/manifests/indexedlogdatastore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  8
   $ hg debugdumpindexedlog ../client2/.hg/store/manifests/indexedloghistorystore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  8
 Pulling between peers should send local trees but not remote trees
 # Strip back one server commit and one draft commit, so we can pull them again
   $ cd ../client2
@@ -126,12 +124,13 @@ Pulling between peers should send local trees but not remote trees
 # Force the draft commit to be public so we can ensure it's trees are delivered
 # despite it being public.
   $ rm -rf $TESTTMP/hgcache2/*
+
   $ hg pull -q --config treemanifest.sendtrees=True ../client1 --config remotefilelog.fallbackpath=ssh://user@dummy/master
 # Check that the local commits for the draft commit were downloaded to the local store.
   $ hg debugdumpindexedlog .hg/store/manifests/indexedlogdatastore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  4
   $ hg debugdumpindexedlog .hg/store/manifests/indexedloghistorystore 2>/dev/stdout | grep Entry | wc -l | sed -e 's/ //g'
-  2
+  4
 
 # Verify the real-public commit wasn't received during the pull and therefore
 # has to be downloaded on demand.

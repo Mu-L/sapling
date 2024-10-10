@@ -7,7 +7,7 @@
 
 from __future__ import absolute_import
 
-from . import pycompat, rcutil, util
+from . import rcutil, util
 from .i18n import _
 
 
@@ -16,6 +16,9 @@ hinttable = {
         "'@prog@ branch' command does not do what you want, and is being removed. "
         "It always prints 'default' for now. "
         "Check fburl.com/why-no-named-branches for details."
+    ),
+    "prev-steps-threshold": lambda n: _(
+        f"The prev command is likely to be slow for {n} steps. Consider using (@prog@ up .~{n}) instead."
     ),
     "revnum-deprecate": lambda rev: _(
         "Local revision numbers (ex. %s) are being deprecated and will stop working in the future. "
@@ -54,7 +57,7 @@ triggered = set()
 
 
 def loadhint(ui, extname, registrarobj) -> None:
-    for name, func in pycompat.iteritems(registrarobj._table):
+    for name, func in registrarobj._table.items():
         hinttable[name] = func
 
 

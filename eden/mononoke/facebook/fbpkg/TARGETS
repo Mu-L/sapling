@@ -2,7 +2,7 @@ load("//eden/mononoke/facebook/fbpkg:lib.bzl", "mononoke_fbpkg")
 load("//tupperware/cm/antlir2/bzl:buck2_container.bzl", "tw")
 load("//tupperware/config/common:tw.mixin.zkdaemon.bzl", zkdaemon_mixin = "mixin")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 mononoke_fbpkg(
     name = "mononoke.server",
@@ -14,7 +14,12 @@ mononoke_fbpkg(
 mononoke_fbpkg(
     name = "mononoke.scs_server",
     path_actions = {
-        "scs_server": "fbcode//eden/mononoke/scs_server:scs_server",
+        # deps temporarily needed to satisfy metagit repo creation reqs
+        "hipstercli": "fbcode//infrasec/authorization/tools/py/hipstercli:hipstercli",
+        "oncalls": "fbcode//oncall/py:oncalls",
+        "scmadmin": "fbcode//scm/scmadmin:client",
+        # actual scs server binary
+        "scs_server": "fbcode//eden/mononoke/scs/scs_server:scs_server",
     },
 )
 
@@ -60,7 +65,7 @@ mononoke_fbpkg(
 mononoke_fbpkg(
     name = "mononoke.megarepo_async_requests_worker",
     path_actions = {
-        "async_requests_worker": "//eden/mononoke/megarepo_api:async_requests_worker",
+        "async_requests_worker": "//eden/mononoke/async_requests:worker",
     },
 )
 
@@ -178,11 +183,15 @@ mononoke_fbpkg(
 )
 
 mononoke_fbpkg(
-    name = "mononoke.locked_repo_reporter",
+    name = "mononoke.whatsapp_commit_tailer",
     compress_type = None,
-    override_log_paths = ["eden/mononoke/facebook/locked_repo_reporter"],
+    override_log_paths = [
+        "eden/mononoke/facebook/post_commit_tailer",
+        "eden/mononoke/facebook/whatsapp_commit_tailer",
+    ],
     path_actions = {
-        "locked_repo_reporter.par": "//eden/mononoke/facebook/locked_repo_reporter:locked_repo_reporter",
+        "swift": "//scribeutil/swift:swift",
+        "whatsapp_commit_tailer.par": "//eden/mononoke/facebook/whatsapp_commit_tailer:whatsapp_commit_tailer",
     },
 )
 
@@ -257,7 +266,7 @@ tw.container(
             mononoke_fbpkg(
                 name = "mononoke.git_server_push_poller",
                 path_actions = {
-                    "git_server_push_poller": "//eden/mononoke/git_server/push_poller:git_server_push_poller",
+                    "git_server_push_poller": "//eden/mononoke/facebook/git_server/push_poller:git_server_push_poller",
                 },
             ),
         ),

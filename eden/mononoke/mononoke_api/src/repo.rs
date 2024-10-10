@@ -14,16 +14,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use acl_regions::build_disabled_acl_regions;
 use acl_regions::AclRegions;
 use anyhow::anyhow;
 use anyhow::Error;
-use blobrepo::AsBlobRepo;
-use blobrepo::BlobRepo;
+use anyhow::Result;
 use blobrepo_hg::BlobRepoHg;
 use blobstore::Loadable;
-use blobstore_factory::MetadataSqlFactory;
-use blobstore_factory::ReadOnlyStorage;
 use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_git_mapping::BonsaiGitMappingRef;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
@@ -33,7 +29,6 @@ use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bonsai_svnrev_mapping::BonsaiSvnrevMapping;
 use bonsai_svnrev_mapping::BonsaiSvnrevMappingRef;
 use bonsai_tag_mapping::BonsaiTagMapping;
-use bonsai_tag_mapping::BonsaiTagMappingArc;
 use bookmarks::BookmarkCategory;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkKind;
@@ -41,18 +36,15 @@ use bookmarks::BookmarkName;
 use bookmarks::BookmarkPagination;
 use bookmarks::BookmarkPrefix;
 use bookmarks::BookmarkUpdateLog;
-use bookmarks::BookmarkUpdateLogArc;
 use bookmarks::BookmarkUpdateLogRef;
 use bookmarks::Bookmarks;
-use bookmarks::BookmarksArc;
 use bookmarks::BookmarksRef;
 pub use bookmarks::Freshness as BookmarkFreshness;
 use bookmarks::Freshness;
 use bookmarks_cache::BookmarksCache;
+use bookmarks_cache::BookmarksCacheRef;
 use bulk_derivation::BulkDerivation;
 use bytes::Bytes;
-use cacheblob::InProcessLease;
-use cacheblob::LeaseOps;
 use changeset_info::ChangesetInfo;
 use commit_cloud::CommitCloud;
 use commit_graph::ArcCommitGraph;
@@ -61,7 +53,8 @@ use commit_graph::CommitGraphArc;
 use commit_graph::CommitGraphRef;
 use commit_graph::CommitGraphWriter;
 use context::CoreContext;
-use cross_repo_sync::get_all_submodule_deps;
+use cross_repo_sync::get_all_repo_submodule_deps;
+use cross_repo_sync::get_all_submodule_deps_from_repo_pair;
 use cross_repo_sync::get_small_and_large_repos;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
@@ -79,7 +72,6 @@ use ephemeral_blobstore::RepoEphemeralStore;
 use ephemeral_blobstore::RepoEphemeralStoreArc;
 use ephemeral_blobstore::RepoEphemeralStoreRef;
 use ephemeral_blobstore::StorageLocation;
-use fbinit::FacebookInit;
 use filenodes::Filenodes;
 use filestore::Alias;
 use filestore::FetchKey;
@@ -92,8 +84,7 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use futures::try_join;
 use futures::Future;
-use git_push_redirect::GitPushRedirectConfig;
-use git_push_redirect::TestGitPushRedirectConfig;
+use git_source_of_truth::GitSourceOfTruthConfig;
 use git_symbolic_refs::GitSymbolicRefs;
 use git_types::MappedGitCommitId;
 use hook_manager::manager::HookManager;
@@ -103,19 +94,14 @@ use live_commit_sync_config::LiveCommitSyncConfig;
 use mercurial_derivation::MappedHgChangesetId;
 use mercurial_mutation::HgMutationStore;
 use mercurial_types::Globalrev;
-use metaconfig_types::HookManagerParams;
-use metaconfig_types::InfinitepushNamespace;
-use metaconfig_types::InfinitepushParams;
 use metaconfig_types::RepoConfig;
-use metaconfig_types::SourceControlServiceParams;
-use mononoke_api_types::InnerRepo;
+use metaconfig_types::RepoConfigRef;
 use mononoke_repos::MononokeRepos;
 use mononoke_types::hash::Blake3;
 use mononoke_types::hash::GitSha1;
 use mononoke_types::hash::Sha1;
 use mononoke_types::hash::Sha256;
 use mononoke_types::ContentId;
-use mononoke_types::Generation;
 use mononoke_types::RepositoryId;
 use mononoke_types::Svnrev;
 use mononoke_types::Timestamp;
@@ -123,12 +109,9 @@ use mutable_counters::MutableCounters;
 use mutable_renames::ArcMutableRenames;
 use mutable_renames::MutableRenames;
 use mutable_renames::MutableRenamesArc;
-use mutable_renames::SqlMutableRenamesStore;
 use phases::Phases;
-use phases::PhasesArc;
 use phases::PhasesRef;
 use pushrebase_mutation_mapping::PushrebaseMutationMapping;
-use regex::Regex;
 use repo_authorization::AuthorizationContext;
 use repo_blobstore::ArcRepoBlobstore;
 use repo_blobstore::RepoBlobstore;
@@ -136,11 +119,10 @@ use repo_blobstore::RepoBlobstoreArc;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_bookmark_attrs::RepoBookmarkAttrs;
 use repo_cross_repo::RepoCrossRepo;
+use repo_cross_repo::RepoCrossRepoRef;
 use repo_derived_data::RepoDerivedData;
-use repo_derived_data::RepoDerivedDataArc;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentity;
-use repo_identity::RepoIdentityArc;
 use repo_identity::RepoIdentityRef;
 use repo_lock::RepoLock;
 use repo_permission_checker::RepoPermissionChecker;
@@ -150,18 +132,12 @@ use repo_sparse_profiles::RepoSparseProfilesArc;
 use repo_stats_logger::RepoStatsLogger;
 use slog::debug;
 use slog::error;
-use sql_construct::SqlConstruct;
-use sql_ext::facebook::MysqlOptions;
 use sql_query_config::SqlQueryConfig;
 use stats::prelude::*;
 use streaming_clone::StreamingClone;
-use streaming_clone::StreamingCloneBuilder;
 use synced_commit_mapping::ArcSyncedCommitMapping;
-use synced_commit_mapping::SqlSyncedCommitMapping;
-use test_repo_factory::TestRepoFactory;
 use unbundle::PushRedirector;
 use unbundle::PushRedirectorArgs;
-use warm_bookmarks_cache::WarmBookmarksCacheBuilder;
 use wireproto_handler::PushRedirectorBase;
 use wireproto_handler::RepoHandlerBase;
 use wireproto_handler::RepoHandlerBaseRef;
@@ -185,6 +161,7 @@ pub mod delete_bookmark;
 pub mod git;
 pub mod land_stack;
 pub mod move_bookmark;
+pub mod update_submodule_expansion;
 
 pub use git::upload_non_blob_git_object;
 
@@ -207,43 +184,98 @@ define_stats! {
 #[facet::container]
 #[derive(Clone)]
 pub struct Repo {
-    #[delegate(
-        RepoBlobstore,
-        RepoBookmarkAttrs,
-        RepoDerivedData,
-        RepoIdentity,
-        dyn BonsaiTagMapping,
-        dyn BonsaiGitMapping,
-        dyn BonsaiGlobalrevMapping,
-        dyn BonsaiSvnrevMapping,
-        dyn BonsaiHgMapping,
-        dyn BookmarkUpdateLog,
-        dyn Bookmarks,
-        dyn Phases,
-        dyn PushrebaseMutationMapping,
-        dyn HgMutationStore,
-        dyn MutableCounters,
-        dyn RepoPermissionChecker,
-        dyn RepoLock,
-        RepoConfig,
-        RepoEphemeralStore,
-        MutableRenames,
-        RepoCrossRepo,
-        dyn AclRegions,
-        RepoSparseProfiles,
-        StreamingClone,
-        CommitGraph,
-        dyn CommitGraphWriter,
-        dyn GitSymbolicRefs,
-        dyn GitPushRedirectConfig,
-        dyn Filenodes,
-        CommitCloud,
-        SqlQueryConfig,
-    )]
-    pub inner: InnerRepo,
+    #[facet]
+    pub repo_blobstore: RepoBlobstore,
 
-    #[init(inner.repo_identity().name().to_string())]
-    pub name: String,
+    #[facet]
+    pub repo_bookmark_attrs: RepoBookmarkAttrs,
+
+    #[facet]
+    pub repo_derived_data: RepoDerivedData,
+
+    #[facet]
+    pub repo_identity: RepoIdentity,
+
+    #[facet]
+    pub bonsai_tag_mapping: dyn BonsaiTagMapping,
+
+    #[facet]
+    pub bonsai_git_mapping: dyn BonsaiGitMapping,
+
+    #[facet]
+    pub bonsai_globalrev_mapping: dyn BonsaiGlobalrevMapping,
+
+    #[facet]
+    pub bonsai_svnrev_mapping: dyn BonsaiSvnrevMapping,
+
+    #[facet]
+    pub bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    pub bookmark_update_log: dyn BookmarkUpdateLog,
+
+    #[facet]
+    pub bookmarks: dyn Bookmarks,
+
+    #[facet]
+    pub phases: dyn Phases,
+
+    #[facet]
+    pub pushrebase_mutation_mapping: dyn PushrebaseMutationMapping,
+
+    #[facet]
+    pub hg_mutation_store: dyn HgMutationStore,
+
+    #[facet]
+    pub mutable_counters: dyn MutableCounters,
+
+    #[facet]
+    pub repo_permission_checker: dyn RepoPermissionChecker,
+
+    #[facet]
+    pub repo_lock: dyn RepoLock,
+
+    #[facet]
+    pub repo_config: RepoConfig,
+
+    #[facet]
+    pub repo_ephemeral_store: RepoEphemeralStore,
+
+    #[facet]
+    pub mutable_renames: MutableRenames,
+
+    #[facet]
+    pub repo_cross_repo: RepoCrossRepo,
+
+    #[facet]
+    pub acl_regions: dyn AclRegions,
+
+    #[facet]
+    pub repo_sparse_profiles: RepoSparseProfiles,
+
+    #[facet]
+    pub streaming_clone: StreamingClone,
+
+    #[facet]
+    pub commit_graph: CommitGraph,
+
+    #[facet]
+    pub commit_graph_writer: dyn CommitGraphWriter,
+
+    #[facet]
+    pub git_symbolic_refs: dyn GitSymbolicRefs,
+
+    #[facet]
+    pub git_source_of_truth_config: dyn GitSourceOfTruthConfig,
+
+    #[facet]
+    pub filenodes: dyn Filenodes,
+
+    #[facet]
+    pub commit_cloud: CommitCloud,
+
+    #[facet]
+    pub sql_query_config: SqlQueryConfig,
 
     #[facet]
     pub warm_bookmarks_cache: dyn BookmarksCache,
@@ -261,50 +293,64 @@ pub struct Repo {
     pub repo_stats_logger: RepoStatsLogger,
 }
 
-impl AsBlobRepo for Repo {
-    fn as_blob_repo(&self) -> &BlobRepo {
-        self.inner.as_blob_repo()
-    }
-}
+pub trait MononokeRepo = RepoLike + RepoWithBubble + Clone + 'static;
 
 #[derive(Clone)]
-pub struct RepoContext {
+pub struct RepoContext<R> {
     ctx: CoreContext,
     authz: Arc<AuthorizationContext>,
-    repo: Arc<Repo>,
-    push_redirector: Option<Arc<PushRedirector<Repo>>>,
-    repos: Arc<MononokeRepos<Repo>>,
+    repo: Arc<R>,
+    push_redirector: Option<Arc<PushRedirector<R>>>,
+    repos: Arc<MononokeRepos<R>>,
 }
 
-impl fmt::Debug for RepoContext {
+impl<R: RepoIdentityRef> fmt::Debug for RepoContext<R> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "RepoContext(repo={:?})", self.name())
+        write!(
+            f,
+            "RepoContext(repo={:?})",
+            self.repo.repo_identity().name()
+        )
     }
 }
 
-pub struct RepoContextBuilder {
+pub struct RepoContextBuilder<R> {
     ctx: CoreContext,
     authz: Option<AuthorizationContext>,
-    repo: Arc<Repo>,
-    push_redirector: Option<Arc<PushRedirector<Repo>>>,
+    repo: Arc<R>,
+    push_redirector: Option<Arc<PushRedirector<R>>>,
     bubble_id: Option<BubbleId>,
-    repos: Arc<MononokeRepos<Repo>>,
+    repos: Arc<MononokeRepos<R>>,
 }
 
-async fn maybe_push_redirector(
-    ctx: &CoreContext,
-    repo: &Arc<Repo>,
-    repos: &MononokeRepos<Repo>,
-) -> Result<Option<PushRedirector<Repo>>, MononokeError> {
+async fn maybe_push_redirector<'a, R: MononokeRepo>(
+    ctx: &'a CoreContext,
+    repo: &'a Arc<R>,
+    repos: &'a MononokeRepos<R>,
+) -> Result<Option<PushRedirector<R>>, MononokeError> {
     let base = match repo.repo_handler_base().maybe_push_redirector_base.as_ref() {
         None => return Ok(None),
         Some(base) => base,
     };
-    let live_commit_sync_config = repo.live_commit_sync_config();
+    let live_commit_sync_config = repo.repo_cross_repo().live_commit_sync_config();
     let enabled = live_commit_sync_config
-        .push_redirector_enabled_for_public(ctx, repo.repoid())
+        .push_redirector_enabled_for_public(ctx, repo.repo_identity().id())
         .await?;
+
     if enabled {
+        let repo_provider: RepoProvider<'a, R> = Arc::new(move |repo_id| {
+            Box::pin({
+                async move {
+                    let repo = repos
+                        .get_by_id(repo_id.id())
+                        .ok_or_else(|| anyhow!("Submodule dependency repo with id {repo_id} not available through RepoContext"))?;
+                    Ok(repo)
+                }
+            })
+        });
+
+        let submodule_deps = get_all_repo_submodule_deps(ctx, repo.clone(), repo_provider).await?;
+
         let large_repo_id = base.common_commit_sync_config.large_repo_id;
         let large_repo = repos.get_by_id(large_repo_id.id()).ok_or_else(|| {
             MononokeError::InvalidRequest(format!("Large repo '{}' not found", large_repo_id))
@@ -316,11 +362,7 @@ async fn maybe_push_redirector(
                 base.synced_commit_mapping.clone(),
                 base.target_repo_dbs.clone(),
             )
-            .into_push_redirector(
-                ctx,
-                live_commit_sync_config,
-                repo.inner_repo().repo_cross_repo.sync_lease().clone(),
-            )
+            .into_push_redirector(ctx, live_commit_sync_config.clone(), submodule_deps)
             .map_err(|e| MononokeError::InvalidRequest(e.to_string()))?,
         ))
     } else {
@@ -328,11 +370,11 @@ async fn maybe_push_redirector(
     }
 }
 
-impl RepoContextBuilder {
+impl<R: MononokeRepo> RepoContextBuilder<R> {
     pub async fn new(
         ctx: CoreContext,
-        repo: Arc<Repo>,
-        repos: Arc<MononokeRepos<Repo>>,
+        repo: Arc<R>,
+        repos: Arc<MononokeRepos<R>>,
     ) -> Result<Self, MononokeError> {
         let push_redirector = maybe_push_redirector(&ctx, &repo, repos.as_ref())
             .await?
@@ -348,10 +390,10 @@ impl RepoContextBuilder {
         })
     }
 
-    pub async fn with_bubble<F, R>(mut self, bubble_fetcher: F) -> Result<Self, MononokeError>
+    pub async fn with_bubble<F, Fut>(mut self, bubble_fetcher: F) -> Result<Self, MononokeError>
     where
-        F: FnOnce(RepoEphemeralStore) -> R,
-        R: Future<Output = anyhow::Result<Option<BubbleId>>>,
+        F: FnOnce(RepoEphemeralStore) -> Fut,
+        Fut: Future<Output = anyhow::Result<Option<BubbleId>>>,
     {
         self.bubble_id = bubble_fetcher(self.repo.repo_ephemeral_store().clone()).await?;
         Ok(self)
@@ -362,7 +404,7 @@ impl RepoContextBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<RepoContext, MononokeError> {
+    pub async fn build(self) -> Result<RepoContext<R>, MononokeError> {
         let authz = Arc::new(
             self.authz
                 .clone()
@@ -378,25 +420,6 @@ impl RepoContextBuilder {
         )
         .await
     }
-}
-
-pub async fn open_synced_commit_mapping(
-    fb: FacebookInit,
-    config: RepoConfig,
-    mysql_options: &MysqlOptions,
-    readonly_storage: ReadOnlyStorage,
-) -> Result<Arc<SqlSyncedCommitMapping>, Error> {
-    let sql_factory = MetadataSqlFactory::new(
-        fb,
-        config.storage_config.metadata,
-        mysql_options.clone(),
-        readonly_storage,
-    )
-    .await?;
-
-    Ok(Arc::new(
-        sql_factory.open::<SqlSyncedCommitMapping>().await?,
-    ))
 }
 
 /// Defines behavuiour of xrepo_commit_lookup when there's no mapping for queries commit just yet.
@@ -417,354 +440,233 @@ pub enum XRepoLookupExactBehaviour {
     WorkingCopyEquivalence,
 }
 
-impl Repo {
-    /// Construct a new Repo based on an existing one with a bubble opened.
-    pub fn with_bubble(&self, bubble: Bubble) -> Self {
-        let blob_repo = self.inner.blob_repo.with_bubble(bubble);
-        let inner = InnerRepo {
-            blob_repo,
-            ..self.inner.clone()
-        };
-        Self {
-            name: self.name.clone(),
-            inner,
-            warm_bookmarks_cache: self.warm_bookmarks_cache.clone(),
-            hook_manager: self.hook_manager.clone(),
-            repo_handler_base: self.repo_handler_base.clone(),
-            filestore_config: self.filestore_config.clone(),
-            repo_stats_logger: self.repo_stats_logger.clone(),
-        }
-    }
+pub trait MonitoredRepo = BookmarksCacheRef
+    + BookmarksRef
+    + RepoBlobstoreRef
+    + RepoIdentityRef
+    + RepoConfigRef
+    + CommitGraphRef;
 
-    /// Construct a Repo from a test BlobRepo and commit_sync_config
-    pub async fn new_test_xrepo(
-        ctx: CoreContext,
-        blob_repo: BlobRepo,
-        live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-        synced_commit_mapping: ArcSyncedCommitMapping,
-    ) -> Result<Self, Error> {
-        // TODO: Migrate more of this code to use the TestRepoFactory so that we can eventually
-        // replace these test methods.
-        let repo_factory: TestRepoFactory = TestRepoFactory::new(ctx.fb)?;
-
-        let repo_id = blob_repo.repo_identity().id();
-
-        let config = RepoConfig {
-            infinitepush: InfinitepushParams {
-                namespace: Some(InfinitepushNamespace::new(
-                    Regex::new("scratch/.+").unwrap(),
-                )),
-                ..Default::default()
-            },
-            source_control_service: SourceControlServiceParams {
-                permit_writes: true,
-                ..Default::default()
-            },
-            hook_manager_params: Some(HookManagerParams {
-                disable_acl_checker: true,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let name = blob_repo.repo_identity().name().to_string();
-        let repo_blobstore = blob_repo.repo_blobstore_arc();
-        let hook_manager = repo_factory.hook_manager(
-            &blob_repo.repo_identity_arc(),
-            &blob_repo.repo_derived_data_arc(),
-            &blob_repo.bookmarks_arc(),
-            &blob_repo.repo_blobstore_arc(),
-            &blob_repo.bonsai_tag_mapping_arc(),
-        );
-        let repo_cross_repo = Arc::new(RepoCrossRepo::new(
-            synced_commit_mapping,
-            live_commit_sync_config,
-            Arc::new(InProcessLease::new()),
-        ));
-        let mutable_counters = repo_factory.mutable_counters(&blob_repo.repo_identity_arc())?;
-        let repo_handler_base = repo_factory.repo_handler_base(
-            &Arc::new(config.clone()),
-            &repo_cross_repo,
-            &blob_repo.repo_identity_arc(),
-            &blob_repo.bookmarks_arc(),
-            &blob_repo.bookmark_update_log_arc(),
-            &mutable_counters,
-        )?;
-        let inner = InnerRepo {
-            blob_repo,
-            repo_config: Arc::new(config.clone()),
-            ephemeral_store: Arc::new(RepoEphemeralStore::disabled(repo_id)),
-            mutable_renames: Arc::new(MutableRenames::new_test(
-                repo_id,
-                SqlMutableRenamesStore::with_sqlite_in_memory()?,
-            )),
-            repo_cross_repo,
-            acl_regions: build_disabled_acl_regions(),
-            sparse_profiles: Arc::new(RepoSparseProfiles::new(None)),
-            streaming_clone: Arc::new(
-                StreamingCloneBuilder::with_sqlite_in_memory()?.build(repo_id, repo_blobstore),
-            ),
-            sql_query_config: Arc::new(SqlQueryConfig { caching: None }),
-            git_push_redirect_config: Arc::new(TestGitPushRedirectConfig::new()),
-        };
-
-        let mut warm_bookmarks_cache_builder = WarmBookmarksCacheBuilder::new(
-            ctx.clone(),
-            inner.bookmarks_arc(),
-            inner.bookmark_update_log_arc(),
-            inner.repo_identity_arc(),
-        );
-        warm_bookmarks_cache_builder
-            .add_all_warmers(&inner.repo_derived_data_arc(), &inner.phases_arc())?;
-        // We are constructing a test repo, so ensure the warm bookmark cache
-        // is fully warmed, so that tests see up-to-date bookmarks.
-        warm_bookmarks_cache_builder.wait_until_warmed();
-        let warm_bookmarks_cache = warm_bookmarks_cache_builder.build().await?;
-        let filestore_config = Arc::new(FilestoreConfig::no_chunking_filestore());
-
-        let repo_stats_logger = Arc::new(RepoStatsLogger::noop());
-        Ok(Self {
-            name: name.clone(),
-            inner,
-            warm_bookmarks_cache: Arc::new(warm_bookmarks_cache),
-            hook_manager,
-            repo_handler_base,
-            filestore_config,
-            repo_stats_logger,
-        })
-    }
-
-    /// The name of the underlying repo.
-    pub fn name(&self) -> &String {
-        &self.name
-    }
-
-    /// The internal id of the repo. Used for comparing the repo objects with each other.
-    pub fn repoid(&self) -> RepositoryId {
-        self.blob_repo().repo_identity().id()
-    }
-
-    /// The underlying `InnerRepo`.
-    pub fn inner_repo(&self) -> &InnerRepo {
-        &self.inner
-    }
-
-    /// The underlying `BlobRepo`.
-    pub fn blob_repo(&self) -> &BlobRepo {
-        &self.inner.blob_repo
-    }
-
-    /// `LiveCommitSyncConfig` instance to query current state of sync configs.
-    pub fn live_commit_sync_config(&self) -> Arc<dyn LiveCommitSyncConfig> {
-        self.inner.repo_cross_repo.live_commit_sync_config().clone()
-    }
-
-    /// The commit sync mapping for the referenced repository.
-    pub fn synced_commit_mapping(&self) -> &ArcSyncedCommitMapping {
-        self.inner.repo_cross_repo.synced_commit_mapping()
-    }
-
-    /// The commit sync lease for the referenced repository.
-    pub fn x_repo_sync_lease(&self) -> &Arc<dyn LeaseOps> {
-        self.inner.repo_cross_repo.sync_lease()
-    }
-
-    /// The warm bookmarks cache for the referenced repository.
-    pub fn warm_bookmarks_cache(&self) -> &Arc<dyn BookmarksCache + Send + Sync> {
-        &self.warm_bookmarks_cache
-    }
-
-    /// The configuration for the referenced repository.
-    pub fn config(&self) -> &RepoConfig {
-        &self.inner.repo_config
-    }
-
-    pub async fn report_monitoring_stats(&self, ctx: &CoreContext) -> Result<(), MononokeError> {
-        match self.config().source_control_service_monitoring.as_ref() {
-            None => {}
-            Some(monitoring_config) => {
-                for bookmark in monitoring_config.bookmarks_to_report_age.iter() {
-                    self.report_bookmark_age_difference(ctx, bookmark).await?;
-                }
+pub async fn report_monitoring_stats(
+    ctx: &CoreContext,
+    repo: &impl MonitoredRepo,
+) -> Result<(), MononokeError> {
+    match repo
+        .repo_config()
+        .source_control_service_monitoring
+        .as_ref()
+    {
+        None => {}
+        Some(monitoring_config) => {
+            for bookmark in monitoring_config.bookmarks_to_report_age.iter() {
+                report_bookmark_age_difference(ctx, repo, bookmark).await?;
             }
         }
-
-        Ok(())
     }
 
-    fn report_bookmark_missing_from_cache(&self, ctx: &CoreContext, bookmark: &BookmarkKey) {
-        error!(
+    Ok(())
+}
+
+fn report_bookmark_missing_from_cache(
+    ctx: &CoreContext,
+    repo: &impl RepoIdentityRef,
+    bookmark: &BookmarkKey,
+) {
+    error!(
+        ctx.logger(),
+        "Monitored bookmark does not exist in the cache: {}, repo: {}",
+        bookmark,
+        repo.repo_identity().name()
+    );
+
+    STATS::missing_from_cache.set_value(
+        ctx.fb,
+        1,
+        (repo.repo_identity().id(), bookmark.to_string()),
+    );
+}
+
+fn report_bookmark_missing_from_repo(
+    ctx: &CoreContext,
+    repo: &impl RepoIdentityRef,
+    bookmark: &BookmarkKey,
+) {
+    error!(
+        ctx.logger(),
+        "Monitored bookmark does not exist in the repo: {}", bookmark
+    );
+
+    STATS::missing_from_repo.set_value(
+        ctx.fb,
+        1,
+        (repo.repo_identity().id(), bookmark.to_string()),
+    );
+}
+
+fn report_bookmark_staleness(
+    ctx: &CoreContext,
+    repo: &impl RepoIdentityRef,
+    bookmark: &BookmarkKey,
+    staleness: i64,
+) {
+    // Don't log if staleness is 0 to make output less spammy
+    if staleness > 0 {
+        debug!(
             ctx.logger(),
-            "Monitored bookmark does not exist in the cache: {}, repo: {}",
+            "Reporting staleness of {} in repo {} to be {}s",
             bookmark,
-            self.repo_identity().name()
-        );
-
-        STATS::missing_from_cache.set_value(
-            ctx.fb,
-            1,
-            (self.repo_identity().id(), bookmark.to_string()),
+            repo.repo_identity().id(),
+            staleness
         );
     }
 
-    fn report_bookmark_missing_from_repo(&self, ctx: &CoreContext, bookmark: &BookmarkKey) {
-        error!(
-            ctx.logger(),
-            "Monitored bookmark does not exist in the repo: {}", bookmark
-        );
+    STATS::staleness.set_value(
+        ctx.fb,
+        staleness,
+        (repo.repo_identity().id(), bookmark.to_string()),
+    );
+}
 
-        STATS::missing_from_repo.set_value(
-            ctx.fb,
-            1,
-            (self.repo_identity().id(), bookmark.to_string()),
-        );
+async fn report_bookmark_age_difference(
+    ctx: &CoreContext,
+    repo: &impl MonitoredRepo,
+    bookmark: &BookmarkKey,
+) -> Result<(), MononokeError> {
+    let maybe_bcs_id_from_service = repo.bookmarks_cache().get(ctx, bookmark).await?;
+    let maybe_bcs_id_from_blobrepo = repo.bookmarks().get(ctx.clone(), bookmark).await?;
+
+    if maybe_bcs_id_from_blobrepo.is_none() {
+        report_bookmark_missing_from_repo(ctx, repo, bookmark);
     }
 
-    fn report_bookmark_staleness(&self, ctx: &CoreContext, bookmark: &BookmarkKey, staleness: i64) {
-        // Don't log if staleness is 0 to make output less spammy
-        if staleness > 0 {
+    if maybe_bcs_id_from_service.is_none() {
+        report_bookmark_missing_from_cache(ctx, repo, bookmark);
+    }
+
+    if let (Some(service_bcs_id), Some(blobrepo_bcs_id)) =
+        (maybe_bcs_id_from_service, maybe_bcs_id_from_blobrepo)
+    {
+        // We report the difference between current time (i.e. SystemTime::now())
+        // and timestamp of the first child of bookmark value from cache (see graph below)
+        //
+        //       O <- bookmark value from blobrepo
+        //       |
+        //      ...
+        //       |
+        //       O <- first child of bookmark value from cache.
+        //       |
+        //       O <- bookmark value from cache, it's outdated
+        //
+        // This way of reporting shows for how long the oldest commit not in cache hasn't been
+        // imported, and it should work correctly both for high and low commit rates.
+
+        // Do not log if there's no lag to make output less spammy
+        if blobrepo_bcs_id != service_bcs_id {
             debug!(
                 ctx.logger(),
-                "Reporting staleness of {} in repo {} to be {}s",
+                "Reporting bookmark age difference for {}: latest {} value is {}, cache points to {}",
+                repo.repo_identity().id(),
                 bookmark,
-                self.repo_identity().id(),
-                staleness
+                blobrepo_bcs_id,
+                service_bcs_id,
             );
         }
 
-        STATS::staleness.set_value(
-            ctx.fb,
-            staleness,
-            (self.repo_identity().id(), bookmark.to_string()),
-        );
+        let difference = if blobrepo_bcs_id == service_bcs_id {
+            0
+        } else {
+            let limit = 100;
+            let maybe_child =
+                try_find_child(ctx, repo, service_bcs_id, blobrepo_bcs_id, limit).await?;
+
+            // If we can't find a child of a bookmark value from cache, then it might mean
+            // that either cache is too far behind or there was a non-forward bookmark move.
+            // Either way, we can't really do much about it here, so let's just find difference
+            // between current timestamp and bookmark value from cache.
+            let compare_bcs_id = maybe_child.unwrap_or(service_bcs_id);
+
+            let compare_timestamp = compare_bcs_id
+                .load(ctx, repo.repo_blobstore())
+                .await?
+                .author_date()
+                .timestamp_secs();
+
+            let current_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(Error::from)?;
+            let current_timestamp = current_timestamp.as_secs() as i64;
+            current_timestamp - compare_timestamp
+        };
+        report_bookmark_staleness(ctx, repo, bookmark, difference);
     }
 
-    async fn report_bookmark_age_difference(
-        &self,
-        ctx: &CoreContext,
-        bookmark: &BookmarkKey,
-    ) -> Result<(), MononokeError> {
-        let repo = self.blob_repo();
+    Ok(())
+}
 
-        let maybe_bcs_id_from_service = self.warm_bookmarks_cache.get(ctx, bookmark).await?;
-        let maybe_bcs_id_from_blobrepo = repo.bookmarks().get(ctx.clone(), bookmark).await?;
+/// Try to find a changeset that's ancestor of `descendant` and direct child of
+/// `ancestor`. Returns None if this commit doesn't exist (for example if `ancestor` is not
+/// actually an ancestor of `descendant`) or if child is too far away from descendant.
+async fn try_find_child(
+    ctx: &CoreContext,
+    repo: &impl CommitGraphRef,
+    ancestor: ChangesetId,
+    descendant: ChangesetId,
+    limit: u64,
+) -> Result<Option<ChangesetId>, Error> {
+    // This is a generation number beyond which we don't need to traverse
+    let min_gen_num = repo
+        .commit_graph()
+        .changeset_generation(ctx, ancestor)
+        .await?;
 
-        if maybe_bcs_id_from_blobrepo.is_none() {
-            self.report_bookmark_missing_from_repo(ctx, bookmark);
+    let mut ancestors = repo
+        .commit_graph()
+        .ancestors_difference_stream(ctx, vec![descendant], vec![])
+        .await?;
+
+    let mut traversed = 0;
+    while let Some(cs_id) = ancestors.next().await {
+        traversed += 1;
+        if traversed > limit {
+            return Ok(None);
         }
 
-        if maybe_bcs_id_from_service.is_none() {
-            self.report_bookmark_missing_from_cache(ctx, bookmark);
-        }
+        let cs_id = cs_id?;
+        let parents = repo.commit_graph().changeset_parents(ctx, cs_id).await?;
 
-        if let (Some(service_bcs_id), Some(blobrepo_bcs_id)) =
-            (maybe_bcs_id_from_service, maybe_bcs_id_from_blobrepo)
-        {
-            // We report the difference between current time (i.e. SystemTime::now())
-            // and timestamp of the first child of bookmark value from cache (see graph below)
-            //
-            //       O <- bookmark value from blobrepo
-            //       |
-            //      ...
-            //       |
-            //       O <- first child of bookmark value from cache.
-            //       |
-            //       O <- bookmark value from cache, it's outdated
-            //
-            // This way of reporting shows for how long the oldest commit not in cache hasn't been
-            // imported, and it should work correctly both for high and low commit rates.
-
-            // Do not log if there's no lag to make output less spammy
-            if blobrepo_bcs_id != service_bcs_id {
-                debug!(
-                    ctx.logger(),
-                    "Reporting bookmark age difference for {}: latest {} value is {}, cache points to {}",
-                    repo.repo_identity().id(),
-                    bookmark,
-                    blobrepo_bcs_id,
-                    service_bcs_id,
-                );
-            }
-
-            let difference = if blobrepo_bcs_id == service_bcs_id {
-                0
-            } else {
-                let limit = 100;
-                let maybe_child = self
-                    .try_find_child(ctx, service_bcs_id, blobrepo_bcs_id, limit)
-                    .await?;
-
-                // If we can't find a child of a bookmark value from cache, then it might mean
-                // that either cache is too far behind or there was a non-forward bookmark move.
-                // Either way, we can't really do much about it here, so let's just find difference
-                // between current timestamp and bookmark value from cache.
-                let compare_bcs_id = maybe_child.unwrap_or(service_bcs_id);
-
-                let compare_timestamp = compare_bcs_id
-                    .load(ctx, repo.repo_blobstore())
-                    .await?
-                    .author_date()
-                    .timestamp_secs();
-
-                let current_timestamp = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(Error::from)?;
-                let current_timestamp = current_timestamp.as_secs() as i64;
-                current_timestamp - compare_timestamp
-            };
-            self.report_bookmark_staleness(ctx, bookmark, difference);
-        }
-
-        Ok(())
-    }
-
-    /// Try to find a changeset that's ancestor of `descendant` and direct child of
-    /// `ancestor`. Returns None if this commit doesn't exist (for example if `ancestor` is not
-    /// actually an ancestor of `descendant`) or if child is too far away from descendant.
-    async fn try_find_child(
-        &self,
-        ctx: &CoreContext,
-        ancestor: ChangesetId,
-        descendant: ChangesetId,
-        limit: u64,
-    ) -> Result<Option<ChangesetId>, Error> {
-        // This is a generation number beyond which we don't need to traverse
-        let min_gen_num = self.fetch_gen_num(ctx, &ancestor).await?;
-
-        let mut ancestors = self
-            .commit_graph()
-            .ancestors_difference_stream(ctx, vec![descendant], vec![])
-            .await?;
-
-        let mut traversed = 0;
-        while let Some(cs_id) = ancestors.next().await {
-            traversed += 1;
-            if traversed > limit {
+        if parents.contains(&ancestor) {
+            return Ok(Some(cs_id));
+        } else {
+            let gen_num = repo.commit_graph().changeset_generation(ctx, cs_id).await?;
+            if gen_num < min_gen_num {
                 return Ok(None);
             }
-
-            let cs_id = cs_id?;
-            let parents = self.commit_graph().changeset_parents(ctx, cs_id).await?;
-
-            if parents.contains(&ancestor) {
-                return Ok(Some(cs_id));
-            } else {
-                let gen_num = self.fetch_gen_num(ctx, &cs_id).await?;
-                if gen_num < min_gen_num {
-                    return Ok(None);
-                }
-            }
         }
-
-        Ok(None)
     }
 
-    async fn fetch_gen_num(
-        &self,
-        ctx: &CoreContext,
-        cs_id: &ChangesetId,
-    ) -> Result<Generation, Error> {
-        self.commit_graph().changeset_generation(ctx, *cs_id).await
+    Ok(None)
+}
+
+/// Trait for repo objects that can be wrapped in a bubble.
+pub trait RepoWithBubble {
+    /// Construct a new Repo based on an existing one with a bubble opened.
+    fn with_bubble(&self, bubble: Bubble) -> Self;
+}
+
+impl RepoWithBubble for Repo {
+    fn with_bubble(&self, bubble: Bubble) -> Self {
+        let repo_blobstore = Arc::new(bubble.wrap_repo_blobstore(self.repo_blobstore().clone()));
+        let commit_graph = Arc::new(bubble.repo_commit_graph(self));
+        let commit_graph_writer = bubble.repo_commit_graph_writer(self);
+        let repo_derived_data = Arc::new(self.repo_derived_data().for_bubble(bubble));
+
+        Self {
+            repo_blobstore,
+            commit_graph,
+            commit_graph_writer,
+            repo_derived_data,
+            ..self.clone()
+        }
     }
 }
 
@@ -775,21 +677,21 @@ pub struct Stack {
     pub leftover_heads: Vec<ChangesetId>,
 }
 
-pub struct BookmarkInfo {
-    pub warm_changeset: ChangesetContext,
-    pub fresh_changeset: ChangesetContext,
+pub struct BookmarkInfo<R> {
+    pub warm_changeset: ChangesetContext<R>,
+    pub fresh_changeset: ChangesetContext<R>,
     pub last_update_timestamp: Timestamp,
 }
 
 /// A context object representing a query to a particular repo.
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     pub async fn new(
         ctx: CoreContext,
         authz: Arc<AuthorizationContext>,
-        repo: Arc<Repo>,
+        repo: Arc<R>,
         bubble_id: Option<BubbleId>,
-        push_redirector: Option<Arc<PushRedirector<Repo>>>,
-        repos: Arc<MononokeRepos<Repo>>,
+        push_redirector: Option<Arc<PushRedirector<R>>>,
+        repos: Arc<MononokeRepos<R>>,
     ) -> Result<Self, MononokeError> {
         let ctx = ctx.with_mutated_scuba(|mut scuba| {
             scuba.add("permissions_model", format!("{:?}", authz));
@@ -797,7 +699,7 @@ impl RepoContext {
         });
 
         // Check the user is permitted to access this repo.
-        authz.require_repo_metadata_read(&ctx, &repo.inner).await?;
+        authz.require_repo_metadata_read(&ctx, &repo).await?;
 
         // Open the bubble if necessary.
         let repo = if let Some(bubble_id) = bubble_id {
@@ -819,7 +721,7 @@ impl RepoContext {
         })
     }
 
-    pub async fn new_test(ctx: CoreContext, repo: Arc<Repo>) -> Result<Self, MononokeError> {
+    pub async fn new_test(ctx: CoreContext, repo: Arc<R>) -> Result<Self, MononokeError> {
         let authz = Arc::new(AuthorizationContext::new_bypass_access_control());
         RepoContext::new(ctx, authz, repo, None, None, Arc::new(MononokeRepos::new())).await
     }
@@ -831,12 +733,12 @@ impl RepoContext {
 
     /// The name of the underlying repo.
     pub fn name(&self) -> &str {
-        self.repo.name()
+        self.repo.repo_identity().name()
     }
 
     /// The internal id of the repo. Used for comparing the repo objects with each other.
     pub fn repoid(&self) -> RepositoryId {
-        self.repo.repoid()
+        self.repo.repo_identity().id()
     }
 
     /// The authorization context of the request.
@@ -844,27 +746,20 @@ impl RepoContext {
         &self.authz
     }
 
-    pub fn repo(&self) -> &Repo {
+    pub fn repo(&self) -> &R {
         self.repo.as_ref()
     }
 
-    pub fn repo_arc(&self) -> Arc<Repo> {
+    pub fn repo_arc(&self) -> Arc<R> {
         self.repo.clone()
-    }
-
-    /// The underlying `InnerRepo`.
-    pub fn inner_repo(&self) -> &InnerRepo {
-        self.repo.inner_repo()
-    }
-
-    /// The underlying `BlobRepo`.
-    pub fn blob_repo(&self) -> &BlobRepo {
-        self.repo.blob_repo()
     }
 
     /// `LiveCommitSyncConfig` instance to query current state of sync configs.
     pub fn live_commit_sync_config(&self) -> Arc<dyn LiveCommitSyncConfig> {
-        self.repo.live_commit_sync_config()
+        self.repo
+            .repo_cross_repo()
+            .live_commit_sync_config()
+            .clone()
     }
 
     /// The ephemeral store for the referenced repository
@@ -874,12 +769,12 @@ impl RepoContext {
 
     /// The commit sync mapping for the referenced repository
     pub fn synced_commit_mapping(&self) -> &ArcSyncedCommitMapping {
-        self.repo.synced_commit_mapping()
+        self.repo.repo_cross_repo().synced_commit_mapping()
     }
 
     /// The warm bookmarks cache for the referenced repository.
-    pub fn warm_bookmarks_cache(&self) -> &Arc<dyn BookmarksCache + Send + Sync> {
-        self.repo.warm_bookmarks_cache()
+    pub fn warm_bookmarks_cache(&self) -> &(dyn BookmarksCache + Send + Sync) {
+        self.repo.bookmarks_cache()
     }
 
     /// The repo blobstore for the referenced repository.
@@ -895,15 +790,22 @@ impl RepoContext {
     /// The base for push redirection logic for this repo
     pub fn maybe_push_redirector_base(&self) -> Option<&PushRedirectorBase> {
         self.repo
-            .repo_handler_base
+            .repo_handler_base()
             .maybe_push_redirector_base
             .as_ref()
             .map(AsRef::as_ref)
     }
 
+    pub fn push_redirector(&self) -> Option<&PushRedirector<R>> {
+        match &self.push_redirector {
+            Some(prd) => Some(prd.as_ref()),
+            None => None,
+        }
+    }
+
     /// The configuration for the referenced repository.
     pub fn config(&self) -> &RepoConfig {
-        self.repo.config()
+        self.repo.repo_config()
     }
 
     pub fn mutable_renames(&self) -> ArcMutableRenames {
@@ -915,21 +817,21 @@ impl RepoContext {
     }
 
     pub fn derive_changeset_info_enabled(&self) -> bool {
-        self.blob_repo()
+        self.repo()
             .repo_derived_data()
             .config()
             .is_enabled(ChangesetInfo::VARIANT)
     }
 
     pub fn derive_gitcommit_enabled(&self) -> bool {
-        self.blob_repo()
+        self.repo()
             .repo_derived_data()
             .config()
             .is_enabled(MappedGitCommitId::VARIANT)
     }
 
     pub fn derive_hgchangesets_enabled(&self) -> bool {
-        self.blob_repo()
+        self.repo()
             .repo_derived_data()
             .config()
             .is_enabled(MappedHgChangesetId::VARIANT)
@@ -949,12 +851,8 @@ impl RepoContext {
         bubble_id: Option<BubbleId>,
     ) -> Result<ArcCommitGraph, MononokeError> {
         Ok(match bubble_id {
-            Some(id) => Arc::new(
-                self.open_bubble(id)
-                    .await?
-                    .repo_commit_graph(self.blob_repo()),
-            ),
-            None => self.blob_repo().commit_graph_arc(),
+            Some(id) => Arc::new(self.open_bubble(id).await?.repo_commit_graph(self.repo())),
+            None => self.repo().commit_graph_arc(),
         })
     }
 
@@ -1005,25 +903,25 @@ impl RepoContext {
                 .await?
                 .then_some(cs_id),
             ChangesetSpecifier::Hg(hg_cs_id) => {
-                self.blob_repo()
+                self.repo()
                     .bonsai_hg_mapping()
                     .get_bonsai_from_hg(&self.ctx, hg_cs_id)
                     .await?
             }
             ChangesetSpecifier::Globalrev(rev) => {
-                self.blob_repo()
+                self.repo()
                     .bonsai_globalrev_mapping()
                     .get_bonsai_from_globalrev(&self.ctx, rev)
                     .await?
             }
             ChangesetSpecifier::Svnrev(rev) => {
-                self.blob_repo()
+                self.repo()
                     .bonsai_svnrev_mapping()
                     .get_bonsai_from_svnrev(&self.ctx, rev)
                     .await?
             }
             ChangesetSpecifier::GitSha1(git_sha1) => {
-                self.blob_repo()
+                self.repo()
                     .bonsai_git_mapping()
                     .get_bonsai_from_git_sha1(&self.ctx, git_sha1)
                     .await?
@@ -1037,7 +935,7 @@ impl RepoContext {
         &self,
         bookmark: &BookmarkKey,
         freshness: BookmarkFreshness,
-    ) -> Result<Option<ChangesetContext>, MononokeError> {
+    ) -> Result<Option<ChangesetContext<R>>, MononokeError> {
         let mut cs_id = match freshness {
             BookmarkFreshness::MaybeStale => {
                 self.warm_bookmarks_cache().get(&self.ctx, bookmark).await?
@@ -1049,7 +947,7 @@ impl RepoContext {
         // be a scratch bookmark, so always do the look-up.
         if cs_id.is_none() {
             cs_id = self
-                .blob_repo()
+                .repo()
                 .bookmarks()
                 .get(self.ctx.clone(), bookmark)
                 .await?
@@ -1066,26 +964,26 @@ impl RepoContext {
         const MAX_LIMIT_AMBIGUOUS_IDS: usize = 10;
         let resolved = match prefix {
             ChangesetPrefixSpecifier::Hg(prefix) => ChangesetSpecifierPrefixResolution::from(
-                self.blob_repo()
+                self.repo()
                     .bonsai_hg_mapping()
                     .get_many_hg_by_prefix(&self.ctx, prefix, MAX_LIMIT_AMBIGUOUS_IDS)
                     .await?,
             ),
             ChangesetPrefixSpecifier::Bonsai(prefix) => ChangesetSpecifierPrefixResolution::from(
-                self.blob_repo()
+                self.repo()
                     .commit_graph()
                     .find_by_prefix(&self.ctx, prefix, MAX_LIMIT_AMBIGUOUS_IDS)
                     .await?,
             ),
             ChangesetPrefixSpecifier::GitSha1(prefix) => ChangesetSpecifierPrefixResolution::from(
-                self.blob_repo()
+                self.repo()
                     .bonsai_git_mapping()
                     .get_many_git_sha1_by_prefix(&self.ctx, prefix, MAX_LIMIT_AMBIGUOUS_IDS)
                     .await?,
             ),
             ChangesetPrefixSpecifier::Globalrev(prefix) => {
                 ChangesetSpecifierPrefixResolution::from(
-                    self.blob_repo()
+                    self.repo()
                         .bonsai_globalrev_mapping()
                         .get_closest_globalrev(&self.ctx, prefix)
                         .await?,
@@ -1099,7 +997,7 @@ impl RepoContext {
     pub async fn changeset(
         &self,
         specifier: impl Into<ChangesetSpecifier>,
-    ) -> Result<Option<ChangesetContext>, MononokeError> {
+    ) -> Result<Option<ChangesetContext<R>>, MononokeError> {
         let specifier = specifier.into();
         let changeset = self
             .resolve_specifier(specifier)
@@ -1109,7 +1007,7 @@ impl RepoContext {
     }
 
     /// Create changeset context from known existing changeset id.
-    pub fn changeset_from_existing_id(&self, cs_id: ChangesetId) -> ChangesetContext {
+    pub fn changeset_from_existing_id(&self, cs_id: ChangesetId) -> ChangesetContext<R> {
         ChangesetContext::new(self.clone(), cs_id)
     }
 
@@ -1117,7 +1015,7 @@ impl RepoContext {
         &'a self,
         includes: Vec<ChangesetId>,
         excludes: Vec<ChangesetId>,
-    ) -> Result<impl Stream<Item = Result<ChangesetContext, MononokeError>> + 'a, MononokeError>
+    ) -> Result<impl Stream<Item = Result<ChangesetContext<R>, MononokeError>> + 'a, MononokeError>
     {
         let repo = self.clone();
 
@@ -1147,7 +1045,7 @@ impl RepoContext {
         changesets: Vec<ChangesetId>,
     ) -> Result<Vec<(ChangesetId, HgChangesetId)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .get_hg_bonsai_mapping(self.ctx.clone(), changesets)
             .await?
             .into_iter()
@@ -1162,7 +1060,7 @@ impl RepoContext {
         changesets: Vec<HgChangesetId>,
     ) -> Result<Vec<(HgChangesetId, ChangesetId)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .get_hg_bonsai_mapping(self.ctx.clone(), changesets)
             .await?;
         Ok(mapping)
@@ -1174,7 +1072,7 @@ impl RepoContext {
         changesets: Vec<ChangesetId>,
     ) -> Result<Vec<(ChangesetId, GitSha1)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .bonsai_git_mapping()
             .get(&self.ctx, changesets.into())
             .await?
@@ -1190,7 +1088,7 @@ impl RepoContext {
         changesets: Vec<GitSha1>,
     ) -> Result<Vec<(GitSha1, ChangesetId)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .bonsai_git_mapping()
             .get(&self.ctx, changesets.into())
             .await?
@@ -1206,7 +1104,7 @@ impl RepoContext {
         changesets: Vec<ChangesetId>,
     ) -> Result<Vec<(ChangesetId, Globalrev)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .bonsai_globalrev_mapping()
             .get(&self.ctx, changesets.into())
             .await?
@@ -1222,7 +1120,7 @@ impl RepoContext {
         changesets: Vec<Globalrev>,
     ) -> Result<Vec<(Globalrev, ChangesetId)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .bonsai_globalrev_mapping()
             .get(&self.ctx, changesets.into())
             .await?
@@ -1238,7 +1136,7 @@ impl RepoContext {
         changesets: Vec<ChangesetId>,
     ) -> Result<Vec<(ChangesetId, Svnrev)>, MononokeError> {
         let mapping = self
-            .blob_repo()
+            .repo()
             .bonsai_svnrev_mapping()
             .get(&self.ctx, changesets.into())
             .await?
@@ -1267,7 +1165,7 @@ impl RepoContext {
     pub async fn bookmark_info(
         &self,
         bookmark: impl AsRef<str>,
-    ) -> Result<Option<BookmarkInfo>, MononokeError> {
+    ) -> Result<Option<BookmarkInfo<R>>, MononokeError> {
         // a non ascii bookmark name is an invalid request
         let bookmark = BookmarkKey::new(bookmark.as_ref())
             .map_err(|e| MononokeError::InvalidRequest(e.to_string()))?;
@@ -1275,11 +1173,8 @@ impl RepoContext {
         let (maybe_warm_cs_id, maybe_log_entry) = try_join!(
             self.warm_bookmarks_cache().get(&self.ctx, &bookmark),
             async {
-                let mut entries_stream = self
-                    .repo
-                    .blob_repo()
-                    .bookmark_update_log()
-                    .list_bookmark_log_entries(
+                let mut entries_stream =
+                    self.repo().bookmark_update_log().list_bookmark_log_entries(
                         self.ctx.clone(),
                         bookmark.clone(),
                         1,
@@ -1293,8 +1188,12 @@ impl RepoContext {
         let maybe_warm_changeset =
             maybe_warm_cs_id.map(|cs_id| ChangesetContext::new(self.clone(), cs_id));
 
-        let (_id, maybe_fresh_cs_id, _reason, timestamp) = maybe_log_entry
-            .ok_or_else(|| anyhow!("Bookmark update log has no entries for queried bookmark!"))?;
+        let (maybe_fresh_cs_id, timestamp) = match maybe_log_entry {
+            Some((_id, maybe_fresh_cs_id, _reason, timestamp)) => (maybe_fresh_cs_id, timestamp),
+            None => {
+                return Ok(None);
+            }
+        };
 
         let fresh_cs_id = match maybe_fresh_cs_id {
             Some(cs_id) => cs_id,
@@ -1366,9 +1265,9 @@ impl RepoContext {
             // Scratch bookmarks must be queried directly from the blobrepo as
             // they are not stored in the cache.  To maintain ordering with
             // public bookmarks, query all the bookmarks we are interested in.
-            let blob_repo = self.blob_repo();
+            let repo = self.repo();
             let cache = self.warm_bookmarks_cache();
-            let bookmarks = blob_repo
+            let bookmarks = repo
                 .bookmarks()
                 .list(
                     self.ctx.clone(),
@@ -1428,7 +1327,7 @@ impl RepoContext {
         // initialize visited
         let mut visited: HashSet<_> = changesets.iter().cloned().collect();
 
-        let phases = self.blob_repo().phases();
+        let phases = self.repo().phases();
 
         // get phases
         let public_phases = phases
@@ -1486,12 +1385,18 @@ impl RepoContext {
     }
 
     /// Get a Tree by id.  Returns `None` if the tree doesn't exist.
-    pub async fn tree(&self, tree_id: TreeId) -> Result<Option<TreeContext>, MononokeError> {
+    pub async fn tree(&self, tree_id: TreeId) -> Result<Option<TreeContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
         TreeContext::new_check_exists(self.clone(), tree_id).await
     }
 
     /// Get a File by id.  Returns `None` if the file doesn't exist.
-    pub async fn file(&self, file_id: FileId) -> Result<Option<FileContext>, MononokeError> {
+    pub async fn file(&self, file_id: FileId) -> Result<Option<FileContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
         FileContext::new_check_exists(self.clone(), FetchKey::Canonical(file_id)).await
     }
 
@@ -1499,7 +1404,10 @@ impl RepoContext {
     pub async fn file_by_content_sha1(
         &self,
         hash: Sha1,
-    ) -> Result<Option<FileContext>, MononokeError> {
+    ) -> Result<Option<FileContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
         FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::Sha1(hash))).await
     }
 
@@ -1507,7 +1415,10 @@ impl RepoContext {
     pub async fn file_by_content_sha256(
         &self,
         hash: Sha256,
-    ) -> Result<Option<FileContext>, MononokeError> {
+    ) -> Result<Option<FileContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
         FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::Sha256(hash))).await
     }
 
@@ -1515,7 +1426,10 @@ impl RepoContext {
     pub async fn file_by_content_gitsha1(
         &self,
         hash: GitSha1,
-    ) -> Result<Option<FileContext>, MononokeError> {
+    ) -> Result<Option<FileContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
         FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::GitSha1(hash))).await
     }
 
@@ -1539,12 +1453,12 @@ impl RepoContext {
     pub async fn file_by_content_seeded_blake3(
         &self,
         hash: Blake3,
-    ) -> Result<Option<FileContext>, MononokeError> {
+    ) -> Result<Option<FileContext<R>>, MononokeError> {
         FileContext::new_check_exists(self.clone(), FetchKey::Aliased(Alias::SeededBlake3(hash)))
             .await
     }
 
-    fn target_repo(&self) -> Target<Repo> {
+    fn target_repo(&self) -> Target<R> {
         Target(self.repo().clone())
     }
 
@@ -1552,7 +1466,7 @@ impl RepoContext {
         &self,
         maybe_args: Option<CandidateSelectionHintArgs>,
         other_repo_context: &Self,
-    ) -> Result<CandidateSelectionHint<Repo>, MononokeError> {
+    ) -> Result<CandidateSelectionHint<R>, MononokeError> {
         let args = match maybe_args {
             None => return Ok(CandidateSelectionHint::Only),
             Some(args) => args,
@@ -1634,26 +1548,18 @@ impl RepoContext {
         maybe_candidate_selection_hint_args: Option<CandidateSelectionHintArgs>,
         sync_behaviour: XRepoLookupSyncBehaviour,
         exact: XRepoLookupExactBehaviour,
-    ) -> Result<Option<ChangesetContext>, MononokeError> {
-        let common_config = self
-            .live_commit_sync_config()
-            .get_common_config(self.blob_repo().repo_identity().id())
-            .map_err(|e| {
-                MononokeError::InvalidRequest(format!(
-                    "Commits from {} are not configured to be remapped to another repo: {}",
-                    self.repo.name, e
-                ))
-            })?;
-
-        let candidate_selection_hint: CandidateSelectionHint<Repo> = self
+    ) -> Result<Option<ChangesetContext<R>>, MononokeError>
+    where
+        R: Clone,
+    {
+        let candidate_selection_hint: CandidateSelectionHint<R> = self
             .build_candidate_selection_hint(maybe_candidate_selection_hint_args, other)
             .await?;
 
         let (_small_repo, _large_repo) =
-            get_small_and_large_repos(self.repo.as_ref(), other.repo.as_ref(), &common_config)?;
+            get_small_and_large_repos(self.repo.as_ref(), other.repo.as_ref())?;
 
-        let live_commit_sync_config = self.repo.live_commit_sync_config();
-        let repo_provider: RepoProvider<'a, Repo> = Arc::new(move |repo_id| {
+        let repo_provider: RepoProvider<'a, R> = Arc::new(move |repo_id| {
             Box::pin({
                 let repos = self.repos.clone();
 
@@ -1666,34 +1572,24 @@ impl RepoContext {
             })
         });
 
-        let submodule_deps = get_all_submodule_deps(
+        let submodule_deps = get_all_submodule_deps_from_repo_pair(
             &self.ctx,
             self.repo.clone(),
             other.repo.clone(),
             repo_provider,
-            live_commit_sync_config,
         )
         .await?;
 
-        let commit_sync_repos = CommitSyncRepos::new(
-            self.repo().clone(),
-            other.repo().clone(),
-            submodule_deps,
-            &common_config,
-        )?;
+        let commit_sync_repos =
+            CommitSyncRepos::new(self.repo().clone(), other.repo().clone(), submodule_deps)?;
 
         let specifier = specifier.into();
         let changeset = self.resolve_specifier(specifier).await?.ok_or_else(|| {
             MononokeError::InvalidRequest(format!("unknown commit specifier {}", specifier))
         })?;
 
-        let commit_syncer = CommitSyncer::new(
-            &self.ctx,
-            self.synced_commit_mapping().clone(),
-            commit_sync_repos,
-            self.live_commit_sync_config(),
-            self.repo.x_repo_sync_lease().clone(),
-        );
+        let commit_syncer =
+            CommitSyncer::new(&self.ctx, commit_sync_repos, self.live_commit_sync_config());
 
         if sync_behaviour == XRepoLookupSyncBehaviour::SyncIfAbsent {
             let _ = commit_syncer
@@ -1849,14 +1745,14 @@ impl RepoContext {
     }
 }
 
-impl PartialEq for RepoContext {
+impl<R: MononokeRepo> PartialEq for RepoContext<R> {
     fn eq(&self, other: &Self) -> bool {
         self.repoid() == other.repoid()
     }
 }
-impl Eq for RepoContext {}
+impl<R: MononokeRepo> Eq for RepoContext<R> {}
 
-impl Hash for RepoContext {
+impl<R: MononokeRepo> Hash for RepoContext<R> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.repoid().hash(state);
     }
@@ -1866,16 +1762,18 @@ impl Hash for RepoContext {
 mod tests {
     use std::str::FromStr;
 
+    use fbinit::FacebookInit;
     use fixtures::Linear;
     use fixtures::MergeEven;
     use fixtures::TestRepoFixture;
+    use mononoke_macros::mononoke;
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_try_find_child(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: Repo = Linear::get_custom_test_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
 
         let ancestor = ChangesetId::from_str(
             "c9f9a2a39195a583d523a4e5f6973443caeb0c66a315d5bf7db1b5775c725310",
@@ -1884,7 +1782,7 @@ mod tests {
             "7785606eb1f26ff5722c831de402350cf97052dc44bc175da6ac0d715a3dbbf6",
         )?;
 
-        let maybe_child = repo.try_find_child(&ctx, ancestor, descendant, 100).await?;
+        let maybe_child = try_find_child(&ctx, &repo, ancestor, descendant, 100).await?;
         let child = maybe_child.ok_or_else(|| anyhow!("didn't find child"))?;
         assert_eq!(
             child,
@@ -1893,16 +1791,16 @@ mod tests {
             )?
         );
 
-        let maybe_child = repo.try_find_child(&ctx, ancestor, descendant, 1).await?;
+        let maybe_child = try_find_child(&ctx, &repo, ancestor, descendant, 1).await?;
         assert!(maybe_child.is_none());
 
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_try_find_child_merge(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let repo: Repo = MergeEven::get_custom_test_repo(fb).await;
+        let repo: Repo = MergeEven::get_repo(fb).await;
 
         let ancestor = ChangesetId::from_str(
             "35fb4e0fb3747b7ca4d18281d059be0860d12407dc5dce5e02fb99d1f6a79d2a",
@@ -1911,7 +1809,7 @@ mod tests {
             "567a25d453cafaef6550de955c52b91bf9295faf38d67b6421d5d2e532e5adef",
         )?;
 
-        let maybe_child = repo.try_find_child(&ctx, ancestor, descendant, 100).await?;
+        let maybe_child = try_find_child(&ctx, &repo, ancestor, descendant, 100).await?;
         let child = maybe_child.ok_or_else(|| anyhow!("didn't find child"))?;
         assert_eq!(child, descendant);
         Ok(())

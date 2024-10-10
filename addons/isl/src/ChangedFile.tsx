@@ -38,13 +38,13 @@ import {usePromise} from './usePromise';
 import {Button} from 'isl-components/Button';
 import {Checkbox} from 'isl-components/Checkbox';
 import {Icon} from 'isl-components/Icon';
+import {isMac} from 'isl-components/OperatingSystem';
 import {Subtle} from 'isl-components/Subtle';
 import {Tooltip} from 'isl-components/Tooltip';
 import {useAtomValue} from 'jotai';
 import React from 'react';
 import {labelForComparison, revsetForComparison, ComparisonType} from 'shared/Comparison';
 import {useContextMenu} from 'shared/ContextMenu';
-import {isMac} from 'shared/OperatingSystem';
 import {basename, notEmpty} from 'shared/utils';
 
 /**
@@ -501,27 +501,15 @@ function PartialSelectionAction({file}: {file: UIChangedFile}) {
       component={() => (
         <div style={{maxWidth: '300px'}}>
           <div>
-            <T
-              replace={{
-                $beta: (
-                  <span
-                    style={{
-                      color: 'var(--scm-removed-foreground)',
-                      marginLeft: 'var(--halfpad)',
-                      fontSize: '80%',
-                    }}>
-                    (Beta)
-                  </span>
-                ),
-              }}>
-              Toggle chunk selection $beta
-            </T>
+            <T>Toggle chunk selection</T>
           </div>
           <div>
-            <T>
-              Shows changed files in your commit and lets you select individual chunks or lines to
-              include.
-            </T>
+            <Subtle>
+              <T>
+                Shows changed files in your commit and lets you select individual chunks or lines to
+                include.
+              </T>
+            </Subtle>
           </div>
         </div>
       )}>

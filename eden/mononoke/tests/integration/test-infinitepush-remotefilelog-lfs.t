@@ -11,8 +11,8 @@ Setup configuration
   $ cd "$TESTTMP"
 
 Setup repo
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ touch a && hg addremove && hg ci -q -ma
   adding a
   $ hg log -T '{short(node)}\n'
@@ -20,7 +20,7 @@ Setup repo
   $ hg bookmark master_bookmark -r tip
 
   $ cd "$TESTTMP"
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start Mononoke
   $ start_and_wait_for_mononoke_server
@@ -39,13 +39,13 @@ Setup common client configuration for these tests
 
 setup repo-push and repo-pull
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
   $ cd "${TESTTMP}/repo-push"
   $ setup_hg_modern_lfs "$lfs_uri" 10B
   $ setconfig "remotefilelog.cachepath=$TESTTMP/cachepath-push"
 
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
   $ cd "${TESTTMP}/repo-pull"
   $ setup_hg_modern_lfs "$lfs_uri" 10B
   $ setconfig "remotefilelog.cachepath=$TESTTMP/cachepath-pull"
@@ -59,7 +59,7 @@ Do infinitepush (aka commit cloud) push
   $ yes A 2>/dev/null | head -c 200 > large
   $ hg addremove -q
   $ hg ci -m new
-  $ sl cloud backup
+  $ hg cloud backup
   commitcloud: head '68394cf51f7e' hasn't been uploaded yet
   edenapi: queue 1 commit for upload
   edenapi: queue 2 files for upload
@@ -70,8 +70,8 @@ Do infinitepush (aka commit cloud) push
 
 Try to pull it
   $ cd "${TESTTMP}/repo-pull"
-  $ hgmn pull -r 68394cf51f7e96952fe832a3c05d17a9b49e8b4b
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 68394cf51f7e96952fe832a3c05d17a9b49e8b4b
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests

@@ -27,11 +27,12 @@
   $ . "${TEST_FIXTURES}/library.sh"
   $ . "${TEST_FIXTURES}/library-xrepo-sync-with-git-submodules.sh"
 
-  $ quiet sl config -g rebase.reproducible-commits=true
+  $ quiet hg config -g rebase.reproducible-commits=true
 
 
 Setup configuration
   $ run_common_xrepo_sync_with_gitsubmodules_setup
+  L_A=b006a2b1425af8612bc80ff4aa9fa8a1a2c44936ad167dd21cb9af2a9a0248c4
 
   $ testtool_drawdag -R "$LARGE_REPO_NAME" --no-default-files <<EOF
   > A
@@ -103,7 +104,7 @@ Create small repo commits
 
 -- Prepare large repo
   $ cd "$TESTTMP/$LARGE_REPO_NAME"
-  $ sl pull -q && hg co -q master
+  $ hg pull -q && hg co -q master
   $ enable commitcloud infinitepush # to push commits to server
 
 -- Create a large repo commit
@@ -112,7 +113,7 @@ Create small repo commits
 
 -- Create a commit in small repo folder to be backsynced
   $ echo "abc" > smallrepofolder1/new_file.txt
-  $ sl commit -Aq -m "change small repo from large repo" --date "1 1"
+  $ hg commit -Aq -m "change small repo from large repo" --date "1 1"
   $ ORIGINAL_HG_COMMIT=$(hg whereami)
 
 -- Go back and create another large repo commit
@@ -120,7 +121,7 @@ Create small repo commits
   $ echo "change file" > large_repo_file.txt
   $ hg commit -Aq -m "change large repo file AGAIN" 
   $ REBASE_TARGET=$(hg whereami)
-  $ sl push -q --to master
+  $ hg push -q --to master
 
   $ hg co -q $ORIGINAL_HG_COMMIT
 
@@ -172,7 +173,7 @@ Create small repo commits
       1 files changed, 1 insertions(+), 0 deletions(-)
   
 -- Backup all commits to commit cloud
-  $ sl cloud backup -q
+  $ hg cloud backup -q
 
   $ ORIG_BONSAI_HASH=$(mononoke_newadmin convert -R $LARGE_REPO_NAME -f hg -t bonsai $ORIGINAL_HG_COMMIT)
   $ echo "ORIG_BONSAI_HASH: $ORIG_BONSAI_HASH"
@@ -192,19 +193,19 @@ Create small repo commits
 
 -- Sync both commits to small repo
 
-  $ SMALL_REPO_COMMIT_A=$(sl debugapi --sort  -e committranslateids \
+  $ SMALL_REPO_COMMIT_A=$(hg debugapi --sort  -e committranslateids \
   >   -i "[{'Hg': '$ORIGINAL_HG_COMMIT'}]" -i "'Bonsai'" -i None -i "'$SUBMODULE_REPO_NAME'" | \
   >   rg '.+"translated": \{"Bonsai": bin\("(\w+)"\)\}\}\]' -or '$1')
 
   $ echo "SMALL_REPO_COMMIT_A: $SMALL_REPO_COMMIT_A"
   SMALL_REPO_COMMIT_A: 86097c1de278a997c434c78f0227e0be9f307ac3c66d39a7a167435d1a4e292c
 
-  $ SMALL_REPO_COMMIT_B=$(sl debugapi --sort -e committranslateids \
+  $ SMALL_REPO_COMMIT_B=$(hg debugapi --sort -e committranslateids \
   >   -i "[{'Hg': '$REBASED_HG_COMMIT'}]" -i "'Bonsai'" -i None -i "'$SUBMODULE_REPO_NAME'" | \
   >   rg '.+"translated": \{"Bonsai": bin\("(\w+)"\)\}\}\]' -or '$1')
 
   $ echo "SMALL_REPO_COMMIT_B: $SMALL_REPO_COMMIT_B"
-  SMALL_REPO_COMMIT_B: d45d7c444a33991153afbe621f418b679d391fd1c8108ec5f701b1c6d5e96017
+  SMALL_REPO_COMMIT_B: 86097c1de278a997c434c78f0227e0be9f307ac3c66d39a7a167435d1a4e292c
 
 
 -- Now fetch both changeset blobs
@@ -223,8 +224,6 @@ Create small repo commits
   $ mononoke_newadmin derived-data -R $SUBMODULE_REPO_NAME \
   >   derive -T git_commits -i "$SMALL_REPO_COMMIT_A"
 
--- Derivation of commit B will fail due to conflicting mapping
+-- Derivation of commit B will succeed because hg extra is stripped
   $ mononoke_newadmin derived-data -R $SUBMODULE_REPO_NAME \
   >   derive -T git_commits -i "$SMALL_REPO_COMMIT_B"
-  Error: Conflicting mapping Some(BonsaiGitMappingEntry { git_sha1: GitSha1(efaf8946df1d57e79319a1f3cad616774592a585), bcs_id: ChangesetId(Blake2(86097c1de278a997c434c78f0227e0be9f307ac3c66d39a7a167435d1a4e292c)) }) detected while inserting git mappings (tried inserting: [BonsaiGitMappingEntry { git_sha1: GitSha1(efaf8946df1d57e79319a1f3cad616774592a585), bcs_id: ChangesetId(Blake2(d45d7c444a33991153afbe621f418b679d391fd1c8108ec5f701b1c6d5e96017)) }])
-  [1]

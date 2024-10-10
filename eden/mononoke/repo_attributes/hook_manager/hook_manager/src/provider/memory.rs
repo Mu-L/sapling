@@ -13,6 +13,7 @@ use bookmarks_types::BookmarkKey;
 use bytes::Bytes;
 use changeset_info::ChangesetInfo;
 use context::CoreContext;
+use mononoke_types::hash::GitSha1;
 use mononoke_types::ChangesetId;
 use mononoke_types::ContentId;
 use mononoke_types::ContentMetadataV2;
@@ -23,7 +24,7 @@ use quickcheck::Gen;
 
 use crate::errors::HookStateProviderError;
 use crate::provider::BookmarkState;
-use crate::provider::FileChange;
+use crate::provider::FileChangeType;
 use crate::provider::HookStateProvider;
 use crate::provider::PathContent;
 use crate::provider::TagType;
@@ -106,12 +107,24 @@ impl HookStateProvider for InMemoryHookStateProvider {
         Err(anyhow!("`find_content` is not implemented for `InMemoryHookStateProvider`").into())
     }
 
+    async fn find_content_by_changeset_id<'a>(
+        &'a self,
+        _ctx: &'a CoreContext,
+        _changeset_id: ChangesetId,
+        _paths: Vec<NonRootMPath>,
+    ) -> Result<HashMap<NonRootMPath, PathContent>, HookStateProviderError> {
+        Err(anyhow!(
+            "`find_content_by_changeset_id` is not implemented for `InMemoryHookStateProvider`"
+        )
+        .into())
+    }
+
     async fn file_changes<'a>(
         &'a self,
         _ctx: &'a CoreContext,
         _new_cs_id: ChangesetId,
         _old_cs_id: ChangesetId,
-    ) -> Result<Vec<(NonRootMPath, FileChange)>, HookStateProviderError> {
+    ) -> Result<Vec<(NonRootMPath, FileChangeType)>, HookStateProviderError> {
         Err(anyhow!("`file_changes` is not implemented for `InMemoryHookStateProvider`").into())
     }
 
@@ -150,6 +163,14 @@ impl HookStateProvider for InMemoryHookStateProvider {
         _bookmark: &'b BookmarkKey,
     ) -> Result<TagType, HookStateProviderError> {
         Err(anyhow!("`get_tag_state` is not implemented for `InMemoryHookStateProvider`").into())
+    }
+
+    async fn get_git_commit<'a>(
+        &'a self,
+        _ctx: &'a CoreContext,
+        _bonsai_commit_id: ChangesetId,
+    ) -> Result<Option<GitSha1>, HookStateProviderError> {
+        Err(anyhow!("`get_git_commit` is not implemented for `InMemoryHookStateProvider`").into())
     }
 }
 

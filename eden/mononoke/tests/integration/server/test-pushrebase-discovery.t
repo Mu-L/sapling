@@ -15,7 +15,7 @@ actual pushrebase.
 
 setup configuration
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 INFINITEPUSH_ALLOW_WRITES=true setup_common_config
+  $ INFINITEPUSH_ALLOW_WRITES=true setup_common_config
   $ cd "$TESTTMP/mononoke-config"
 
   $ cat >> repos/repo/server.toml <<CONFIG
@@ -40,9 +40,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > C
   > |
@@ -57,26 +56,24 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Clone the repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo3 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
+  $ hg clone -q mono:repo repo3 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q "min(all())"
   $ echo 1 > 1 && hg addremove -q
   $ hg ci -m 'to push'
 
 Unsuccessful push creates a draft commit on the server
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev 812eca0823f9 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -92,23 +89,20 @@ Unsuccessful push creates a draft commit on the server
 In order to hit an edge case the master on the server needs to point to another commit.
 Let's make a push
   $ cd ../repo3
-  $ setup_hg_client
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
-  > [remotenames]
   > EOF
   $ hg up -q "min(all())"
   $ echo 2 > 2 && hg addremove -q
   $ hg ci -m 'to push2'
-  $ sl push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q
+  $ hg push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q
 
 Now let's push the same commit again but with a bypass. It should pushrebase,
 not move a bookmark
   $ cd ../repo2
-  $ sl push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q --config push.skip-cleanup-commits=true
-  $ hgmn up -q master_bookmark
+  $ hg push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q --config push.skip-cleanup-commits=true
+  $ hg up -q master_bookmark
   $ log
   @  to push [public;rev=5;a6205c464622] default/master_bookmark
   │
@@ -127,19 +121,19 @@ The same procedure, but with commit cloud commit
   $ hg up -q "min(all())"
   $ echo commitcloud > commitcloud && hg addremove -q
   $ hg ci -m commitcloud
-  $ sl cloud backup -q
+  $ hg cloud backup -q
 
 Move master again
   $ cd ../repo3
   $ hg up -q "min(all())"
   $ echo 3 > 3 && hg addremove -q
   $ hg ci -m 'to push3'
-  $ sl push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q
+  $ hg push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q
 
 Now let's push commit cloud commit. Again, it should do pushrebase
   $ cd ../repo2
-  $ sl push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q --config push.skip-cleanup-commits=true
-  $ hgmn up -q master_bookmark
+  $ hg push -r . --to master_bookmark --pushvar BYPASS_REVIEW=true -q --config push.skip-cleanup-commits=true
+  $ hg up -q master_bookmark
   $ log
   @  commitcloud [public;rev=8;3308f3bd8048] default/master_bookmark
   │

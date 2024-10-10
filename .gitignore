@@ -11,3 +11,7 @@
 # Rust libraries and extensions
 Cargo.lock
 target/
+
+# Getdeps
+/eden/mononoke/tests/integration/getdeps_build.log
+/build/Testing/Temporary/LastTest.log

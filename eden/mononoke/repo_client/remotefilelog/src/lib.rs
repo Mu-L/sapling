@@ -9,13 +9,15 @@ use std::collections::HashSet;
 use std::fmt;
 
 use anyhow::Result;
-use blobrepo::AsBlobRepo;
 use blobrepo_hg::file_history::get_file_history_maybe_incomplete;
 use blobstore::Loadable;
+use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bytes::Bytes;
 use bytes::BytesMut;
 use cloned::cloned;
+use commit_graph::CommitGraphRef;
 use context::CoreContext;
+use filenodes::FilenodesRef;
 use filestore::FetchKey;
 use futures::future;
 use futures::future::BoxFuture;
@@ -41,6 +43,7 @@ use redactedblobstore::has_redaction_root_cause;
 use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreArc;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_identity::RepoIdentityRef;
 use revisionstore_types::Metadata;
 use thiserror::Error;
 
@@ -235,7 +238,15 @@ pub async fn create_raw_filenode_blob(
 /// times
 pub fn get_unordered_file_history_for_multiple_nodes(
     ctx: &CoreContext,
-    repo: &(impl RepoLike + AsBlobRepo),
+    repo: &(
+         impl RepoLike
+         + RepoIdentityRef
+         + FilenodesRef
+         + CommitGraphRef
+         + BonsaiHgMappingRef
+         + Clone
+         + 'static
+     ),
     filenodes: HashSet<HgFileNodeId>,
     path: &NonRootMPath,
     allow_short_getpack_history: bool,
@@ -247,14 +258,8 @@ pub fn get_unordered_file_history_for_multiple_nodes(
         None
     };
     select_all(filenodes.into_iter().map(|filenode| {
-        get_file_history_maybe_incomplete(
-            ctx.clone(),
-            repo.as_blob_repo().clone(),
-            filenode,
-            path.clone(),
-            limit,
-        )
-        .boxed()
+        get_file_history_maybe_incomplete(ctx.clone(), repo.clone(), filenode, path.clone(), limit)
+            .boxed()
     }))
     .try_filter({
         let mut used_filenodes = HashSet::new();
@@ -376,6 +381,7 @@ mod test {
     use manifest::Manifest;
     use mercurial_derivation::DeriveHgChangeset;
     use metaconfig_types::FilestoreParams;
+    use mononoke_macros::mononoke;
     use mononoke_types::MPathElement;
     use test_repo_factory::TestRepoFactory;
     use tests_utils::BasicTestRepo;
@@ -409,7 +415,12 @@ mod test {
             .await?;
 
         let entry = hg_manifest
-            .lookup(&MPathElement::new(filename.as_bytes().to_vec())?)
+            .lookup(
+                ctx,
+                repo.repo_blobstore(),
+                &MPathElement::new(filename.as_bytes().to_vec())?,
+            )
+            .await?
             .ok_or_else(|| Error::msg("file is missing"))?;
 
         let filenode = match entry {
@@ -427,7 +438,7 @@ mod test {
         Ok(kind)
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_prepare_blob(fb: FacebookInit) -> Result<()> {
         let repo: BasicTestRepo = test_repo_factory::build_empty(fb).await?;
         let blob = roundtrip_blob(fb, &repo, "foo", Some(3)).await?;
@@ -435,7 +446,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_prepare_blob_chunked(fb: FacebookInit) -> Result<()> {
         let repo: BasicTestRepo = TestRepoFactory::new(fb)?
             .with_config_override(|config| {
@@ -452,7 +463,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_prepare_blob_lfs(fb: FacebookInit) -> Result<()> {
         let repo: BasicTestRepo = test_repo_factory::build_empty(fb).await?;
         let blob = roundtrip_blob(fb, &repo, "foo", Some(2)).await?;

@@ -1,8 +1,7 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
 load("@fbcode_macros//build_defs/lib:rust_oss.bzl", "rust_oss")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "newadmin",
@@ -33,6 +32,7 @@ rust_binary(
     test_deps = [
         "fbsource//third-party/rust:maplit",
         "//common/rust/shed/fbinit:fbinit-tokio",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/repo_factory:test_repo_factory",
         "//eden/mononoke/tests/utils:tests_utils",
     ],
@@ -46,6 +46,7 @@ rust_binary(
         "fbsource//third-party/rust:futures",
         "fbsource//third-party/rust:gix-hash",
         "fbsource//third-party/rust:gix-object",
+        "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:prettytable-rs",
         "fbsource//third-party/rust:regex",
         "fbsource//third-party/rust:serde_json",
@@ -58,6 +59,8 @@ rust_binary(
         "//common/rust/shed/facet:facet",
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/futures_stats:futures_stats",
+        "//eden/mononoke/async_requests:async_requests",
+        "//eden/mononoke/async_requests:client",
         "//eden/mononoke/blobrepo:repo_blobstore",
         "//eden/mononoke/blobstore:blobstore",
         "//eden/mononoke/blobstore:cacheblob",
@@ -73,12 +76,17 @@ rust_binary(
         "//eden/mononoke/cas_client:cas_client",
         "//eden/mononoke/cas_client:changesets_uploader",
         "//eden/mononoke/changesets/changesets_creation:changesets_creation",
+        "//eden/mononoke/cmdlib:cmdlib_cross_repo",
         "//eden/mononoke/cmdlib/commit_id:commit_id",
         "//eden/mononoke/cmdlib/displaying:cmdlib_displaying",
         "//eden/mononoke/cmdlib/displaying/graph:print_graph",
         "//eden/mononoke/cmdlib/mononoke_app:mononoke_app",
         "//eden/mononoke/cmdlib/scrubbing:cmdlib_scrubbing",
+        "//eden/mononoke/commit_rewriting/backsyncer:backsyncer",
+        "//eden/mononoke/commit_rewriting/cross_repo_sync:cross_repo_sync",
+        "//eden/mononoke/commit_rewriting/synced_commit_mapping:synced_commit_mapping",
         "//eden/mononoke/derived_data:bulk_derivation",
+        "//eden/mononoke/derived_data:case_conflict_skeleton_manifest",
         "//eden/mononoke/derived_data:changeset_info",
         "//eden/mononoke/derived_data:deleted_manifest",
         "//eden/mononoke/derived_data:derived_data_manager",
@@ -94,8 +102,6 @@ rust_binary(
         "//eden/mononoke/git/protocol:protocol",
         "//eden/mononoke/git_symbolic_refs:git_symbolic_refs",
         "//eden/mononoke/manifest:manifest",
-        "//eden/mononoke/megarepo_api:async_requests",
-        "//eden/mononoke/megarepo_api:megarepo_api",
         "//eden/mononoke/megarepo_api:megarepo_error",
         "//eden/mononoke/megarepo_api:pushredirect",
         "//eden/mononoke/mercurial:mercurial_types",
@@ -104,6 +110,7 @@ rust_binary(
         "//eden/mononoke/mononoke_types:mononoke_types",
         "//eden/mononoke/mutable_counters:mutable_counters",
         "//eden/mononoke/mutable_renames:mutable_renames",
+        "//eden/mononoke/phases:phases",
         "//eden/mononoke/pushrebase:pushrebase",
         "//eden/mononoke/pushrebase_mutation_mapping:pushrebase_mutation_mapping",
         "//eden/mononoke/repo_attributes/commit_graph/commit_graph:commit_graph",
@@ -116,17 +123,21 @@ rust_binary(
         "//eden/mononoke/repo_attributes/repo_derived_data:repo_derived_data",
         "//eden/mononoke/repo_attributes/repo_identity:repo_identity",
         "//eden/mononoke/repo_attributes/repo_lock:repo_lock",
+        "//eden/mononoke/repo_attributes/sql_query_config:sql_query_config",
         "//eden/mononoke/repo_factory:repo_factory",
         "//eden/mononoke/scs/if:source_control-rust",
         "//eden/mononoke/server/context:context",
         "//thrift/lib/rust:fbthrift",
     ] + ([] if rust_oss.is_oss_build() else [
         "fbsource//third-party/rust:serde",
+        "//common/rust/mysql:mysql_client",
         "//eden/mononoke/blobstore:blobstore_factory",
         "//eden/mononoke/blobstore:fileblob",
         "//eden/mononoke/blobstore:redactedblobstore",
         "//eden/mononoke/common/bounded_traversal:bounded_traversal",
-        "//eden/mononoke/phases:phases",
+        "//eden/mononoke/facebook/git_server/push_poller/lib/command:command",
+        "//eden/mononoke/facebook/git_server/push_poller/lib/storage:storage",
+        "//eden/mononoke/git_source_of_truth:git_source_of_truth",
         "//eden/mononoke/repo_attributes/bonsai_blob_mapping:bonsai_blob_mapping",
         "//eden/mononoke/repo_attributes/deletion_log:deletion_log",
     ]),

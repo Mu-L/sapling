@@ -10,6 +10,7 @@ cpp_unittest(
     srcs = ["CheckoutTest.cpp"],
     supports_static_listing = False,
     deps = [
+        "//eden/common/utils:fault_injector",
         "//eden/common/utils:file_utils",
         "//eden/common/utils:utils",
         "//eden/fs/config:config",
@@ -362,7 +363,6 @@ cpp_unittest(
 cpp_unittest(
     name = "remove",
     srcs = ["RemoveTest.cpp"],
-    link_execution_preference = "remote",
     supports_static_listing = False,
     deps = [
         "//eden/fs/inodes:inodes",
@@ -426,7 +426,7 @@ cpp_unittest(
     supports_static_listing = False,
     deps = [
         "//eden/common/utils:case_sensitivity",
-        "//eden/common/utils:utils",
+        "//eden/common/utils:fault_injector",
         "//eden/fs/fuse:fuse",
         "//eden/fs/inodes:inodes",
         "//eden/fs/model:model",
@@ -453,6 +453,7 @@ cpp_unittest(
     supports_static_listing = False,
     deps = [
         "//eden/common/utils:case_sensitivity",
+        "//eden/common/utils:fault_injector",
         "//eden/common/utils:utils",
         "//eden/fs/config:config",
         "//eden/fs/digest:blake3_hash",

@@ -53,6 +53,7 @@ use manifest::ManifestOrderedOps;
 use manifest::PathOrPrefix;
 use mercurial_types::Globalrev;
 use mononoke_types::path::MPath;
+use mononoke_types::skeleton_manifest_v2::SkeletonManifestV2;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::FileChange;
 pub use mononoke_types::Generation;
@@ -64,6 +65,7 @@ use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedDataArc;
 use repo_derived_data::RepoDerivedDataRef;
 use skeleton_manifest::RootSkeletonManifestId;
+use skeleton_manifest_v2::RootSkeletonManifestV2Id;
 use smallvec::SmallVec;
 use sorted_vector_map::SortedVectorMap;
 use unodes::RootUnodeManifestId;
@@ -78,6 +80,7 @@ use crate::repo::RepoContext;
 use crate::specifiers::ChangesetId;
 use crate::specifiers::GitSha1;
 use crate::specifiers::HgChangesetId;
+use crate::MononokeRepo;
 
 mod find_files;
 
@@ -116,14 +119,15 @@ impl PathMutableHistory {
 }
 
 #[derive(Clone)]
-pub struct ChangesetContext {
-    repo: RepoContext,
+pub struct ChangesetContext<R> {
+    repo_ctx: RepoContext<R>,
     id: ChangesetId,
     bonsai_changeset: LazyShared<Result<BonsaiChangeset, MononokeError>>,
     changeset_info: LazyShared<Result<ChangesetInfo, MononokeError>>,
     root_unode_manifest_id: LazyShared<Result<RootUnodeManifestId, MononokeError>>,
     root_fsnode_id: LazyShared<Result<RootFsnodeId, MononokeError>>,
     root_skeleton_manifest_id: LazyShared<Result<RootSkeletonManifestId, MononokeError>>,
+    root_skeleton_manifest_v2_id: LazyShared<Result<RootSkeletonManifestV2Id, MononokeError>>,
     root_deleted_manifest_v2_id: LazyShared<Result<RootDeletedManifestV2Id, MononokeError>>,
     root_bssm_v3_directory_id: LazyShared<Result<RootBssmV3DirectoryId, MononokeError>>,
     /// None if no mutable history, else map from supplied paths to data fetched
@@ -156,12 +160,12 @@ pub enum ChangesetDiffItem {
     FILES,
 }
 
-impl fmt::Debug for ChangesetContext {
+impl<R: MononokeRepo> fmt::Debug for ChangesetContext<R> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "ChangesetContext(repo={:?} id={:?})",
-            self.repo().name(),
+            self.repo_ctx().name(),
             self.id()
         )
     }
@@ -172,25 +176,27 @@ fn to_vec1<X>(maybe_vec: Option<Vec<X>>) -> Option<Vec1<X>> {
 }
 
 /// A context object representing a query to a particular commit in a repo.
-impl ChangesetContext {
+impl<R: MononokeRepo> ChangesetContext<R> {
     /// Construct a new `MononokeChangeset`.  The changeset must exist
     /// in the repo.
-    pub(crate) fn new(repo: RepoContext, id: ChangesetId) -> Self {
+    pub(crate) fn new(repo_ctx: RepoContext<R>, id: ChangesetId) -> Self {
         let bonsai_changeset = LazyShared::new_empty();
         let changeset_info = LazyShared::new_empty();
         let root_unode_manifest_id = LazyShared::new_empty();
         let root_fsnode_id = LazyShared::new_empty();
         let root_skeleton_manifest_id = LazyShared::new_empty();
+        let root_skeleton_manifest_v2_id = LazyShared::new_empty();
         let root_deleted_manifest_v2_id = LazyShared::new_empty();
         let root_bssm_v3_directory_id = LazyShared::new_empty();
         Self {
-            repo,
+            repo_ctx,
             id,
             changeset_info,
             bonsai_changeset,
             root_unode_manifest_id,
             root_fsnode_id,
             root_skeleton_manifest_id,
+            root_skeleton_manifest_v2_id,
             root_deleted_manifest_v2_id,
             root_bssm_v3_directory_id,
             mutable_history: None,
@@ -198,8 +204,8 @@ impl ChangesetContext {
     }
 
     /// The context for this query.
-    pub(crate) fn ctx(&self) -> &CoreContext {
-        self.repo.ctx()
+    pub fn ctx(&self) -> &CoreContext {
+        self.repo_ctx.ctx()
     }
 
     /// Adds copy information from mutable renames as an override to replace
@@ -208,8 +214,8 @@ impl ChangesetContext {
         &mut self,
         paths: impl Iterator<Item = MPath>,
     ) -> Result<(), MononokeError> {
-        let mutable_renames = &self.repo.mutable_renames();
-        let ctx = self.repo.ctx();
+        let mutable_renames = &self.repo_ctx.mutable_renames();
+        let ctx = self.ctx();
         let cs_id = self.id;
 
         let copy_info = stream::iter(paths.map(move |path| async move {
@@ -233,8 +239,8 @@ impl ChangesetContext {
     }
 
     /// The `RepoContext` for this query.
-    pub fn repo(&self) -> &RepoContext {
-        &self.repo
+    pub fn repo_ctx(&self) -> &RepoContext<R> {
+        &self.repo_ctx
     }
 
     /// The canonical bonsai changeset ID for the changeset.
@@ -243,16 +249,16 @@ impl ChangesetContext {
     }
 
     /// Deconstruct the changeset into RepoContext and ChangesetId.
-    pub fn into_repo_and_id(self) -> (RepoContext, ChangesetId) {
-        let Self { repo, id, .. } = self;
-        (repo, id)
+    pub fn into_repo_ctx_and_id(self) -> (RepoContext<R>, ChangesetId) {
+        let Self { repo_ctx, id, .. } = self;
+        (repo_ctx, id)
     }
 
     /// The Mercurial ID for the changeset.
     pub async fn hg_id(&self) -> Result<Option<HgChangesetId>, MononokeError> {
         let mapping = self
+            .repo_ctx()
             .repo()
-            .blob_repo()
             .get_hg_bonsai_mapping(self.ctx().clone(), self.id)
             .await?;
         Ok(mapping.first().map(|(hg_cs_id, _)| *hg_cs_id))
@@ -261,8 +267,8 @@ impl ChangesetContext {
     /// The Globalrev for the changeset.
     pub async fn globalrev(&self) -> Result<Option<Globalrev>, MononokeError> {
         let mapping = self
+            .repo_ctx()
             .repo()
-            .blob_repo()
             .bonsai_globalrev_mapping()
             .get_globalrev_from_bonsai(self.ctx(), self.id)
             .await?;
@@ -272,8 +278,8 @@ impl ChangesetContext {
     /// The SVN revision number for the changeset.
     pub async fn svnrev(&self) -> Result<Option<Svnrev>, MononokeError> {
         let mapping = self
+            .repo_ctx()
             .repo()
-            .blob_repo()
             .bonsai_svnrev_mapping()
             .get_svnrev_from_bonsai(self.ctx(), self.id)
             .await?;
@@ -283,12 +289,12 @@ impl ChangesetContext {
     /// The git Sha1 for the changeset (if available).
     pub async fn git_sha1(&self) -> Result<Option<GitSha1>, MononokeError> {
         let maybe_git_sha1 = self
+            .repo_ctx()
             .repo()
-            .blob_repo()
             .bonsai_git_mapping()
             .get_git_sha1_from_bonsai(self.ctx(), self.id)
             .await?;
-        if maybe_git_sha1.is_none() && self.repo().derive_gitcommit_enabled() {
+        if maybe_git_sha1.is_none() && self.repo_ctx().derive_gitcommit_enabled() {
             let mapped_git_commit_id = self.derive::<MappedGitCommitId>().await?;
             return Ok(Some(*mapped_git_commit_id.oid()));
         }
@@ -301,7 +307,7 @@ impl ChangesetContext {
         &self,
     ) -> impl Future<Output = Result<Derivable, MononokeError>> + Send + 'static {
         let ctx = self.ctx().clone();
-        let repo_derived_data = self.repo.blob_repo().repo_derived_data_arc();
+        let repo_derived_data = self.repo_ctx.repo().repo_derived_data_arc();
         let id = self.id;
         async move {
             repo_derived_data
@@ -341,6 +347,14 @@ impl ChangesetContext {
             .await
     }
 
+    pub(crate) async fn root_skeleton_manifest_v2_id(
+        &self,
+    ) -> Result<RootSkeletonManifestV2Id, MononokeError> {
+        self.root_skeleton_manifest_v2_id
+            .get_or_init(|| self.derive::<RootSkeletonManifestV2Id>())
+            .await
+    }
+
     pub(crate) async fn root_deleted_manifest_v2_id(
         &self,
     ) -> Result<RootDeletedManifestV2Id, MononokeError> {
@@ -350,7 +364,7 @@ impl ChangesetContext {
     }
 
     /// Query the root directory in the repository at this changeset revision.
-    pub async fn root(&self) -> Result<ChangesetPathContentContext, MononokeError> {
+    pub async fn root(&self) -> Result<ChangesetPathContentContext<R>, MononokeError> {
         ChangesetPathContentContext::new(self.clone(), None).await
     }
 
@@ -362,7 +376,7 @@ impl ChangesetContext {
     pub async fn path_with_content<P>(
         &self,
         path: P,
-    ) -> Result<ChangesetPathContentContext, MononokeError>
+    ) -> Result<ChangesetPathContentContext<R>, MononokeError>
     where
         P: TryInto<MPath>,
         P::Error: Display,
@@ -383,7 +397,7 @@ impl ChangesetContext {
     pub async fn path_with_history<P>(
         &self,
         path: P,
-    ) -> Result<ChangesetPathHistoryContext, MononokeError>
+    ) -> Result<ChangesetPathHistoryContext<R>, MononokeError>
     where
         P: TryInto<MPath>,
         P::Error: Display,
@@ -404,7 +418,7 @@ impl ChangesetContext {
     ///
     /// If you need to query the content or history of a path, use
     /// `path_with_content` or `path_with_history` instead.
-    pub async fn path<P>(&self, path: P) -> Result<ChangesetPathContext, MononokeError>
+    pub async fn path<P>(&self, path: P) -> Result<ChangesetPathContext<R>, MononokeError>
     where
         P: TryInto<MPath>,
         P::Error: Display,
@@ -424,15 +438,17 @@ impl ChangesetContext {
     pub async fn paths_with_history(
         &self,
         paths: impl Iterator<Item = MPath>,
-    ) -> Result<impl Stream<Item = Result<ChangesetPathHistoryContext, MononokeError>>, MononokeError>
-    {
+    ) -> Result<
+        impl Stream<Item = Result<ChangesetPathHistoryContext<R>, MononokeError>>,
+        MononokeError,
+    > {
         Ok(self
             .root_unode_manifest_id()
             .await?
             .manifest_unode_id()
             .find_entries(
                 self.ctx().clone(),
-                self.repo().blob_repo().repo_blobstore().clone(),
+                self.repo_ctx().repo().repo_blobstore().clone(),
                 paths,
             )
             .map_err(MononokeError::from)
@@ -455,15 +471,17 @@ impl ChangesetContext {
     pub async fn paths_with_content(
         &self,
         paths: impl Iterator<Item = MPath>,
-    ) -> Result<impl Stream<Item = Result<ChangesetPathContentContext, MononokeError>>, MononokeError>
-    {
+    ) -> Result<
+        impl Stream<Item = Result<ChangesetPathContentContext<R>, MononokeError>>,
+        MononokeError,
+    > {
         Ok(self
             .root_fsnode_id()
             .await?
             .fsnode_id()
             .find_entries(
                 self.ctx().clone(),
-                self.repo().blob_repo().repo_blobstore().clone(),
+                self.repo_ctx().repo().repo_blobstore().clone(),
                 paths,
             )
             .map_err(MononokeError::from)
@@ -490,36 +508,67 @@ impl ChangesetContext {
     pub async fn paths(
         &self,
         paths: impl Iterator<Item = MPath>,
-    ) -> Result<impl Stream<Item = Result<ChangesetPathContext, MononokeError>>, MononokeError>
+    ) -> Result<impl Stream<Item = Result<ChangesetPathContext<R>, MononokeError>>, MononokeError>
     {
-        Ok(self
-            .root_skeleton_manifest_id()
-            .await?
-            .skeleton_manifest_id()
-            .find_entries(
-                self.ctx().clone(),
-                self.repo().blob_repo().repo_blobstore().clone(),
-                paths,
-            )
-            .map_err(MononokeError::from)
-            .and_then({
-                let changeset = self.clone();
-                move |(mpath, entry)| {
-                    ChangesetPathContext::new_with_skeleton_manifest_entry(
-                        changeset.clone(),
-                        mpath,
-                        entry,
-                    )
-                }
-            }))
+        if justknobs::eval(
+            "scm/mononoke:changeset_path_context_use_skeleton_manifest_v2",
+            None,
+            Some(self.repo_ctx().name()),
+        )? {
+            Ok(self
+                .root_skeleton_manifest_v2_id()
+                .await?
+                .into_inner_id()
+                .load(self.ctx(), self.repo_ctx().repo().repo_blobstore())
+                .await?
+                .find_entries(
+                    self.ctx().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
+                    paths,
+                )
+                .map_err(MononokeError::from)
+                .and_then({
+                    let changeset = self.clone();
+                    move |(mpath, entry)| {
+                        ChangesetPathContext::new_with_entry(
+                            changeset.clone(),
+                            mpath,
+                            entry.map_tree(|_| ()),
+                        )
+                    }
+                })
+                .left_stream())
+        } else {
+            Ok(self
+                .root_skeleton_manifest_id()
+                .await?
+                .skeleton_manifest_id()
+                .find_entries(
+                    self.ctx().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
+                    paths,
+                )
+                .map_err(MononokeError::from)
+                .and_then({
+                    let changeset = self.clone();
+                    move |(mpath, entry)| {
+                        ChangesetPathContext::new_with_entry(
+                            changeset.clone(),
+                            mpath,
+                            entry.map_tree(|_| ()),
+                        )
+                    }
+                })
+                .right_stream())
+        }
     }
 
     fn deleted_paths_impl<Root: RootDeletedManifestIdCommon>(
         &self,
         root: Root,
         paths: impl Iterator<Item = MPath> + 'static,
-    ) -> impl Stream<Item = Result<ChangesetPathHistoryContext, MononokeError>> + '_ {
-        root.find_entries(self.ctx(), self.repo().blob_repo().repo_blobstore(), paths)
+    ) -> impl Stream<Item = Result<ChangesetPathHistoryContext<R>, MononokeError>> + '_ {
+        root.find_entries(self.ctx(), self.repo_ctx().repo().repo_blobstore(), paths)
             .map_err(MononokeError::from)
             .and_then({
                 let changeset = self.clone();
@@ -541,7 +590,7 @@ impl ChangesetContext {
         &self,
         paths: impl Iterator<Item = MPath> + 'static,
     ) -> Result<
-        impl Stream<Item = Result<ChangesetPathHistoryContext, MononokeError>> + '_,
+        impl Stream<Item = Result<ChangesetPathHistoryContext<R>, MononokeError>> + '_,
         MononokeError,
     > {
         Ok(self.deleted_paths_impl(self.root_deleted_manifest_v2_id().await?, paths))
@@ -552,7 +601,7 @@ impl ChangesetContext {
         self.bonsai_changeset
             .get_or_init(|| {
                 let ctx = self.ctx().clone();
-                let blobstore = self.repo.blob_repo().repo_blobstore_arc();
+                let blobstore = self.repo_ctx.repo().repo_blobstore_arc();
                 let id = self.id;
                 async move { id.load(&ctx, &blobstore).await.map_err(MononokeError::from) }
             })
@@ -560,8 +609,8 @@ impl ChangesetContext {
     }
 
     /// Get the `ChangesetInfo` for this changeset.
-    async fn changeset_info(&self) -> Result<ChangesetInfo, MononokeError> {
-        if self.repo.derive_changeset_info_enabled() {
+    pub async fn changeset_info(&self) -> Result<ChangesetInfo, MononokeError> {
+        if self.repo_ctx.derive_changeset_info_enabled() {
             self.changeset_info
                 .get_or_init(|| self.derive::<ChangesetInfo>())
                 .await
@@ -634,7 +683,7 @@ impl ChangesetContext {
 
     /// The generation number of the given changeset
     pub async fn generation(&self) -> Result<Generation, MononokeError> {
-        self.repo
+        self.repo_ctx
             .commit_graph()
             .changeset_generation(self.ctx(), self.id)
             .await
@@ -645,7 +694,7 @@ impl ChangesetContext {
 
     /// The linear depth of the given changeset
     pub async fn linear_depth(&self) -> Result<u64, MononokeError> {
-        self.repo
+        self.repo_ctx
             .commit_graph()
             .changeset_linear_depth(self.ctx(), self.id)
             .await
@@ -691,7 +740,7 @@ impl ChangesetContext {
     /// own ancestor for the purpose of this call.
     pub async fn is_ancestor_of(&self, other_commit: ChangesetId) -> Result<bool, MononokeError> {
         Ok(self
-            .repo()
+            .repo_ctx()
             .repo()
             .commit_graph()
             .is_ancestor(self.ctx(), self.id, other_commit)
@@ -705,23 +754,23 @@ impl ChangesetContext {
     pub async fn common_base_with(
         &self,
         other_commit: ChangesetId,
-    ) -> Result<Option<ChangesetContext>, MononokeError> {
+    ) -> Result<Option<ChangesetContext<R>>, MononokeError> {
         let lca = self
-            .repo()
+            .repo_ctx()
             .repo()
             .commit_graph()
             .common_base(self.ctx(), self.id, other_commit)
             .await?;
-        Ok(lca.first().map(|id| Self::new(self.repo.clone(), *id)))
+        Ok(lca.first().map(|id| Self::new(self.repo_ctx.clone(), *id)))
     }
 
     pub async fn diff_unordered(
         &self,
-        other: &ChangesetContext,
+        other: &ChangesetContext<R>,
         include_copies_renames: bool,
         path_restrictions: Option<Vec<MPath>>,
         diff_items: BTreeSet<ChangesetDiffItem>,
-    ) -> Result<Vec<ChangesetPathDiffContext>, MononokeError> {
+    ) -> Result<Vec<ChangesetPathDiffContext<R>>, MononokeError> {
         self.diff(
             other,
             include_copies_renames,
@@ -742,13 +791,13 @@ impl ChangesetContext {
     /// `diff_items` what to include in the output (files, dirs or both)
     pub async fn diff(
         &self,
-        other: &ChangesetContext,
+        other: &ChangesetContext<R>,
         include_copies_renames: bool,
         path_restrictions: Option<Vec<MPath>>,
         diff_items: BTreeSet<ChangesetDiffItem>,
         ordering: ChangesetFileOrdering,
         limit: Option<usize>,
-    ) -> Result<Vec<ChangesetPathDiffContext>, MononokeError> {
+    ) -> Result<Vec<ChangesetPathDiffContext<R>>, MononokeError> {
         // Helper to that checks if a path is within the givien path restrictions
         fn within_restrictions(path: &MPath, path_restrictions: &Option<Vec<MPath>>) -> bool {
             path_restrictions.as_ref().map_or(true, |i| {
@@ -824,7 +873,7 @@ impl ChangesetContext {
                 .fsnode_id()
                 .find_entries(
                     self.ctx().clone(),
-                    self.repo().blob_repo().repo_blobstore().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
                     copy_path_map.keys().cloned(),
                 )
                 .try_collect::<HashMap<_, _>>();
@@ -835,7 +884,7 @@ impl ChangesetContext {
                 .fsnode_id()
                 .find_entries(
                     self.ctx().clone(),
-                    other.repo().blob_repo().repo_blobstore().clone(),
+                    other.repo_ctx().repo().repo_blobstore().clone(),
                     to_paths.into_iter(),
                 )
                 .map_ok(|(path, _)| path)
@@ -879,7 +928,7 @@ impl ChangesetContext {
             .fsnode_id()
             .find_entries(
                 self.ctx().clone(),
-                self.repo().blob_repo().repo_blobstore().clone(),
+                self.repo_ctx().repo().repo_blobstore().clone(),
                 copy_path_map.keys().cloned(),
             )
             .map_ok(|(from_path, _)| from_path)
@@ -908,9 +957,9 @@ impl ChangesetContext {
                     .fsnode_id()
                     .filtered_diff(
                         self.ctx().clone(),
-                        self.repo().blob_repo().repo_blobstore().clone(),
+                        self.repo_ctx().repo().repo_blobstore().clone(),
                         self_manifest_root.fsnode_id().clone(),
-                        self.repo().blob_repo().repo_blobstore().clone(),
+                        self.repo_ctx().repo().repo_blobstore().clone(),
                         Some,
                         recurse_pruner,
                     )
@@ -922,9 +971,9 @@ impl ChangesetContext {
                     .fsnode_id()
                     .filtered_diff_ordered(
                         self.ctx().clone(),
-                        self.repo().blob_repo().repo_blobstore().clone(),
+                        self.repo_ctx().repo().repo_blobstore().clone(),
                         self_manifest_root.fsnode_id().clone(),
-                        self.repo().blob_repo().repo_blobstore().clone(),
+                        self.repo_ctx().repo().repo_blobstore().clone(),
                         after,
                         Some,
                         recurse_pruner,
@@ -1124,7 +1173,7 @@ impl ChangesetContext {
                 .skeleton_manifest_id()
                 .find_entries(
                     self.ctx().clone(),
-                    self.repo().blob_repo().repo_blobstore().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
                     prefixes,
                 )
                 .left_stream(),
@@ -1132,7 +1181,44 @@ impl ChangesetContext {
                 .skeleton_manifest_id()
                 .find_entries_ordered(
                     self.ctx().clone(),
-                    self.repo().blob_repo().repo_blobstore().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
+                    prefixes,
+                    after,
+                )
+                .right_stream(),
+        };
+        Ok(entries)
+    }
+
+    async fn find_entries_v2(
+        &self,
+        prefixes: Option<Vec1<MPath>>,
+        ordering: ChangesetFileOrdering,
+    ) -> Result<
+        impl Stream<Item = Result<(MPath, ManifestEntry<SkeletonManifestV2, ()>), anyhow::Error>>,
+        MononokeError,
+    > {
+        let root = self.root_skeleton_manifest_v2_id().await?;
+        let manifest = root
+            .inner_id()
+            .load(self.ctx(), self.repo_ctx().repo().repo_blobstore())
+            .await?;
+        let prefixes = match prefixes {
+            Some(prefixes) => prefixes.into_iter().map(PathOrPrefix::Prefix).collect(),
+            None => vec![PathOrPrefix::Prefix(MPath::ROOT)],
+        };
+        let entries = match ordering {
+            ChangesetFileOrdering::Unordered => manifest
+                .find_entries(
+                    self.ctx().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
+                    prefixes,
+                )
+                .left_stream(),
+            ChangesetFileOrdering::Ordered { after } => manifest
+                .find_entries_ordered(
+                    self.ctx().clone(),
+                    self.repo_ctx().repo().repo_blobstore().clone(),
                     prefixes,
                     after,
                 )
@@ -1145,9 +1231,9 @@ impl ChangesetContext {
     pub async fn history(
         &self,
         opts: ChangesetHistoryOptions,
-    ) -> Result<BoxStream<'_, Result<ChangesetContext, MononokeError>>, MononokeError> {
+    ) -> Result<BoxStream<'_, Result<ChangesetContext<R>, MononokeError>>, MononokeError> {
         let mut ancestors_stream_builder = AncestorsStreamBuilder::new(
-            self.repo().repo().commit_graph_arc(),
+            self.repo_ctx().repo().commit_graph_arc(),
             self.ctx().clone(),
             vec![self.id()],
         );
@@ -1155,18 +1241,19 @@ impl ChangesetContext {
         if let Some(until_timestamp) = opts.until_timestamp {
             ancestors_stream_builder = ancestors_stream_builder.with({
                 let ctx = self.ctx().clone();
-                let repo = self.repo().clone();
-                let cs_info_enabled = repo.derive_changeset_info_enabled();
+                let repo_ctx = self.repo_ctx().clone();
+                let cs_info_enabled = repo_ctx.derive_changeset_info_enabled();
                 move |cs_id| {
-                    cloned!(ctx, repo, cs_info_enabled);
+                    cloned!(ctx, repo_ctx, cs_info_enabled);
                     async move {
                         let info = if cs_info_enabled {
-                            repo.repo()
+                            repo_ctx
+                                .repo()
                                 .repo_derived_data()
                                 .derive::<ChangesetInfo>(&ctx, cs_id)
                                 .await?
                         } else {
-                            let bonsai = cs_id.load(&ctx, repo.repo().repo_blobstore()).await?;
+                            let bonsai = cs_id.load(&ctx, repo_ctx.repo().repo_blobstore()).await?;
                             ChangesetInfo::new(cs_id, bonsai)
                         };
                         let date = info.author_date().as_chrono().clone();
@@ -1190,7 +1277,7 @@ impl ChangesetContext {
         Ok(cs_ids_stream
             .map_err(MononokeError::from)
             .and_then(move |cs_id| async move {
-                Ok::<_, MononokeError>(ChangesetContext::new(self.repo().clone(), cs_id))
+                Ok::<_, MononokeError>(ChangesetContext::new(self.repo_ctx().clone(), cs_id))
             })
             .boxed())
     }
@@ -1198,9 +1285,9 @@ impl ChangesetContext {
     pub async fn linear_history(
         &self,
         opts: ChangesetLinearHistoryOptions,
-    ) -> Result<BoxStream<'_, Result<ChangesetContext, MononokeError>>, MononokeError> {
+    ) -> Result<BoxStream<'_, Result<ChangesetContext<R>, MononokeError>>, MononokeError> {
         let mut linear_ancestors_stream_builder = LinearAncestorsStreamBuilder::new(
-            self.repo().repo().commit_graph_arc(),
+            self.repo_ctx().repo().commit_graph_arc(),
             self.ctx().clone(),
             self.id(),
         )
@@ -1225,7 +1312,7 @@ impl ChangesetContext {
         Ok(cs_ids_stream
             .map_err(MononokeError::from)
             .and_then(move |cs_id| async move {
-                Ok::<_, MononokeError>(ChangesetContext::new(self.repo().clone(), cs_id))
+                Ok::<_, MononokeError>(ChangesetContext::new(self.repo_ctx().clone(), cs_id))
             })
             .boxed())
     }
@@ -1234,7 +1321,7 @@ impl ChangesetContext {
         &self,
         path_restrictions: Option<Vec<MPath>>,
         diff_items: BTreeSet<ChangesetDiffItem>,
-    ) -> Result<Vec<ChangesetPathDiffContext>, MononokeError> {
+    ) -> Result<Vec<ChangesetPathDiffContext<R>>, MononokeError> {
         self.diff_root(
             path_restrictions,
             diff_items,
@@ -1255,7 +1342,7 @@ impl ChangesetContext {
         diff_items: BTreeSet<ChangesetDiffItem>,
         ordering: ChangesetFileOrdering,
         limit: Option<usize>,
-    ) -> Result<Vec<ChangesetPathDiffContext>, MononokeError> {
+    ) -> Result<Vec<ChangesetPathDiffContext<R>>, MononokeError> {
         let diff_files = diff_items.contains(&ChangesetDiffItem::FILES);
         let diff_trees = diff_items.contains(&ChangesetDiffItem::TREES);
 
@@ -1286,9 +1373,9 @@ impl ChangesetContext {
         pushvars: Option<&HashMap<String, Bytes>>,
     ) -> Result<Vec<HookOutcome>, MononokeError> {
         Ok(self
-            .repo()
+            .repo_ctx()
             .hook_manager()
-            .run_hooks_for_bookmark(
+            .run_changesets_hooks_for_bookmark(
                 self.ctx(),
                 vec![self.bonsai_changeset().await?].iter(),
                 &BookmarkKey::new(bookmark.as_ref())?,

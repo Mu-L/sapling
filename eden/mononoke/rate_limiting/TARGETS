@@ -1,10 +1,13 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "rate_limiting",
     srcs = glob(["src/**/*.rs"]),
+    test_deps = [
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
+    ],
     deps = [
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-trait",
@@ -16,6 +19,7 @@ rust_library(
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/stats:stats",
         "//configerator/structs/scm/mononoke/ratelimiting:rate_limiting_config-rust",
+        "//eden/mononoke/common/scuba_ext:scuba_ext",
         "//eden/mononoke/permission_checker:permission_checker",
     ],
 )

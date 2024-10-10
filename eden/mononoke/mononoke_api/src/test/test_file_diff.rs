@@ -11,16 +11,20 @@ use std::sync::Arc;
 use anyhow::Error;
 use anyhow::Result;
 use fbinit::FacebookInit;
+use mononoke_macros::mononoke;
 use tests_utils::drawdag::changes;
 use tests_utils::drawdag::create_from_dag_with_changes;
 
 use crate::headerless_unified_diff;
+use crate::repo::Repo;
 use crate::ChangesetId;
 use crate::CoreContext;
 use crate::RepoContext;
 
-async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, ChangesetId>)> {
-    let repo = test_repo_factory::build_empty(ctx.fb).await?;
+async fn init_repo(
+    ctx: &CoreContext,
+) -> Result<(RepoContext<Repo>, BTreeMap<String, ChangesetId>)> {
+    let repo: Repo = test_repo_factory::build_empty(ctx.fb).await?;
     let changesets = create_from_dag_with_changes(
         ctx,
         &repo,
@@ -38,7 +42,7 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, BTreeMap<String, C
     Ok((repo_ctx, changesets))
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn file_diff(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;

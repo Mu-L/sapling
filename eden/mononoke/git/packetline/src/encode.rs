@@ -74,7 +74,7 @@ pub async fn data_to_write(data: &[u8], out: &mut (impl AsyncWrite + Unpin)) -> 
 
 /// Write a `text` message to `out`, which is assured to end in a newline.
 pub async fn text_to_write(text: &[u8], out: &mut (impl AsyncWrite + Unpin)) -> io::Result<usize> {
-    prefixed_and_suffixed_data_to_write(&[], text, &[b'\n'], out).await
+    prefixed_and_suffixed_data_to_write(&[], text, b"\n", out).await
 }
 
 /// Write text byte level data to `out` in packetline format
@@ -101,6 +101,14 @@ pub async fn write_data_channel(
     write_packetline(buf, true /* is_binary */, Some(Channel::Data), out).await
 }
 
+/// Write text byte level data to `out` in Progress channel with packetline format
+pub async fn write_progress_channel(
+    buf: &[u8],
+    out: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<usize> {
+    write_packetline(buf, true /* is_binary */, Some(Channel::Progress), out).await
+}
+
 async fn write_packetline(
     mut buf: &[u8],
     is_binary: bool,
@@ -113,20 +121,25 @@ async fn write_packetline(
             "empty packet lines are not permitted as '0004' is invalid",
         ));
     }
+    let max_data_len = if !is_binary || channel.is_some() {
+        MAX_DATA_LEN - 1 // One byte would be taken up by the prefix
+    } else {
+        MAX_DATA_LEN
+    };
     let mut written = 0;
     while !buf.is_empty() {
-        let (data, rest) = buf.split_at(buf.len().min(MAX_DATA_LEN));
+        let (data, rest) = buf.split_at(buf.len().min(max_data_len));
         written += if is_binary {
             if let Some(channel) = channel {
-                band_to_write(channel, data, out).await?
+                band_to_write(channel, data, out).await? - 1 // Don't count the prefix
             } else {
                 data_to_write(data, out).await?
             }
         } else {
-            text_to_write(data, out).await?
+            text_to_write(data, out).await? - 1 // Don't count the prefix
         };
         // subtract header (and trailing NL) because write-all can't handle writing more than it passes in
-        written -= U16_HEX_BYTES + usize::from(is_binary);
+        written -= U16_HEX_BYTES;
         buf = rest;
     }
     Ok(written)

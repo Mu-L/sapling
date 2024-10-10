@@ -694,7 +694,7 @@ class sortdict(collections.OrderedDict):
         # __setitem__() isn't called as of PyPy 5.8.0
         def update(self, src):
             if isinstance(src, dict):
-                src = pycompat.iteritems(src)
+                src = src.items()
             for k, v in src:
                 self[k] = v
 
@@ -1142,7 +1142,7 @@ filtertable = {"tempfile:": tempfilter, "pipe:": pipefilter}
 
 def filter(s, cmd):
     "filter a string through a command that transforms its input to its output"
-    for name, fn in pycompat.iteritems(filtertable):
+    for name, fn in filtertable.items():
         if cmd.startswith(name):
             return fn(s, cmd[len(name) :].lstrip())
     return pipefilter(s, cmd)
@@ -1301,7 +1301,7 @@ def shellenviron(environ=None):
 
     env = dict(encoding.environ)
     if environ:
-        env.update((k, py2shell(v)) for k, v in pycompat.iteritems(environ))
+        env.update((k, py2shell(v)) for k, v in environ.items())
     env["HG"] = hgexecutable()
     return env
 
@@ -2250,7 +2250,7 @@ def makedate(timestamp=None):
     """Return a unix timestamp (or the current time) as a (unixtime,
     offset) tuple based off the local timezone."""
     if timestamp is None:
-        timestamp = time.time()
+        timestamp = bindings.hgtime.parse("now")[0]
     if timestamp < 0:
         hint = _("check your clock")
         raise Abort(_("negative timestamp: %d") % timestamp, hint=hint)
@@ -3042,7 +3042,8 @@ class url:
     """
 
     _safechars = "!~*'()+"
-    _safepchars = "/!~*'()+:\\"
+    # "?" appears in UNC Windows file path.
+    _safepchars = "/!~*'()+:\\?"
     _matchscheme = remod.compile("^[a-zA-Z0-9+.\\-]+:").match
 
     def __init__(self, path, parsequery=True, parsefragment=True):
@@ -3076,6 +3077,14 @@ class url:
             if parts[0]:
                 self.scheme, path = parts
                 self._localpath = False
+
+                # These are also file paths which might not round-trip through URL parsing
+                # on Windows. Special case like the above Windows check.
+                if self.scheme in {"file", "eager"}:
+                    maybewindows = path.lstrip("/")
+                    if hasdriveletter(maybewindows) or maybewindows.startswith(r"\\"):
+                        self.path = maybewindows
+                        return
 
         if not path:
             path = None
@@ -3196,8 +3205,8 @@ class url:
         """
         if self._localpath:
             s = self.path
-            if self.scheme == "bundle":
-                s = "bundle:" + s
+            if self.scheme:
+                s = self.scheme + ":" + s
             if self.fragment:
                 s += "#" + self.fragment
             return s
@@ -3206,7 +3215,10 @@ class url:
         if self.user or self.passwd or self.host:
             s += "//"
         elif self.scheme and (
-            not self.path or self.path.startswith("/") or hasdriveletter(self.path)
+            not self.path
+            or self.path.startswith("/")
+            or hasdriveletter(self.path)
+            or self.path.startswith(r"\\")
         ):
             s += "//"
             if hasdriveletter(self.path):
@@ -3265,13 +3277,13 @@ class url:
         return False
 
     def localpath(self):
-        if self.scheme == "file" or self.scheme == "bundle":
+        if self.scheme in {"file", "bundle", "eager"}:
             path = self.path or "/"
             # For Windows, we need to promote hosts containing drive
             # letters to paths with drive letters.
             if hasdriveletter(self._hostport):
-                path = self._hostport + "/" + self.path
-            elif self.host is not None and self.path and not hasdriveletter(path):
+                path = self._hostport + "/" + path
+            elif self.host is not None and path and not hasdriveletter(path):
                 path = "/" + path
             return path
         return self._origpath
@@ -4988,3 +5000,76 @@ def no_recursion(func):
             depth -= 1
 
     return wrapper
+
+
+class proxy_wrapper:
+    """Generic wrapper class to customize an object's behavior without mutating it.
+
+    inner: the object to wrap (available as "self.inner")
+    wrapper_attrs: attributes owned by the wrapper
+
+    Attribute gets or sets outside what's in wrapper_attrs will get proxied to the
+    inner object.
+
+    Method resolution will prefer the wrapper's methods if both the wrapper and inner
+    object have implementations. If the wrapper has a second base class, it is assumed to
+    be a "common" base with the inner object. In this case, method resolution performs a
+    3-way merge of sorts where the inner object's method will be preferred if the
+    inner object overrides a method that the wrapper does not override, relative to the
+    base class.
+    """
+
+    def __init__(self, inner, **wrapper_attrs) -> None:
+        # Use "__dict__" to bypass our __setattr__ impl.
+        self.__dict__["inner"] = inner
+
+        if len(self.__class__.__bases__) == 1:
+            self.__dict__["_base_class"] = None
+        elif len(self.__class__.__bases__) == 2:
+            self.__dict__["_base_class"] = self.__class__.__bases__[1]
+        else:
+            raise ValueError("proxy_wrapper inheritor must have 1 or 2 base classes")
+
+        for k, v in wrapper_attrs.items():
+            self.__dict__[k] = v
+
+    def __getattribute__(self, name):
+        try:
+            my_attr = object.__getattribute__(self, name)
+        except AttributeError:
+            # We don't have this attribute - use inner object's.
+            return getattr(self.inner, name)
+
+        # Never delegate special attributes like __class__ or any of our __dict__
+        # attributes.
+        if name.startswith("__") or name in self.__dict__:
+            return my_attr
+
+        try:
+            inner_attr = getattr(self.inner, name)
+        except AttributeError:
+            # Inner object doesn't have this attribute - use ours.
+            return my_attr
+
+        if not callable(my_attr):
+            # Non-methods go to inner.
+            return inner_attr
+
+        try:
+            base_attr = getattr(self._base_class, name)
+        except AttributeError:
+            # Base class doesn't implement or we have no base - use ours.
+            return my_attr
+
+        if my_attr.__func__ == base_attr and inner_attr.__func__ != base_attr:
+            # If we don't override the function but the inner object does, use the
+            # inner object's.
+            return inner_attr
+        else:
+            # In all other cases use ours.
+            return my_attr
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") or name in self.__dict__:
+            return super().__setattr__(name, value)
+        return setattr(self.inner, name, value)

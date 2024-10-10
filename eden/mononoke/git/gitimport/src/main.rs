@@ -7,19 +7,22 @@
 
 #![feature(async_closure)]
 
+mod repo;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
-use blobrepo::BlobRepo;
 use blobrepo_override::DangerousOverride;
 use blobstore::Blobstore;
 use blobstore::Loadable;
 use bonsai_hg_mapping::ArcBonsaiHgMapping;
 use bonsai_hg_mapping::MemWritesBonsaiHgMapping;
+use bonsai_tag_mapping::BonsaiTagMappingRef;
 use cacheblob::dummy::DummyLease;
 use cacheblob::LeaseOps;
 use cacheblob::MemWritesBlobstore;
@@ -30,6 +33,7 @@ use clientinfo::ClientInfo;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::future;
+use git_symbolic_refs::GitSymbolicRefsRef;
 use import_tools::bookmark::BookmarkOperationErrorReporting;
 use import_tools::create_changeset_for_annotated_tag;
 use import_tools::import_tree_as_single_bonsai_changeset;
@@ -37,6 +41,7 @@ use import_tools::set_bookmark;
 use import_tools::upload_git_tag;
 use import_tools::BackfillDerivation;
 use import_tools::BookmarkOperation;
+use import_tools::GitImportLfs;
 use import_tools::GitRepoReader;
 use import_tools::GitimportPreferences;
 use import_tools::GitimportTarget;
@@ -44,9 +49,12 @@ use import_tools::ReuploadCommits;
 use linked_hash_map::LinkedHashMap;
 use mercurial_derivation::get_manifest_from_bonsai;
 use mercurial_derivation::DeriveHgChangeset;
+use metaconfig_types::RepoConfigRef;
 use mononoke_api::BookmarkFreshness;
 use mononoke_api::BookmarkKey;
+use mononoke_api::RepoContext;
 use mononoke_app::args::RepoArgs;
+use mononoke_app::args::TLSArgs;
 use mononoke_app::fb303::AliveService;
 use mononoke_app::fb303::Fb303AppExtension;
 use mononoke_app::MononokeApp;
@@ -56,20 +64,22 @@ use mononoke_types::ChangesetId;
 use mononoke_types::DerivableType;
 use repo_authorization::AuthorizationContext;
 use repo_blobstore::RepoBlobstoreArc;
-use repo_blobstore::RepoBlobstoreRef;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentityRef;
 use slog::info;
 use slog::warn;
 
+use crate::repo::Repo;
+
 pub const HEAD_SYMREF: &str = "HEAD";
+const LFS_SIMULTANEOUS_CONNECTION_LIMIT: usize = 20;
 
 // Refactor this a bit. Use a thread pool for git operations. Pass that wherever we use store repo.
 // Transform the walk into a stream of commit + file changes.
 
 async fn derive_hg(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &(impl RepoBlobstoreArc + RepoDerivedDataRef + RepoIdentityRef + Send + Sync),
     import_map: impl Iterator<Item = (&gix_hash::ObjectId, &ChangesetId)>,
 ) -> Result<(), Error> {
     let mut hg_manifests = HashMap::new();
@@ -165,6 +175,20 @@ struct GitimportArgs {
     /// explicitly specified refs
     #[clap(long, use_value_delimiter = true, value_delimiter = ',')]
     include_refs: Vec<String>,
+    /// Lfs server url to use to fetch lfs files from
+    #[clap(long)]
+    lfs_server: Option<String>,
+    /// TLS parameters for this service used for outbound LFS connections
+    #[clap(flatten)]
+    tls_args: Option<TLSArgs>,
+    /// If LFS file can't be obtained from LFS server, don't fail the import
+    /// but import the pointer as-is.
+    #[clap(long)]
+    allow_dangling_lfs_pointers: bool,
+    /// How many times to retry fetching LFS files from the server
+    /// before deciding that the file is missing.
+    #[clap(long, default_value_t = 5)]
+    lfs_import_max_attempts: u32,
 }
 
 #[derive(Subcommand)]
@@ -211,7 +235,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
         ReuploadCommits::Never
     };
 
-    let repo: BlobRepo = app.open_repo(&args.repo_args).await?;
+    let repo: Repo = app.open_repo(&args.repo_args).await?;
     info!(
         logger,
         "using repo \"{}\" repoid {:?}",
@@ -257,10 +281,24 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
     } else {
         BackfillDerivation::AllConfiguredTypes
     };
+    let lfs = match repo.repo_config().git_configs.git_lfs_interpret_pointers {
+        true => GitImportLfs::new(
+            args.lfs_server.ok_or_else(|| {
+                anyhow!("LFS server url is required when LFS is enabled in the repo config")
+            })?,
+            args.allow_dangling_lfs_pointers,
+            args.lfs_import_max_attempts,
+            Some(LFS_SIMULTANEOUS_CONNECTION_LIMIT),
+            args.tls_args,
+        )?,
+        false => GitImportLfs::new_disabled(),
+    };
+
     let mut prefs = GitimportPreferences {
         concurrency: args.concurrency,
         submodules: !args.discard_submodules,
         backfill_derivation,
+        lfs,
         ..Default::default()
     };
     // if we are readonly, then we'll set up some overrides to still be able to do meaningful
@@ -316,8 +354,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
         let symref_entry = import_tools::read_symref(HEAD_SYMREF, path, &prefs)
             .await
             .context("read_symrefs failed")?;
-        repo.inner()
-            .git_symbolic_refs
+        repo.git_symbolic_refs()
             .add_or_update_entries(vec![symref_entry])
             .await
             .context("failed to add symbolic ref entries")?;
@@ -349,7 +386,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
         }
         if args.generate_bookmarks {
             let authz = AuthorizationContext::new_bypass_access_control();
-            let repo_context = app
+            let repo_context: RepoContext<mononoke_api::Repo> = app
                 .open_managed_repo_arg(&args.repo_args)
                 .await
                 .context("failed to create mononoke app")?
@@ -363,8 +400,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                 .await
                 .context("failed to build RepoContext")?;
             let existing_tags = repo
-                .inner()
-                .bonsai_tag_mapping
+                .bonsai_tag_mapping()
                 .get_all_entries()
                 .await
                 .context("Failed to fetch bonsai tag mapping")?
@@ -404,7 +440,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                         }
                     });
                     // Only upload the tag if it's new or has changed.
-                    if new_or_updated_tag {
+                    if new_or_updated_tag || reupload.reupload_commit() {
                         // The ref getting imported is a tag, so store the raw git Tag object.
                         upload_git_tag(&ctx, uploader.clone(), reader.clone(), tag_id).await?;
                         // Create the changeset corresponding to the commit pointed to by the tag.
@@ -435,7 +471,6 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                     .with_context(|| format!("failed to resolve bookmark {name}"))?
                     .map(|context| context.id());
                 let allow_non_fast_forward = true;
-                let affected_changesets_limit = Some(gitimport_result.len());
                 let operation =
                     BookmarkOperation::new(bookmark_key, old_changeset, Some(final_changeset))?;
                 set_bookmark(
@@ -444,7 +479,6 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
                     &operation,
                     pushvars.as_ref(),
                     allow_non_fast_forward,
-                    affected_changesets_limit,
                     BookmarkOperationErrorReporting::WithContext,
                 )
                 .await?;

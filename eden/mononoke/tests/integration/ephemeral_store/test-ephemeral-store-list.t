@@ -9,7 +9,7 @@
 
 setup configuration
   $ base_snapshot_repo_setup client1
-  $ cd repo  
+  $ cd client1
   $ mkdir test_tmp
   $ cd test_tmp
   $ echo "a file content" > a
@@ -20,7 +20,7 @@ setup configuration
   $ echo "e file content" > e
   $ echo "f file content" > f
   $ hg add f
-  $ sl snapshot create
+  $ hg snapshot create
   snapshot: Snapshot created with id 9b2da5e2ba10d7e18476ef29c252bed384d9a44206f3b8b4da31046c800a513d
 
 List the blob contents of a bubble without passing any argument:

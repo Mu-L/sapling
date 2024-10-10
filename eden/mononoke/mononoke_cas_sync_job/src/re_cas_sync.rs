@@ -6,6 +6,7 @@
  */
 
 use anyhow::Error;
+use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateLogEntry;
 use cas_client::CasClient;
 use changesets_uploader::CasChangesetsUploader;
@@ -17,10 +18,14 @@ use context::CoreContext;
 use futures::stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
+use futures_stats::TimedTryFutureExt;
 use futures_watchdog::WatchdogExt;
+use itertools::Itertools;
 use mercurial_derivation::RootHgAugmentedManifestId;
 use mononoke_types::ChangesetId;
 use repo_derived_data::RepoDerivedDataRef;
+use slog::debug;
+use slog::error;
 use slog::info;
 
 use crate::CombinedBookmarkUpdateLogEntry;
@@ -29,19 +34,72 @@ use crate::RetryAttemptsCount;
 
 const DEFAULT_UPLOAD_RETRY_NUM: usize = 1;
 const DEFAULT_UPLOAD_CONCURRENT_COMMITS: usize = 100;
-const DEFAULT_DERIVE_CONCURRENT_COMMITS: usize = 100;
 const DEFAULT_CONCURRENT_ENTRIES_FOR_COMMIT_GRAPH: usize = 100;
+const DEFAULT_MAX_COMMITS_PER_BOOKMARK_CREATION: u64 = 1000;
+
+pub async fn try_expand_bookmark_creation_entry<'a>(
+    re_cas_client: &CasChangesetsUploader<impl CasClient + 'a>,
+    repo: &'a Repo,
+    ctx: &'a CoreContext,
+    to_bcs_id: ChangesetId,
+    main_bookmark: &'a str,
+    bookmark: BookmarkKey,
+) -> Result<Vec<ChangesetId>, Error> {
+    let bookmark_name = bookmark.as_str();
+    let frontier = repo
+        .commit_graph()
+        .ancestors_frontier_with(ctx, vec![to_bcs_id], move |bcs_id| async move {
+            if bookmark_name != main_bookmark {
+                re_cas_client
+                    .is_changeset_uploaded(ctx, repo, &bcs_id)
+                    .await
+                    .map_err(Error::from)
+            } else {
+                // Do not rely on the lookups for the main bookmark.
+                Ok(false)
+            }
+        })
+        .await?;
+
+    // Estimate the number of commits to upload for the bookmark creation entry.
+    // Runs in O((heads + common) * log) regardless of stream size
+    let estimate: u64 = repo
+        .commit_graph()
+        .ancestors_difference_segments(ctx, vec![to_bcs_id], frontier.clone())
+        .await?
+        .into_iter()
+        .map(|segment| segment.length)
+        .sum();
+
+    if estimate > DEFAULT_MAX_COMMITS_PER_BOOKMARK_CREATION {
+        error!(
+            ctx.logger(),
+            "Too many commits to upload for the bookmark creation entry {}: {}, limit is {}. Please, consider recursive uploading a revision with mononoke_newadmin instead",
+            bookmark,
+            estimate,
+            DEFAULT_MAX_COMMITS_PER_BOOKMARK_CREATION
+        );
+        // Upload only the bookmark creation commit. The working copy for this commit will have gaps in CAS.
+        return Ok(vec![to_bcs_id]);
+    }
+
+    repo.commit_graph()
+        .ancestors_difference_stream(ctx, vec![to_bcs_id], frontier)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await
+}
 
 pub async fn try_derive<'a>(
     repo: &'a Repo,
     ctx: &'a CoreContext,
     bcs_id: ChangesetId,
-) -> Result<ChangesetId, Error> {
+) -> Result<(), Error> {
     // Derive augmented manifest for this changeset if not yet derived.
     repo.repo_derived_data()
         .derive::<RootHgAugmentedManifestId>(ctx, bcs_id)
         .await?;
-    Ok(bcs_id)
+    Ok(())
 }
 
 pub async fn try_sync<'a>(
@@ -67,8 +125,10 @@ pub async fn try_sync<'a>(
 }
 
 pub async fn try_expand_entry<'a>(
+    re_cas_client: &CasChangesetsUploader<impl CasClient + 'a>,
     repo: &'a Repo,
     ctx: &'a CoreContext,
+    main_bookmark: &'a str,
     entry: BookmarkUpdateLogEntry,
 ) -> Result<Option<Vec<ChangesetId>>, Error> {
     match (entry.from_changeset_id, entry.to_changeset_id) {
@@ -92,15 +152,65 @@ pub async fn try_expand_entry<'a>(
         return Ok(None);
     }
     let to = entry.to_changeset_id.unwrap();
+
+    // Let's double check that all the blobs for the main bookmark are uploaded, and do not rely on the lookups, they are never expected to be hit anyway.
+    if entry.bookmark_name.as_str() != main_bookmark
+        && re_cas_client.is_changeset_uploaded(ctx, repo, &to).await?
+    {
+        // Many bookmarks are moved to already uploaded commits, so we can skip them (like stable)
+        debug!(
+            ctx.logger(),
+            "log entry {:?} is a move of bookmark to already uploaded commit, skipping...", &entry
+        );
+        return Ok(None);
+    }
+
     if entry.from_changeset_id.is_none() {
         info!(
             ctx.logger(),
             "log entry {:?} is a creation of bookmark", &entry
         );
-        // TODO(liubovd): think about the creation case, how to process correctly
-        return Ok(Some(vec![to]));
+        return Ok(Some(
+            try_expand_bookmark_creation_entry(
+                re_cas_client,
+                repo,
+                ctx,
+                to,
+                main_bookmark,
+                entry.bookmark_name,
+            )
+            .await?,
+        ));
     }
+
     let from = entry.from_changeset_id.unwrap();
+
+    // The sync wasn't started from the beginning of the repo, so we may encounter this bookmark first time. Let's treat it as creation.
+    // This can also happen if the gap between the update exceeds our TTL (1 year)
+    // We know this can't happen with the main bookmark, skip the check for it to avoid unnecessary CAS lookups.
+    if entry.bookmark_name.as_str() != main_bookmark
+        && !re_cas_client
+            .is_changeset_uploaded(ctx, repo, &from)
+            .await?
+    {
+        info!(
+            ctx.logger(),
+            "log entry {:?} is a not creation of bookmark, however we sync it first time or it was updated last time more than our TTL",
+            &entry
+        );
+        return Ok(Some(
+            try_expand_bookmark_creation_entry(
+                re_cas_client,
+                repo,
+                ctx,
+                to,
+                main_bookmark,
+                entry.bookmark_name,
+            )
+            .await?,
+        ));
+    }
+
     Ok(Some(
         repo.commit_graph()
             .range_stream(ctx, from, to)
@@ -118,6 +228,7 @@ pub async fn try_sync_single_combined_entry<'a>(
     repo: &'a Repo,
     ctx: &'a CoreContext,
     combined_entry: &'a CombinedBookmarkUpdateLogEntry,
+    main_bookmark: &'a str,
 ) -> Result<RetryAttemptsCount, Error> {
     let ids: Vec<_> = combined_entry
         .components
@@ -128,25 +239,30 @@ pub async fn try_sync_single_combined_entry<'a>(
 
     let start_time = std::time::Instant::now();
     let queue: Vec<ChangesetId> = futures::stream::iter(combined_entry.components.clone())
-        .map(|entry| async move { try_expand_entry(repo, ctx, entry).await })
-        .buffered(DEFAULT_CONCURRENT_ENTRIES_FOR_COMMIT_GRAPH)
+        .map(|entry| async move {
+            try_expand_entry(re_cas_client, repo, ctx, main_bookmark, entry).await
+        })
+        .buffer_unordered(DEFAULT_CONCURRENT_ENTRIES_FOR_COMMIT_GRAPH)
         .try_collect::<Vec<_>>()
         .await?
         .into_iter()
         .filter_map(|res| res)
         .flatten()
+        .unique()
         .collect();
 
-    // Order is important for derivation of augmented manifests.
-    let derived = stream::iter(queue)
-        .map(move |bcs_id| async move { try_derive(repo, ctx, bcs_id).await })
-        .buffered(DEFAULT_DERIVE_CONCURRENT_COMMITS)
-        .try_collect::<Vec<ChangesetId>>()
+    // Derive augmented manifests for all commits in the queue if not yet derived.
+    let (derivation_stats, _) = repo
+        .commit_graph()
+        .process_topologically(ctx, queue.clone(), move |bcs_id| async move {
+            try_derive(repo, ctx, bcs_id).await
+        })
+        .try_timed()
         .await?;
 
     // Once everything is derived, the upload order does not matter.
-    let uploaded_len = derived.len();
-    let upload_stats = stream::iter(derived)
+    let uploaded_len = queue.len();
+    let upload_stats = stream::iter(queue)
         .map(move |bcs_id| async move { try_sync(re_cas_client, repo, ctx, bcs_id).await })
         .buffer_unordered(DEFAULT_UPLOAD_CONCURRENT_COMMITS)
         .try_collect::<Vec<_>>()
@@ -163,11 +279,12 @@ pub async fn try_sync_single_combined_entry<'a>(
 
     info!(
         ctx.logger(),
-        "log entries {:?} synced ({} commits uploaded, upload stats: {}), took overall {:.3} sec",
+        "log entries {:?} synced ({} commits uploaded, upload stats: {}), took overall {:.3} sec, derivation checks took {:.3} sec",
         ids,
         uploaded_len,
         upload_stats,
         start_time.elapsed().as_secs_f64(),
+        derivation_stats.completion_time.as_secs_f64(),
     );
     // TODO: add configurable retries.
     Ok(RetryAttemptsCount(DEFAULT_UPLOAD_RETRY_NUM))

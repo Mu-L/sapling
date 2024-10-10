@@ -30,20 +30,17 @@ start mononoke
   $ start_and_wait_for_mononoke_server
 
 Clone the repo
-  $ hgmn_clone  mononoke://$(mononoke_address)/repo repo
+  $ hg clone -q mono:repo repo
   $ cd repo
 
 Pull with the default certificate - this should work.
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
 
 Pull from Mononoke with a different identity, make sure it fails
-  $ hgmn pull --config auth.mononoke.cert="$TEST_CERTDIR/client1.crt" --config auth.mononoke.key="$TEST_CERTDIR/client1.key"
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
-  remote: Authorization failed: Unauthorized access, permission denied
-  abort: unexpected EOL, expected netstring digit
-  [255]
+  $ hg pull --config auth.mononoke.cert="$TEST_CERTDIR/client1.crt" --config auth.mononoke.key="$TEST_CERTDIR/client1.key" 2>&1 | grep permission
+  *Failed to load repository: repo: permission denied: Repo metadata read access is not permitted* (glob)
 
 Pull with the identity in the global allowlist - this works, too.
-  $ hgmn pull --config auth.mononoke.cert="$TEST_CERTDIR/client2.crt" --config auth.mononoke.key="$TEST_CERTDIR/client2.key"
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull --config auth.mononoke.cert="$TEST_CERTDIR/client2.crt" --config auth.mononoke.key="$TEST_CERTDIR/client2.key"
+  pulling from mono:repo

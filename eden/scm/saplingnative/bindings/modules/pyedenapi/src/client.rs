@@ -25,10 +25,13 @@ use edenapi::SaplingRemoteApi;
 use edenapi_ext::check_files;
 use edenapi_ext::download_files;
 use edenapi_ext::upload_snapshot;
+use edenapi_types::cloud::SmartlogDataResponse;
 use edenapi_types::AlterSnapshotRequest;
 use edenapi_types::AlterSnapshotResponse;
 use edenapi_types::AnyFileContentId;
 use edenapi_types::BlameResult;
+use edenapi_types::CloudShareWorkspaceRequest;
+use edenapi_types::CloudShareWorkspaceResponse;
 use edenapi_types::CommitGraphEntry;
 use edenapi_types::CommitGraphSegmentsEntry;
 use edenapi_types::CommitHashLookupResponse;
@@ -46,17 +49,25 @@ use edenapi_types::FileResponse;
 use edenapi_types::FileSpec;
 use edenapi_types::FileType;
 use edenapi_types::GetReferencesParams;
+use edenapi_types::GetSmartlogByVersionParams;
+use edenapi_types::GetSmartlogParams;
 use edenapi_types::HgChangesetContent;
 use edenapi_types::HgMutationEntryContent;
+use edenapi_types::HistoricalVersionsParams;
+use edenapi_types::HistoricalVersionsResponse;
 use edenapi_types::HistoryEntry;
 use edenapi_types::Key;
 use edenapi_types::LandStackResponse;
 use edenapi_types::ReferencesDataResponse;
+use edenapi_types::RenameWorkspaceRequest;
+use edenapi_types::RenameWorkspaceResponse;
 use edenapi_types::SetBookmarkResponse;
 use edenapi_types::SnapshotRawData;
 use edenapi_types::SuffixQueryResponse;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
+use edenapi_types::UpdateArchiveParams;
+use edenapi_types::UpdateArchiveResponse;
 use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadSnapshotResponse;
 use edenapi_types::UploadToken;
@@ -67,6 +78,7 @@ use minibytes::Bytes;
 use pyconfigloader::config;
 use pyrevisionstore::edenapifilestore;
 use pyrevisionstore::edenapitreestore;
+use pyrevisionstore::filescmstore;
 use revisionstore::SaplingRemoteApiFileStore;
 use revisionstore::SaplingRemoteApiTreeStore;
 use types::HgId;
@@ -88,8 +100,20 @@ py_class!(pub class client |py| {
         _cls,
         config: config,
         reponame: Option<String> = None,
+        path: Option<String> = None,
     ) -> PyResult<client> {
-        let config = config.get_cfg(py);
+        let mut config = config.get_cfg(py);
+        let mut reponame = reponame;
+
+        if let Some(path) = path {
+            if reponame.is_none() {
+                // This sets reponame properly for mononoke:// URLs.
+                reponame = repourl::repo_name_from_url(&config, &path);
+            }
+            // This is required for eager:// URLs.
+            config.set("paths", "default", Some(path), &"pyedenapi".into());
+        }
+
         let inner = Builder::from_config(&config)
             .map_pyerr(py)?
             .repo_name(reponame)
@@ -280,11 +304,11 @@ py_class!(pub class client |py| {
         self.inner(py).as_ref().commit_known_py(py, hgids.0)
     }
 
-    /// commitgraph2(heads: [bytes], common: [bytes]) -> [{'hgid': bytes, 'parents': [bytes], 'is_draft': Option[bool]}]
-    def commitgraph2(&self, heads: Serde<Vec<HgId>>, common: Serde<Vec<HgId>>)
+    /// commitgraph(heads: [bytes], common: [bytes]) -> [{'hgid': bytes, 'parents': [bytes], 'is_draft': Option[bool]}]
+    def commitgraph(&self, heads: Serde<Vec<HgId>>, common: Serde<Vec<HgId>>)
         -> PyResult<Serde<Vec<CommitGraphEntry>>>
     {
-        self.inner(py).as_ref().commit_graph2_py(py, heads.0, common.0)
+        self.inner(py).as_ref().commit_graph_py(py, heads.0, common.0)
     }
 
     /// commitgraphsegments(heads: [bytes], common: [bytes]) -> [{'head': bytes, 'base': bytes, 'parents': [bytes]}]
@@ -349,7 +373,7 @@ py_class!(pub class client |py| {
     /// Upload file contents and hg filenodes
     def uploadfiles(
         &self,
-        store: PyObject,
+        store: filescmstore,
         keys: Vec<(
             PyPathBuf,     /* path */
             Serde<HgId>,   /* hgid */
@@ -575,6 +599,40 @@ py_class!(pub class client |py| {
         -> PyResult<Serde<ReferencesDataResponse>>
     {
         self.inner(py).as_ref().cloud_update_references_py(data, py)
+    }
+
+    def cloudsmartlog(&self, data: Serde<GetSmartlogParams>)
+    -> PyResult<Serde<SmartlogDataResponse>>
+    {
+        self.inner(py).as_ref().cloud_smartlog_py(data, py)
+    }
+
+    def cloudshareworkspace(&self, data: Serde<CloudShareWorkspaceRequest>)
+    -> PyResult<Serde<CloudShareWorkspaceResponse>>
+    {
+        self.inner(py).as_ref().cloud_share_workspace_py(data, py)
+    }
+
+    def cloudupdatearchive(&self, data: Serde<UpdateArchiveParams>)
+    -> PyResult<Serde<UpdateArchiveResponse>>
+    {
+        self.inner(py).as_ref().cloud_update_archive_py(data, py)
+    }
+
+    def cloudrenameworkspace(&self, data: Serde<RenameWorkspaceRequest>) -> PyResult<Serde<RenameWorkspaceResponse>> {
+        self.inner(py).as_ref().cloud_rename_workspace_py(data, py)
+    }
+
+    def cloudsmartlogbyversion(&self, data: Serde<GetSmartlogByVersionParams>)
+    -> PyResult<Serde<SmartlogDataResponse>>
+    {
+        self.inner(py).as_ref().cloud_smartlog_by_version_py(data, py)
+    }
+
+    def cloudhistoricalversions(&self, data: Serde<HistoricalVersionsParams>)
+    -> PyResult<Serde<HistoricalVersionsResponse>>
+    {
+        self.inner(py).as_ref().cloud_historical_versions_py(data, py)
     }
 });
 

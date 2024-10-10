@@ -20,6 +20,7 @@ use megarepo_error::MegarepoError;
 use megarepo_mapping::SourceName;
 use metaconfig_types::RepoConfigArc;
 use mononoke_api::Mononoke;
+use mononoke_api::MononokeRepo;
 use mononoke_api::RepoContext;
 use mononoke_types::ChangesetId;
 use mutable_renames::MutableRenames;
@@ -45,22 +46,22 @@ use crate::common::MegarepoOp;
 // Tx - target merge commits
 // M - move commits
 // S - source commits that need to be merged
-pub struct AddSyncTarget<'a> {
+pub struct AddSyncTarget<'a, R> {
     pub megarepo_configs: &'a Arc<dyn MononokeMegarepoConfigs>,
-    pub mononoke: &'a Arc<Mononoke>,
+    pub mononoke: &'a Arc<Mononoke<R>>,
     pub mutable_renames: &'a Arc<MutableRenames>,
 }
 
-impl<'a> MegarepoOp for AddSyncTarget<'a> {
-    fn mononoke(&self) -> &Arc<Mononoke> {
+impl<'a, R> MegarepoOp<R> for AddSyncTarget<'a, R> {
+    fn mononoke(&self) -> &Arc<Mononoke<R>> {
         self.mononoke
     }
 }
 
-impl<'a> AddSyncTarget<'a> {
+impl<'a, R: MononokeRepo> AddSyncTarget<'a, R> {
     pub fn new(
         megarepo_configs: &'a Arc<dyn MononokeMegarepoConfigs>,
-        mononoke: &'a Arc<Mononoke>,
+        mononoke: &'a Arc<Mononoke<R>>,
         mutable_renames: &'a Arc<MutableRenames>,
     ) -> Self {
         Self {
@@ -103,7 +104,7 @@ impl<'a> AddSyncTarget<'a> {
         let moved_commits = self
             .create_move_commits(
                 ctx,
-                repo.inner_repo(),
+                repo.repo(),
                 &sync_target_config.sources,
                 &changesets_to_merge,
                 self.mutable_renames,
@@ -115,10 +116,10 @@ impl<'a> AddSyncTarget<'a> {
         let top_merge_cs_id = self
             .create_merge_commits(
                 ctx,
-                repo.inner_repo(),
+                repo.repo(),
                 moved_commits,
                 true, /* write_commit_remapping_state */
-                sync_target_config.version.clone(),
+                &sync_target_config,
                 message,
                 sync_target_config.target.bookmark.clone(),
             )
@@ -174,7 +175,7 @@ impl<'a> AddSyncTarget<'a> {
 
         self.create_bookmark(
             ctx,
-            repo.inner_repo(),
+            repo.repo(),
             sync_target_config.target.bookmark,
             top_merge_cs_id,
         )
@@ -192,13 +193,13 @@ impl<'a> AddSyncTarget<'a> {
         ctx: &CoreContext,
         sync_target_config: &SyncTargetConfig,
         changesets_to_merge: &BTreeMap<SourceName, ChangesetId>,
-        repo: &RepoContext,
+        repo: &RepoContext<R>,
     ) -> Result<Option<ChangesetId>, MegarepoError> {
         let bookmark_name = &sync_target_config.target.bookmark;
         let bookmark = BookmarkKey::new(bookmark_name).map_err(MegarepoError::request)?;
 
         let maybe_cs_id = repo
-            .blob_repo()
+            .repo()
             .bookmarks()
             .get(ctx.clone(), &bookmark)
             .map_err(MegarepoError::internal)

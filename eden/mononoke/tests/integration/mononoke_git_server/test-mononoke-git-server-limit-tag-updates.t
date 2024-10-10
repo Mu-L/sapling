@@ -11,10 +11,6 @@
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO_SUBMODULE="${TESTTMP}/origin/repo-submodule-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
   $ cat >> repos/repo/server.toml <<EOF
   > [[bookmarks]]
@@ -75,6 +71,8 @@
   To https://localhost:$LOCAL_PORT/repos/git/ro/repo.git
    + e8615d6...fb02ed0 empty_tag -> empty_tag (forced update)
    ! [remote rejected] first_tag -> first_tag (hooks failed:
-    limit_tag_updates for *: Commit edits a tag tags/first_tag) (glob)
+    limit_tag_updates for *: Commit edits a tag tags/first_tag (glob)
+  
+  For more information about hooks and bypassing, refer https://fburl.com/wiki/mb4wtk1j)
   error: failed to push some refs to 'https://localhost:$LOCAL_PORT/repos/git/ro/repo.git'
   [1]

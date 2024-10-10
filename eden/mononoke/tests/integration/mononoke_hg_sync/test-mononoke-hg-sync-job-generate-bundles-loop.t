@@ -13,8 +13,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo foo > a
   $ echo foo > b
   $ hg addremove && hg ci -m 'initial'
@@ -33,42 +33,37 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Make client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client-push --noupdate
 
 Push to Mononoke
   $ cd $TESTTMP/client-push
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q tip
 
 Two pushes synced one after another
   $ hg up -q master_bookmark
   $ mkcommit commit_first
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
   $ hg up -q master_bookmark
   $ mkcommit commit_second
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Sync it to another client
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ enable_replay_verification_hook
-  $ cat >> .hg/hgrc <<EOF
-  > [treemanifest]
-  > treeonly=True
-  > EOF
   $ cd $TESTTMP
 
 Sync a pushrebase bookmark move
-  $ mononoke_hg_sync_loop_regenerate repo-hg 1 --bundle-prefetch 2 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync_loop_regenerate repo 1 --bundle-prefetch 2 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [2]* (glob)
   * successful sync of entries [3]* (glob)
 
@@ -76,15 +71,15 @@ New bookmark is created
   $ cd $TESTTMP/client-push
   $ hg up -q "min(all())"
   $ mkcommit newbook_commit_first
-  $ hgmn push -r . --to newbook -q --create
+  $ hg push -r . --to newbook -q --create
 
   $ hg up -q newbook
   $ mkcommit newbook_commit_second
-  $ hgmn push -r . --to newbook -q
+  $ hg push -r . --to newbook -q
 
 Sync a pushrebase bookmark move. Note that we are using 0 start-id intentionally - sync job
 should ignore it and fetch the latest id from db
   $ cd $TESTTMP
-  $ mononoke_hg_sync_loop_regenerate repo-hg 0 --bundle-prefetch 2 2>&1 | grep 'successful sync of entries'
+  $ mononoke_hg_sync_loop_regenerate repo 0 --bundle-prefetch 2 2>&1 | grep 'successful sync of entries'
   * successful sync of entries [4]* (glob)
   * successful sync of entries [5]* (glob)

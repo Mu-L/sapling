@@ -10,7 +10,7 @@ name = "macro_test"
 path = "test/basic_test.rs"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 blake3 = { version = "=1.5.0", features = ["traits-preview"] }
 bytes = { version = "1.6.0", features = ["serde"] }
 dag-types = { version = "0.1.0", path = "../../dag/dag-types", features = ["for-tests"] }
@@ -23,14 +23,14 @@ serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_bytes = "0.11"
 serde_derive = "1.0.185"
 sha1 = "0.10.5"
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 type_macros = { version = "0.1.0", path = "proc_macros" }
 types = { version = "0.1.0", path = "../../types" }
 
 [dev-dependencies]
 insta_ext = { version = "0.1.0", path = "../../insta_ext" }
 quickcheck_macros = "1.0"
-serde_json = { version = "1.0.100", features = ["float_roundtrip", "unbounded_depth"] }
+serde_json = { version = "1.0.125", features = ["float_roundtrip", "unbounded_depth"] }
 
 [features]
 default = ["for-tests"]

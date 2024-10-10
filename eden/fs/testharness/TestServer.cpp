@@ -17,7 +17,8 @@
 #include "eden/fs/service/StartupLogger.h"
 #include "eden/fs/store/BackingStore.h"
 #include "eden/fs/telemetry/IActivityRecorder.h"
-#include "eden/fs/telemetry/IHiveLogger.h"
+#include "eden/fs/telemetry/IFileAccessLogger.h"
+#include "eden/fs/telemetry/IScribeLogger.h"
 #include "eden/fs/testharness/FakePrivHelper.h"
 
 using std::make_shared;
@@ -103,7 +104,8 @@ unique_ptr<EdenServer> TestServer::createServer(
         return std::make_unique<NullActivityRecorder>();
       },
       &gEmptyBackingStoreFactory,
-      make_shared<NullHiveLogger>(),
+      make_shared<NullFileAccessLogger>(),
+      make_shared<NullScribeLogger>(),
       std::move(startupSubscriberChannel),
       "test server");
 }

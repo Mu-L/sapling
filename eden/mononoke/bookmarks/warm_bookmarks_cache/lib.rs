@@ -34,6 +34,7 @@ use bookmarks_types::Bookmark;
 use bookmarks_types::BookmarkKind;
 use bookmarks_types::BookmarkPagination;
 use bookmarks_types::BookmarkPrefix;
+use case_conflict_skeleton_manifest::RootCaseConflictSkeletonManifestId;
 use changeset_info::ChangesetInfo;
 use cloned::cloned;
 use context::CoreContext;
@@ -70,6 +71,7 @@ use repo_identity::ArcRepoIdentity;
 use repo_identity::RepoIdentity;
 use repo_identity::RepoIdentityRef;
 use skeleton_manifest::RootSkeletonManifestId;
+use skeleton_manifest_v2::RootSkeletonManifestV2Id;
 use slog::debug;
 use slog::info;
 use slog::warn;
@@ -161,6 +163,15 @@ impl WarmBookmarksCacheBuilder {
         self.add_derived_data_warmers(&repo_derived_data.active_config().types, repo_derived_data)?;
         self.add_public_phase_warmer(phases);
         Ok(())
+    }
+
+    pub fn add_hg_and_git_warmers(
+        &mut self,
+        repo_derived_data: &ArcRepoDerivedData,
+        phases: &ArcPhases,
+    ) -> Result<(), Error> {
+        self.add_hg_warmers(repo_derived_data, phases)?;
+        self.add_git_warmers(repo_derived_data, phases)
     }
 
     pub fn add_hg_warmers(
@@ -260,6 +271,14 @@ impl WarmBookmarksCacheBuilder {
             >(
                 &self.ctx, repo_derived_data.clone()
             )),
+            DerivableType::SkeletonManifestsV2 => Some(create_derived_data_warmer::<
+                RootSkeletonManifestV2Id,
+            >(
+                &self.ctx, repo_derived_data.clone()
+            )),
+            DerivableType::Ccsm => Some(create_derived_data_warmer::<
+                RootCaseConflictSkeletonManifestId,
+            >(&self.ctx, repo_derived_data.clone())),
             DerivableType::ChangesetInfo => Some(create_derived_data_warmer::<ChangesetInfo>(
                 &self.ctx,
                 repo_derived_data.clone(),
@@ -1145,20 +1164,29 @@ async fn single_bookmark_updater(
 #[cfg(test)]
 mod tests {
     use anyhow::anyhow;
+    use bonsai_hg_mapping::BonsaiHgMapping;
+    use bookmarks::BookmarkUpdateLog;
     use bookmarks::BookmarkUpdateLogArc;
+    use bookmarks::Bookmarks;
     use bookmarks::BookmarksArc;
     use bookmarks::BookmarksMaybeStaleExt;
     use cloned::cloned;
+    use commit_graph::CommitGraph;
+    use commit_graph::CommitGraphWriter;
     use delayblob::DelayedBlobstore;
     use fbinit::FacebookInit;
+    use filestore::FilestoreConfig;
     use fixtures::Linear;
     use fixtures::TestRepoFixture;
     use maplit::hashmap;
     use memblob::Memblob;
-    use mononoke_api_types::InnerRepo;
+    use mononoke_macros::mononoke;
     use mononoke_types::RepositoryId;
+    use repo_blobstore::RepoBlobstore;
+    use repo_derived_data::RepoDerivedData;
     use repo_derived_data::RepoDerivedDataArc;
     use repo_derived_data::RepoDerivedDataRef;
+    use repo_identity::RepoIdentity;
     use repo_identity::RepoIdentityArc;
     use sql_ext::mononoke_queries;
     use test_repo_factory::TestRepoFactory;
@@ -1169,13 +1197,26 @@ mod tests {
 
     use super::*;
 
-    #[fbinit::test]
+    #[facet::container]
+    #[derive(Clone)]
+    pub struct Repo(
+        RepoIdentity,
+        RepoBlobstore,
+        RepoDerivedData,
+        CommitGraph,
+        dyn CommitGraphWriter,
+        dyn BonsaiHgMapping,
+        dyn BookmarkUpdateLog,
+        dyn Bookmarks,
+        FilestoreConfig,
+    );
+
+    #[mononoke::fbinit_test]
     async fn test_simple(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let sub = repo
-            .blob_repo
             .bookmarks()
             .create_subscription(&ctx, Freshness::MostRecent)
             .await?;
@@ -1199,7 +1240,7 @@ mod tests {
         .await?;
         assert_eq!(bookmarks, HashMap::new());
 
-        let master_cs_id = resolve_cs_id(&ctx, &repo.blob_repo, "master").await?;
+        let master_cs_id = resolve_cs_id(&ctx, &repo, "master").await?;
         repo.repo_derived_data()
             .derive::<RootUnodeManifestId>(&ctx, master_cs_id)
             .await?;
@@ -1220,7 +1261,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_find_derived(fb: FacebookInit) -> Result<(), Error> {
         let put_distr = rand_distr::Normal::<f64>::new(0.1, 0.05).unwrap();
         let get_distr = rand_distr::Normal::<f64>::new(0.05, 0.025).unwrap();
@@ -1229,11 +1270,11 @@ mod tests {
             put_distr,
             get_distr,
         ));
-        let repo: InnerRepo = TestRepoFactory::new(fb)?
+        let repo: Repo = TestRepoFactory::new(fb)?
             .with_blobstore(blobstore)
             .build()
             .await?;
-        Linear::init_repo(fb, &repo.blob_repo).await?;
+        Linear::init_repo(fb, &repo).await?;
         let ctx = CoreContext::test_mock(fb);
 
         let mut warmers: Vec<Warmer> = Vec::new();
@@ -1244,15 +1285,13 @@ mod tests {
         let warmers = Arc::new(warmers);
 
         info!(ctx.logger(), "creating 5 derived commits");
-        let mut master = resolve_cs_id(&ctx, &repo.blob_repo, "master").await?;
+        let mut master = resolve_cs_id(&ctx, &repo, "master").await?;
         for _ in 1..5 {
-            let new_master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec![master])
+            let new_master = CreateCommitContext::new(&ctx, &repo, vec![master])
                 .commit()
                 .await?;
 
-            bookmark(&ctx, &repo.blob_repo, "master")
-                .set_to(new_master)
-                .await?;
+            bookmark(&ctx, &repo, "master").set_to(new_master).await?;
             master = new_master;
         }
         repo.repo_derived_data()
@@ -1262,17 +1301,14 @@ mod tests {
 
         info!(ctx.logger(), "creating 5 more underived commits");
         for _ in 1..5 {
-            let new_master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec![master])
+            let new_master = CreateCommitContext::new(&ctx, &repo, vec![master])
                 .commit()
                 .await?;
-            bookmark(&ctx, &repo.blob_repo, "master")
-                .set_to(new_master)
-                .await?;
+            bookmark(&ctx, &repo, "master").set_to(new_master).await?;
             master = new_master;
         }
 
         let sub = repo
-            .blob_repo
             .bookmarks()
             .create_subscription(&ctx, Freshness::MostRecent)
             .await?;
@@ -1311,9 +1347,9 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_a_lot_of_moves(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let mut warmers: Vec<Warmer> = Vec::new();
@@ -1323,24 +1359,21 @@ mod tests {
         ));
         let warmers = Arc::new(warmers);
 
-        let derived_master = resolve_cs_id(&ctx, &repo.blob_repo, "master").await?;
+        let derived_master = resolve_cs_id(&ctx, &repo, "master").await?;
         repo.repo_derived_data()
             .derive::<RootUnodeManifestId>(&ctx, derived_master)
             .await?;
 
         for i in 1..50 {
-            let new_master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+            let new_master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
                 .add_file(format!("{}", i).as_str(), "content")
                 .commit()
                 .await?;
 
-            bookmark(&ctx, &repo.blob_repo, "master")
-                .set_to(new_master)
-                .await?;
+            bookmark(&ctx, &repo, "master").set_to(new_master).await?;
         }
 
         let sub = repo
-            .blob_repo
             .bookmarks()
             .create_subscription(&ctx, Freshness::MostRecent)
             .await?;
@@ -1362,9 +1395,9 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derived_right_after_threshold(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let mut warmers: Vec<Warmer> = Vec::new();
@@ -1374,31 +1407,28 @@ mod tests {
         ));
         let warmers = Arc::new(warmers);
 
-        let derived_master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let derived_master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("somefile", "content")
             .commit()
             .await?;
         repo.repo_derived_data()
             .derive::<RootUnodeManifestId>(&ctx, derived_master)
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "master")
+        bookmark(&ctx, &repo, "master")
             .set_to(derived_master)
             .await?;
 
         // First history threshold is 10. Let's make sure we don't have off-by one errors
         for i in 0..10 {
-            let new_master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+            let new_master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
                 .add_file(format!("{}", i).as_str(), "content")
                 .commit()
                 .await?;
 
-            bookmark(&ctx, &repo.blob_repo, "master")
-                .set_to(new_master)
-                .await?;
+            bookmark(&ctx, &repo, "master").set_to(new_master).await?;
         }
 
         let sub = repo
-            .blob_repo
             .bookmarks()
             .create_subscription(&ctx, Freshness::MostRecent)
             .await?;
@@ -1420,13 +1450,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_spawn_bookmarks_coordinator_simple(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let bookmarks = repo
-            .blob_repo
             .bookmarks()
             .get_publishing_bookmarks_maybe_stale(ctx.clone())
             .map_ok(|(book, cs_id)| {
@@ -1444,18 +1473,15 @@ mod tests {
         ));
         let warmers = Arc::new(warmers);
 
-        let master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("somefile", "content")
             .commit()
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "master")
-            .set_to(master)
-            .await?;
+        bookmark(&ctx, &repo, "master").set_to(master).await?;
 
         let mut coordinator = BookmarksCoordinator::new(
             bookmarks.clone(),
-            repo.blob_repo
-                .bookmarks()
+            repo.bookmarks()
                 .create_subscription(&ctx, Freshness::MostRecent)
                 .await?,
             repo.bookmarks_arc(),
@@ -1473,7 +1499,7 @@ mod tests {
         )
         .await?;
 
-        bookmark(&ctx, &repo.blob_repo, "master").delete().await?;
+        bookmark(&ctx, &repo, "master").delete().await?;
         // This check should not be successful in deleting master because it is protected
         update_and_wait_for_bookmark(
             &ctx,
@@ -1486,13 +1512,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_single_bookmarks_coordinator_many_updates(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let bookmarks = repo
-            .blob_repo
             .bookmarks()
             .get_publishing_bookmarks_maybe_stale(ctx.clone())
             .map_ok(|(book, cs_id)| {
@@ -1512,16 +1537,14 @@ mod tests {
 
         info!(ctx.logger(), "created stack of commits");
         for i in 1..10 {
-            let master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+            let master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
                 .add_file(format!("somefile{}", i).as_str(), "content")
                 .commit()
                 .await?;
             info!(ctx.logger(), "created {}", master);
-            bookmark(&ctx, &repo.blob_repo, "master")
-                .set_to(master)
-                .await?;
+            bookmark(&ctx, &repo, "master").set_to(master).await?;
         }
-        let master_cs_id = resolve_cs_id(&ctx, &repo.blob_repo, "master").await?;
+        let master_cs_id = resolve_cs_id(&ctx, &repo, "master").await?;
         info!(ctx.logger(), "created the whole stack of commits");
 
         let master_book_name = BookmarkKey::new("master")?;
@@ -1578,15 +1601,14 @@ mod tests {
         .await?
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_spawn_bookmarks_coordinator_failing_warmer(
         fb: FacebookInit,
     ) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let bookmarks = repo
-            .blob_repo
             .bookmarks()
             .get_publishing_bookmarks_maybe_stale(ctx.clone())
             .map_ok(|(book, cs_id)| {
@@ -1597,21 +1619,19 @@ mod tests {
             .await?;
         let bookmarks = Arc::new(RwLock::new(bookmarks));
 
-        let failing_cs_id = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let failing_cs_id = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("failed", "failed")
             .commit()
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "failingbook")
+        bookmark(&ctx, &repo, "failingbook")
             .set_to(failing_cs_id)
             .await?;
 
-        let master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("somefile", "content")
             .commit()
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "master")
-            .set_to(master)
-            .await?;
+        bookmark(&ctx, &repo, "master").set_to(master).await?;
 
         let warmer = Warmer {
             warmer: Box::new({
@@ -1653,8 +1673,7 @@ mod tests {
 
         let mut coordinator = BookmarksCoordinator::new(
             bookmarks.clone(),
-            repo.blob_repo
-                .bookmarks()
+            repo.bookmarks()
                 .create_subscription(&ctx, Freshness::MostRecent)
                 .await?,
             repo.bookmarks_arc(),
@@ -1689,8 +1708,7 @@ mod tests {
 
         let mut coordinator = BookmarksCoordinator::new(
             bookmarks.clone(),
-            repo.blob_repo
-                .bookmarks()
+            repo.bookmarks()
                 .create_subscription(&ctx, Freshness::MostRecent)
                 .await?,
             repo.bookmarks_arc(),
@@ -1710,18 +1728,17 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_spawn_bookmarks_coordinator_check_single_updater(
         fb: FacebookInit,
     ) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         repo.repo_derived_data()
             .derive::<RootUnodeManifestId>(
                 &ctx,
-                repo.blob_repo
-                    .bookmarks()
+                repo.bookmarks()
                     .get(ctx.clone(), &BookmarkKey::new("master")?)
                     .await?
                     .unwrap(),
@@ -1770,7 +1787,6 @@ mod tests {
         let warmers = Arc::new(warmers);
 
         let bookmarks = repo
-            .blob_repo
             .bookmarks()
             .get_publishing_bookmarks_maybe_stale(ctx.clone())
             .map_ok(|(book, cs_id)| {
@@ -1781,18 +1797,15 @@ mod tests {
             .await?;
         let bookmarks = Arc::new(RwLock::new(bookmarks));
 
-        let master = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let master = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("somefile", "content")
             .commit()
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "master")
-            .set_to(master)
-            .await?;
+        bookmark(&ctx, &repo, "master").set_to(master).await?;
 
         let mut coordinator = BookmarksCoordinator::new(
             bookmarks.clone(),
-            repo.blob_repo
-                .bookmarks()
+            repo.bookmarks()
                 .create_subscription(&ctx, Freshness::MostRecent)
                 .await?,
             repo.bookmarks_arc(),
@@ -1821,15 +1834,14 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_spawn_bookmarks_coordinator_with_publishing_bookmarks(
         fb: FacebookInit,
     ) -> Result<(), Error> {
-        let repo = Linear::get_inner_repo(fb).await;
+        let repo: Repo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let bookmarks = repo
-            .blob_repo
             .bookmarks()
             .get_publishing_bookmarks_maybe_stale(ctx.clone())
             .map_ok(|(book, cs_id)| {
@@ -1848,18 +1860,17 @@ mod tests {
         ));
         let warmers = Arc::new(warmers);
 
-        let new_cs_id = CreateCommitContext::new(&ctx, &repo.blob_repo, vec!["master"])
+        let new_cs_id = CreateCommitContext::new(&ctx, &repo, vec!["master"])
             .add_file("somefile", "content")
             .commit()
             .await?;
-        bookmark(&ctx, &repo.blob_repo, "publishing")
+        bookmark(&ctx, &repo, "publishing")
             .create_publishing(new_cs_id)
             .await?;
 
         let mut coordinator = BookmarksCoordinator::new(
             bookmarks.clone(),
-            repo.blob_repo
-                .bookmarks()
+            repo.bookmarks()
                 .create_subscription(&ctx, Freshness::MostRecent)
                 .await?,
             repo.bookmarks_arc(),
@@ -1878,10 +1889,8 @@ mod tests {
         .await?;
 
         // Now recreate a bookmark with the same name but different kind
-        bookmark(&ctx, &repo.blob_repo, "publishing")
-            .delete()
-            .await?;
-        bookmark(&ctx, &repo.blob_repo, "publishing")
+        bookmark(&ctx, &repo, "publishing").delete().await?;
+        bookmark(&ctx, &repo, "publishing")
             .set_to(new_cs_id)
             .await?;
 
@@ -1903,11 +1912,11 @@ mod tests {
         }
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_single_bookmarks_no_history(fb: FacebookInit) -> Result<(), Error> {
         let factory = TestRepoFactory::new(fb)?;
-        let repo: InnerRepo = factory.build().await?;
-        Linear::init_repo(fb, &repo.blob_repo).await?;
+        let repo: Repo = factory.build().await?;
+        Linear::init_repo(fb, &repo).await?;
         let ctx = CoreContext::test_mock(fb);
 
         let bookmarks = Arc::new(RwLock::new(HashMap::new()));
@@ -1919,7 +1928,7 @@ mod tests {
         ));
         let warmers = Arc::new(warmers);
 
-        let master_cs_id = resolve_cs_id(&ctx, &repo.blob_repo, "master").await?;
+        let master_cs_id = resolve_cs_id(&ctx, &repo, "master").await?;
         warm_all(&ctx, master_cs_id, &warmers).await?;
 
         let master_book_name = BookmarkKey::new("master")?;
@@ -1930,7 +1939,7 @@ mod tests {
 
         ClearBookmarkUpdateLog::query(
             &factory.metadata_db().write_connection,
-            &repo.blob_repo.repo_identity().id(),
+            &repo.repo_identity().id(),
         )
         .await?;
 

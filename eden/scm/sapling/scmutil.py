@@ -19,6 +19,7 @@ import re
 import socket
 import tempfile
 import time
+from collections import defaultdict
 
 import bindings
 
@@ -875,7 +876,30 @@ def cleanupnodes(repo, replacements, operation, moves=None, metadata=None):
         bmarks = repo._bookmarks
         bmarkchanges = []
         allnewnodes = [n for ns in replacements.values() for n in ns]
+
+        # Move extra Git refs (only used for dotgit mode, git_refs is empty otherwise)
+        metalog = repo.metalog()
+        git_refs = metalog.get_git_refs()  # {name: oid}
+        git_ref_by_oid = {}  # {oid: [name]}
+        git_ref_changed = False
+        for name, oid in git_refs.items():
+            names = git_ref_by_oid.get(oid)
+            if names is None:
+                git_ref_by_oid[oid] = [name]
+            else:
+                names.append(name)
+
         for oldnode, newnode in moves.items():
+            names = git_ref_by_oid.get(oldnode)
+            if names:
+                repo.ui.debug(
+                    "moving git ref %r from %s to %s\n"
+                    % (names, hex(oldnode), hex(newnode))
+                )
+                git_ref_changed = True
+                for name in names:
+                    git_refs[name] = newnode
+
             oldbmarks = repo.nodebookmarks(oldnode)
             if not oldbmarks:
                 continue
@@ -885,6 +909,7 @@ def cleanupnodes(repo, replacements, operation, moves=None, metadata=None):
                 "moving bookmarks %r from %s to %s\n"
                 % (oldbmarks, hex(oldnode), hex(newnode))
             )
+
             # Delete divergent bookmarks being parents of related newnodes
             deleterevs = repo.revs(
                 "parents(roots(%ln & (::%n))) - parents(%n)",
@@ -900,6 +925,8 @@ def cleanupnodes(repo, replacements, operation, moves=None, metadata=None):
 
         if bmarkchanges:
             bmarks.applychanges(repo, tr, bmarkchanges)
+        if git_ref_changed:
+            metalog.set_git_refs(git_refs)
 
         # adjust visibility, or strip nodes
         strip = True
@@ -1060,7 +1087,7 @@ def _markchanges(repo, unknown, deleted, renames):
     with repo.wlock():
         wctx.forget(deleted)
         wctx.add(unknown)
-        for new, old in pycompat.iteritems(renames):
+        for new, old in renames.items():
             wctx.copy(old, new)
 
 
@@ -1520,3 +1547,52 @@ def setup(ui):
 
         def revf64encode(rev):
             return rev
+
+
+def rootrelpath(ctx, path):
+    """Convert a path or a relative path pattern to a root relative path."""
+    SUPPORTED_PAT_KINDS = {"path", "relpath"}
+    if kind := matchmod.patkind(path):
+        if kind not in SUPPORTED_PAT_KINDS:
+            raise error.Abort(_("unsupported pattern kind: '%s'"), kind)
+    files = ctx.match(pats=[path], default="relpath").files()
+    if not files:
+        # path is repo root directory
+        return ""
+    # this should be true since we only pass "path" or "relpath" pattern kinds to match()
+    assert len(files) == 1, f"path '{path}' should match exactly one file path"
+    return files[0]
+
+
+def rootrelpaths(ctx, paths):
+    """Convert a list of path or relative path patterns to root relative paths."""
+    return [rootrelpath(ctx, path) for path in paths]
+
+
+def validate_path_exist(ui, ctx, paths, abort_on_missing=False):
+    """Validate that the given path exists in the given context."""
+    for p in paths:
+        if not (p in ctx or ctx.hasdir(p)):
+            msg = _("path '%s' does not exist in commit %s") % (p, ctx)
+            if abort_on_missing:
+                raise error.Abort(msg)
+            else:
+                ui.status(msg + "\n")
+
+
+def validate_path_size(from_paths, to_paths, abort_on_empty=False):
+    if len(from_paths) != len(to_paths):
+        raise error.Abort(_("must provide same number of --from-path and --to-path"))
+
+    if abort_on_empty and not from_paths:
+        raise error.Abort(_("must provide --from-path and --to-path"))
+
+
+def validate_path_overlap(to_paths):
+    # Disallow overlapping --to-path to keep things simple.
+    to_dirs = util.dirs(to_paths)
+    seen = set()
+    for p in to_paths:
+        if p in to_dirs or p in seen:
+            raise error.Abort(_("overlapping --to-path entries"))
+        seen.add(p)

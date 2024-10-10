@@ -5,8 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import {KeyCode, Modifier} from 'shared/KeyboardShortcuts';
-import {isMac, isWindows} from 'shared/OperatingSystem';
+import {KeyCode, Modifier} from './KeyboardShortcuts';
+import {isMac, isWindows} from './OperatingSystem';
 
 import './Kbd.css';
 

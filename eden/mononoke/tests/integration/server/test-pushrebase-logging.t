@@ -10,7 +10,7 @@
   $ export COMMIT_SCRIBE_CATEGORY=public_commit
   $ export MONONOKE_TEST_SCRIBE_LOGGING_DIRECTORY=$TESTTMP/scribe_logs/
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 setup_common_config
+  $ setup_common_config
   $ testtool_drawdag -R repo --derive-all --print-hg-hashes <<EOF
   > A-B-C
   > # bookmark: C main
@@ -19,7 +19,7 @@
   B=80521a640a0c8f51dcc128c2658b224d595840ac
   C=d3b399ca8757acdb81c3681b052eb978db6768d8
   $ start_and_wait_for_mononoke_server
-  $ hgmn_clone mononoke://$(mononoke_address)/repo repo
+  $ hg clone -q mono:repo repo
   $ cd repo
   $ hg up -q $A
 
@@ -42,7 +42,7 @@ Push the commits
   ├─╯
   o  20ca2a4749a4 'A'
   
-  $ sl push -q -r . --to main
+  $ hg push -q -r . --to main
 
   $ tglog
   @  d6637437d715 'commit2'

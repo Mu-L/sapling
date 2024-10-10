@@ -12,13 +12,16 @@ use anyhow::Error;
 use async_trait::async_trait;
 use fbinit::FacebookInit;
 use permission_checker::MononokeIdentitySet;
+use scuba_ext::MononokeScubaSampleBuilder;
 
 use crate::BoxRateLimiter;
 use crate::LoadCost;
+use crate::LoadShedResult;
 use crate::Metric;
 use crate::MononokeRateLimitConfig;
 use crate::RateLimitBody;
 use crate::RateLimitReason;
+use crate::RateLimitResult;
 use crate::RateLimiter;
 
 pub fn get_region_capacity(_datacenter_capacity: &BTreeMap<String, i32>) -> Option<i32> {
@@ -45,16 +48,18 @@ impl RateLimiter for FakeLimiter {
         _metric: Metric,
         _identities: &MononokeIdentitySet,
         _main_id: Option<&str>,
-    ) -> Result<Result<(), RateLimitReason>, Error> {
-        Ok(Ok(()))
+        _scuba: &mut MononokeScubaSampleBuilder,
+    ) -> Result<RateLimitResult, Error> {
+        Ok(RateLimitResult::Pass)
     }
 
     fn check_load_shed(
         &self,
         _identities: &MononokeIdentitySet,
         _main_id: Option<&str>,
-    ) -> Result<(), RateLimitReason> {
-        Ok(())
+        _scuba: &mut MononokeScubaSampleBuilder,
+    ) -> LoadShedResult {
+        LoadShedResult::Pass
     }
 
     fn bump_load(&self, _metric: Metric, _load: LoadCost) {}

@@ -15,8 +15,8 @@ setup configuration
   $ cd $TESTTMP
 
 setup hg server repo
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ touch a && hg ci -A -q -m 'add a'
 
 create master bookmark
@@ -34,13 +34,13 @@ create another commit that has other content we can redact
   $ cd $TESTTMP
 
 setup repo-pull and repo-push
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull2 --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull3 --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
+  $ hg clone -q mono:repo repo-pull2 --noupdate
+  $ hg clone -q mono:repo repo-pull3 --noupdate
 
 blobimport
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
@@ -49,41 +49,37 @@ start mononoke
   > [extensions]
   > pushrebase =
   > rebase =
-  > remotenames =
   > EOF
 
   $ cd ../repo-pull
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
   $ cd ../repo-pull2
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
   $ cd ../repo-pull3
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
   $ cd ../repo-push
 
-  $ hgmn up -q 0
+  $ hg up -q 0
   $ echo b > b
   $ hg ci -A -q -m "add b"
 
-  $ hgmn push -q -r .  --to master_bookmark
+  $ hg push -q -r .  --to master_bookmark
 
   $ cd "$TESTTMP/repo-pull"
-  $ hgmn pull -q
-  $ hgmn up -q 14961831bd3a
+  $ hg pull -q
+  $ hg up -q 14961831bd3a
 
 Redact file 'c' in commit '7389ca6413976090442f3003d4329990bc688ef7'
   $ mononoke_newadmin redaction create-key-list -R repo -i 7389ca6413976090442f3003d4329990bc688ef7 c --main-bookmark master_bookmark --output-file rs_0
@@ -142,8 +138,10 @@ Restart mononoke
   $ start_and_wait_for_mononoke_server --enable-wbc-with no-derivation
 
   $ cd "$TESTTMP/repo-pull2"
-  $ hgmn pull -q
-  $ hgmn up -q 14961831bd3a
+# Don't share caches.
+  $ setconfig remotefilelog.cachepath="$(pwd)/.hg/cache"
+  $ hg pull -q
+  $ hg up -q 14961831bd3a
 
 Should gives us the tombstone file since it is redacted
   $ cat b
@@ -168,8 +166,10 @@ Restart mononoke and disable redaction verification
   $ wait_for_mononoke
 
   $ cd "$TESTTMP/repo-pull3"
-  $ hgmn pull -q
-  $ hgmn up -q 14961831bd3a
+# Don't share caches.
+  $ setconfig remotefilelog.cachepath="$(pwd)/.hg/cache"
+  $ hg pull -q
+  $ hg up -q 14961831bd3a
 
 Even is file b is redacted, we will get its content
   $ cat b

@@ -15,9 +15,8 @@
   $ setup_common_config $REPOTYPE
   $ cd $TESTTMP
 
-  $ hginit_treemanifest repo-hg-nolfs
-  $ cd repo-hg-nolfs
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 # Commit files
   $ cp "${TEST_FIXTURES}/raw_text.txt" f1
@@ -33,7 +32,7 @@
 
   $ cd ..
 
-  $ blobimport repo-hg-nolfs/.hg repo
+  $ blobimport repo/.hg repo
 
 # Get the space consumed by the content as-is
   $ stat -c '%s %h %N' $TESTTMP/blobstore/0/blobs/blob-repo0000.content.blake2.* | sort -n
@@ -48,8 +47,8 @@
   $ echo 'repo0000.content.blake2.7f4c8284eea7351488400d6fdf82e1c262a81e20d4abd8ee469841d19b60c94a' >> $TESTTMP/pack_key_files4/reporepo.store0.part0.keys.txt
 
 # Pack content into a pack
-  $ packer --zstd-level 19 --scuba-dataset file://packed.json --keys-dir $TESTTMP/pack_key_files4/ --print-progress --tuning-info-scuba-table "file://${TESTTMP}/tuning_scuba.json"
-  File $TESTTMP/pack_key_files4/reporepo.store0.part0.keys.txt, which has 3 lines
+  $ packer --zstd-level 19 --scuba-dataset file://packed.json --keys-dir $TESTTMP/pack_key_files4/ --print-progress --tuning-info-scuba-table "file://${TESTTMP}/tuning_scuba.json" 2>&1 | strip_glog
+  File *reporepo.store0.part0.keys.txt, which has 3 lines (glob)
   Progress: 100.000%	processing took * (glob)
 
 # Check the tuning log has the following columns

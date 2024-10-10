@@ -179,7 +179,7 @@ def showdict(
     fmt: str = "%s=%s",
     separator: str = " ",
 ) -> _hybrid:
-    c = [{key: k, value: v} for k, v in pycompat.iteritems(data)]
+    c = [{key: k, value: v} for k, v in data.items()]
     f = _showlist(name, c, mapping, plural, separator)
     return hybriddict(data, key=key, value=value, fmt=fmt, gen=f)
 
@@ -363,7 +363,7 @@ def showbranch(**args):
     """String. The name of the branch on which the changeset was
     committed.
     """
-    return args[r"ctx"].branch()
+    return "default"
 
 
 @templatekeyword("branches")
@@ -372,10 +372,6 @@ def showbranches(**args) -> _hybrid:
     changeset was committed. Will be empty if the branch name was
     default. (DEPRECATED)
     """
-    args = args
-    branch = args["ctx"].branch()
-    if branch != "default":
-        return showlist("branch", [branch], args, plural="branches")
     return showlist("branch", [], args, plural="branches")
 
 
@@ -620,8 +616,6 @@ def showgraphnode(repo, ctx, **args) -> str:
         return "@"
     elif ctx.invisible() or ctx.obsolete():
         return "x"
-    elif ctx.closesbranch():
-        return "_"
     else:
         return "o"
 
@@ -700,7 +694,7 @@ def shownamespaces(**args) -> _hybrid:
         # 'name' for iterating over namespaces, templatename for local reference
         return lambda v: {"name": v, ns.templatename: v}
 
-    for k, ns in pycompat.iteritems(repo.names):
+    for k, ns in repo.names.items():
         names = ns.names(repo, ctx.node())
         f = _showlist("name", names, args)
         namespaces[k] = _hybrid(f, names, makensmapfn(ns), pycompat.identity)
@@ -749,12 +743,12 @@ def showpeerurls(repo, **args) -> _hybrid:
     of your configuration file."""
     # see commands.paths() for naming of dictionary keys
     paths = repo.ui.paths
-    urls = util.sortdict((k, p.rawloc) for k, p in sorted(pycompat.iteritems(paths)))
+    urls = util.sortdict((k, p.rawloc) for k, p in sorted(paths.items()))
 
     def makemap(k):
         p = paths[k]
         d = {"name": k, "url": p.rawloc}
-        d.update((o, v) for o, v in sorted(pycompat.iteritems(p.suboptions)))
+        d.update((o, v) for o, v in sorted(p.suboptions.items()))
         return d
 
     return _hybrid(None, urls, makemap, lambda k: "%s=%s" % (k, urls[k]))
@@ -974,7 +968,7 @@ def remotenameskw(**args) -> _hybrid:
 
 def loadkeyword(ui, extname, registrarobj) -> None:
     """Load template keyword from specified registrarobj"""
-    for name, func in pycompat.iteritems(registrarobj._table):
+    for name, func in registrarobj._table.items():
         keywords[name] = func
 
 

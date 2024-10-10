@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
 use edenapi_types::ToWire;
@@ -33,6 +34,8 @@ use gotham::state::State;
 use gotham_derive::StateData;
 use gotham_ext::content_encoding::ContentEncoding;
 use gotham_ext::error::ErrorFormatter;
+use gotham_ext::error::HttpError;
+use gotham_ext::handler::SlapiCommitIdentityScheme;
 use gotham_ext::middleware::load::RequestLoad;
 use gotham_ext::middleware::request_context::RequestContext;
 use gotham_ext::middleware::scuba::HttpScubaKey;
@@ -47,6 +50,7 @@ use gotham_ext::state_ext::StateExt;
 use hyper::Body;
 use hyper::Response;
 use mime::Mime;
+use mononoke_api::Repo;
 use serde::Deserialize;
 use serde::Serialize;
 use time_ext::DurationExt;
@@ -66,6 +70,7 @@ mod capabilities;
 mod commit;
 mod commit_cloud;
 mod files;
+mod git_objects;
 mod handler;
 mod history;
 mod land;
@@ -89,7 +94,13 @@ pub enum SaplingRemoteApiMethod {
     Blame,
     Bookmarks,
     Capabilities,
+    CloudHistoricalVersions,
     CloudReferences,
+    CloudRenameWorkspace,
+    CloudShareWorkspace,
+    CloudSmartlog,
+    CloudSmartlogByVersion,
+    CloudUpdateArchive,
     CloudUpdateReferences,
     CloudWorkspace,
     CloudWorkspaces,
@@ -105,6 +116,7 @@ pub enum SaplingRemoteApiMethod {
     EphemeralPrepare,
     FetchSnapshot,
     Files2,
+    GitObjects,
     History,
     LandStack,
     Lookup,
@@ -125,7 +137,13 @@ impl fmt::Display for SaplingRemoteApiMethod {
             Self::Blame => "blame",
             Self::Bookmarks => "bookmarks",
             Self::Capabilities => "capabilities",
+            Self::CloudHistoricalVersions => "cloud_historical_versions",
             Self::CloudReferences => "cloud_references",
+            Self::CloudRenameWorkspace => "cloud_rename_workspace",
+            Self::CloudShareWorkspace => "cloud_share_workspace",
+            Self::CloudSmartlog => "cloud_smartlog",
+            Self::CloudSmartlogByVersion => "cloud_smartlog_by_version",
+            Self::CloudUpdateArchive => "cloud_update_archive",
             Self::CloudUpdateReferences => "cloud_update_references",
             Self::CloudWorkspace => "cloud_workspace",
             Self::CloudWorkspaces => "cloud_workspaces",
@@ -141,6 +159,7 @@ impl fmt::Display for SaplingRemoteApiMethod {
             Self::EphemeralPrepare => "ephemeral_prepare",
             Self::FetchSnapshot => "fetch_snapshot",
             Self::Files2 => "files2",
+            Self::GitObjects => "git_objects",
             Self::History => "history",
             Self::LandStack => "land_stack",
             Self::Lookup => "lookup",
@@ -215,24 +234,45 @@ impl ErrorFormatter for JsonErrorFomatter {
 /// fn wrapped(mut state: State) -> Pin<Box<HandlerFuture>>
 /// ```
 macro_rules! define_handler {
-    ($name:ident, $func:path) => {
+    ($name:ident, $func:path, [$($flavour:ident),*]) => {
         fn $name(mut state: State) -> Pin<Box<HandlerFuture>> {
             async move {
-                let (future_stats, res) = $func(&mut state).timed().await;
-                ScubaMiddlewareState::try_set_future_stats(&mut state, &future_stats);
+                let slapi_flavour = SlapiCommitIdentityScheme::borrow_from(&state).clone();
+                let supported_flavours = [$(SlapiCommitIdentityScheme::$flavour),*];
+                let res = if !supported_flavours
+                    .iter()
+                    .any(|x| *x == slapi_flavour)
+                {
+                    Err(HttpError::e400(anyhow!(
+                        "Unsupported SaplingRemoteApi flavour"
+                    )))
+                } else {
+                    let (future_stats, res) = $func(&mut state).timed().await;
+                    ScubaMiddlewareState::try_set_future_stats(&mut state, &future_stats);
+                    res
+                };
                 build_response(res, state, &JsonErrorFomatter)
+
             }
             .boxed()
         }
     };
 }
 
-define_handler!(capabilities_handler, capabilities::capabilities_handler);
-define_handler!(commit_hash_to_location_handler, commit::hash_to_location);
-define_handler!(commit_revlog_data_handler, commit::revlog_data);
-define_handler!(repos_handler, repos::repos);
-define_handler!(trees_handler, trees::trees);
-define_handler!(upload_file_handler, files::upload_file);
+define_handler!(
+    capabilities_handler,
+    capabilities::capabilities_handler,
+    [Hg]
+);
+define_handler!(
+    commit_hash_to_location_handler,
+    commit::hash_to_location,
+    [Hg]
+);
+define_handler!(commit_revlog_data_handler, commit::revlog_data, [Hg]);
+define_handler!(repos_handler, repos::repos, [Hg]);
+define_handler!(trees_handler, trees::trees, [Hg]);
+define_handler!(upload_file_handler, files::upload_file, [Hg]);
 
 static HIGH_LOAD_SIGNAL: &str = "I_AM_OVERLOADED";
 static ALIVE: &str = "I_AM_ALIVE";
@@ -240,7 +280,7 @@ static EXITING: &str = "EXITING";
 
 // Used for monitoring VIP health
 fn proxygen_health_handler(state: State) -> (State, &'static str) {
-    if ServerContext::borrow_from(&state).will_exit() {
+    if ServerContext::<Repo>::borrow_from(&state).will_exit() {
         (state, EXITING)
     } else {
         if let Some(request_load) = RequestLoad::try_borrow_from(&state) {
@@ -257,7 +297,7 @@ fn proxygen_health_handler(state: State) -> (State, &'static str) {
 
 // Used for monitoring TW tasks
 fn health_handler(state: State) -> (State, &'static str) {
-    if ServerContext::borrow_from(&state).will_exit() {
+    if ServerContext::<Repo>::borrow_from(&state).will_exit() {
         (state, EXITING)
     } else {
         (state, ALIVE)
@@ -275,6 +315,15 @@ where
         let query = Handler::QueryStringExtractor::take_from(&mut state);
         let content_encoding = ContentEncoding::from_state(&state);
 
+        let slapi_flavour = SlapiCommitIdentityScheme::borrow_from(&state).clone();
+        if !Handler::SUPPORTED_FLAVOURS
+            .iter()
+            .any(|x| *x == slapi_flavour)
+        {
+            return Err(gotham_ext::error::HttpError::e400(anyhow!(
+                "Unsupported SaplingRemoteApi flavour"
+            )));
+        }
         state.put(HandlerInfo::new(path.repo(), Handler::API_METHOD));
 
         let rctx = RequestContext::borrow_from(&state).clone();
@@ -292,7 +341,7 @@ where
             rd.add_request(&request);
         }
 
-        let ectx = SaplingRemoteApiContext::new(rctx, sctx, repo, path, query);
+        let ectx = SaplingRemoteApiContext::new(rctx, sctx, repo, path, query, slapi_flavour);
 
         match Handler::handler(ectx, request).await {
             Ok(responses) => Ok(encode_response_stream(
@@ -352,7 +401,7 @@ where
             ctx.perf_counters().insert_perf_counters(&mut scuba);
             scuba.log_with_msg(
                 "Long running SaplingRemoteAPI request",
-                format!("{}", start.elapsed().as_micros_unchecked()),
+                format!("{} μs", start.elapsed().as_micros_unchecked()),
             );
         }
     };
@@ -406,7 +455,7 @@ where
     }
 }
 
-pub fn build_router(ctx: ServerContext) -> Router {
+pub fn build_router<R: Send + Sync + Clone + 'static>(ctx: ServerContext<R>) -> Router {
     let pipeline = new_pipeline().add(StateMiddleware::new(ctx)).build();
     let (chain, pipelines) = single_pipeline(pipeline);
 
@@ -419,7 +468,13 @@ pub fn build_router(ctx: ServerContext) -> Router {
         Handlers::setup::<blame::BlameHandler>(route);
         Handlers::setup::<bookmarks::BookmarksHandler>(route);
         Handlers::setup::<bookmarks::SetBookmarkHandler>(route);
+        Handlers::setup::<commit_cloud::CommitCloudHistoricalVersions>(route);
         Handlers::setup::<commit_cloud::CommitCloudReferences>(route);
+        Handlers::setup::<commit_cloud::CommitCloudRenameWorkspace>(route);
+        Handlers::setup::<commit_cloud::CommitCloudShareWorkspace>(route);
+        Handlers::setup::<commit_cloud::CommitCloudSmartlog>(route);
+        Handlers::setup::<commit_cloud::CommitCloudSmartlogByVersion>(route);
+        Handlers::setup::<commit_cloud::CommitCloudUpdateArchive>(route);
         Handlers::setup::<commit_cloud::CommitCloudUpdateReferences>(route);
         Handlers::setup::<commit_cloud::CommitCloudWorkspace>(route);
         Handlers::setup::<commit_cloud::CommitCloudWorkspaces>(route);
@@ -437,6 +492,7 @@ pub fn build_router(ctx: ServerContext) -> Router {
         Handlers::setup::<files::DownloadFileHandler>(route);
         Handlers::setup::<files::Files2Handler>(route);
         Handlers::setup::<files::UploadHgFilenodesHandler>(route);
+        Handlers::setup::<git_objects::GitObjectsHandler>(route);
         Handlers::setup::<history::HistoryHandler>(route);
         Handlers::setup::<land::LandStackHandler>(route);
         Handlers::setup::<lookup::LookupHandler>(route);

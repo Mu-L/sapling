@@ -74,11 +74,21 @@ pub async fn create_pre_merge_delete<'a>(
 mod test {
     use std::collections::HashSet;
 
+    use bonsai_hg_mapping::BonsaiHgMapping;
+    use bookmarks::Bookmarks;
     use cloned::cloned;
+    use commit_graph::CommitGraph;
+    use commit_graph::CommitGraphWriter;
     use fbinit::FacebookInit;
+    use filestore::FilestoreConfig;
     use fixtures::Linear;
     use fixtures::TestRepoFixture;
+    use mononoke_macros::mononoke;
     use mononoke_types::DateTime;
+    use phases::Phases;
+    use repo_blobstore::RepoBlobstore;
+    use repo_derived_data::RepoDerivedData;
+    use repo_identity::RepoIdentity;
     use tests_utils::resolve_cs_id;
     use tests_utils::CreateCommitContext;
 
@@ -86,9 +96,23 @@ mod test {
     use crate::common::ChangesetArgs;
     use crate::common::StackPosition;
 
-    #[fbinit::test]
+    #[facet::container]
+    #[derive(Clone)]
+    struct TestRepo(
+        dyn BonsaiHgMapping,
+        dyn Bookmarks,
+        RepoBlobstore,
+        RepoDerivedData,
+        RepoIdentity,
+        CommitGraph,
+        dyn CommitGraphWriter,
+        FilestoreConfig,
+        dyn Phases,
+    );
+
+    #[mononoke::fbinit_test]
     async fn test_create_pre_merge_delete(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::getrepo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let bcs_id = resolve_cs_id(&ctx, &repo, "master").await?;
@@ -162,9 +186,9 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_create_pre_merge_delete_with_base(fb: FacebookInit) -> Result<(), Error> {
-        let repo = Linear::getrepo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let master_bcs_id = resolve_cs_id(&ctx, &repo, "master").await?;

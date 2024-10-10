@@ -7,27 +7,29 @@
 
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use cas_client::CasClient;
-use cas_client::CasDigest;
+use configmodel::convert::ByteCount;
+use configmodel::convert::FromConfigValue;
 use configmodel::Config;
 use configmodel::ConfigExt;
 use re_client_lib::create_default_config;
 use re_client_lib::CASDaemonClientCfg;
-use re_client_lib::DownloadRequest;
 use re_client_lib::EmbeddedCASDaemonClientCfg;
 use re_client_lib::REClient;
 use re_client_lib::REClientBuilder;
+use re_client_lib::RemoteCASdAddress;
+use re_client_lib::RemoteCacheConfig;
 use re_client_lib::RemoteExecutionMetadata;
-use re_client_lib::TCode;
-use re_client_lib::TDigest;
-use re_client_lib::THashAlgo;
-use types::Blake3;
+
+pub const CAS_SOCKET_PATH: &str = "/run/casd/casd.socket";
 
 pub struct RichCasClient {
-    client: REClient,
+    client: re_cas_common::OnceCell<REClient>,
+    verbose: bool,
     metadata: RemoteExecutionMetadata,
+    use_casd_cache: bool,
+    fetch_limit: ByteCount,
 }
 
 pub fn init() {
@@ -46,23 +48,6 @@ pub fn init() {
 
 impl RichCasClient {
     pub fn from_config(config: &dyn Config) -> Result<Self> {
-        let mut re_config = create_default_config();
-
-        re_config.client_name = Some("sapling".to_string());
-        re_config.quiet_mode = !config.get_or_default("cas", "verbose")?;
-        re_config.features_config_path =
-            "remote_execution/features/client_source_control".to_string();
-
-        re_config.cas_client_config =
-            CASDaemonClientCfg::embedded_config(EmbeddedCASDaemonClientCfg {
-                name: "source_control".to_string(),
-                ..Default::default()
-            });
-
-        let builder = REClientBuilder::new(fbinit::expect_init())
-            .with_config(re_config)
-            .with_rich_client(true);
-
         let use_case: String = match config.get("cas", "use-case") {
             Some(use_case) => use_case.to_string(),
             None => format!(
@@ -71,67 +56,49 @@ impl RichCasClient {
             ),
         };
 
+        let use_casd_cache = config.get_or("cas", "use-shared-cache", || true)?;
+
+        let default_fetch_limit = ByteCount::try_from_str("200MB")?;
+
         Ok(Self {
-            client: builder.build()?,
+            client: Default::default(),
+            verbose: config.get_or_default("cas", "verbose")?,
             metadata: RemoteExecutionMetadata {
                 use_case_id: use_case,
                 ..Default::default()
             },
+            use_casd_cache,
+            fetch_limit: config
+                .get_or::<ByteCount>("cas", "max-batch-bytes", || default_fetch_limit)?,
         })
     }
-}
 
-fn to_re_digest(d: &CasDigest) -> TDigest {
-    TDigest {
-        hash: d.hash.to_hex(),
-        size_in_bytes: d.size as i64,
-        hash_algo: Some(THashAlgo::BLAKE3),
-        ..Default::default()
-    }
-}
+    fn build(&self) -> Result<REClient> {
+        let mut re_config = create_default_config();
 
-fn from_re_digest(d: &TDigest) -> Result<CasDigest> {
-    Ok(CasDigest {
-        hash: Blake3::from_hex(d.hash.as_bytes())?,
-        size: d.size_in_bytes as u64,
-    })
-}
+        re_config.client_name = Some("sapling".to_string());
+        re_config.quiet_mode = !self.verbose;
+        re_config.features_config_path = "remote_execution/features/client_eden".to_string();
 
-#[async_trait::async_trait]
-impl CasClient for RichCasClient {
-    async fn fetch(
-        &self,
-        digests: &[CasDigest],
-    ) -> Result<Vec<(CasDigest, Result<Option<Vec<u8>>>)>> {
-        tracing::debug!(target: "cas", "rich client fetching {} digests", digests.len());
-
-        let request = DownloadRequest {
-            inlined_digests: Some(digests.iter().map(to_re_digest).collect()),
+        let mut embedded_config = EmbeddedCASDaemonClientCfg {
+            name: "source_control".to_string(),
             ..Default::default()
         };
+        if self.use_casd_cache {
+            embedded_config.remote_cache_config = Some(RemoteCacheConfig {
+                address: RemoteCASdAddress::uds_path(CAS_SOCKET_PATH.to_string()),
+                ..Default::default()
+            });
+            embedded_config.cache_config.writable_cache = false;
+        }
+        re_config.cas_client_config = CASDaemonClientCfg::embedded_config(embedded_config);
 
-        self.client
-            .download(self.metadata.clone(), request)
-            .await?
-            .inlined_blobs
-            .unwrap_or_default()
-            .into_iter()
-            .map(|blob| {
-                let digest = from_re_digest(&blob.digest)?;
-                match blob.status.code {
-                    TCode::OK => Ok((digest, Ok(Some(blob.blob)))),
-                    TCode::NOT_FOUND => Ok((digest, Ok(None))),
-                    _ => Ok((
-                        digest,
-                        Err(anyhow!(
-                            "bad status (code={}, message={}, group={})",
-                            blob.status.code,
-                            blob.status.message,
-                            blob.status.group
-                        )),
-                    )),
-                }
-            })
-            .collect::<Result<Vec<_>>>()
+        let builder = REClientBuilder::new(fbinit::expect_init())
+            .with_config(re_config)
+            .with_rich_client(true);
+
+        builder.build()
     }
 }
+
+re_cas_common::re_client!(RichCasClient);

@@ -51,6 +51,7 @@ server, rather than relying on the server to perform this computation.
     [treemanifest]
     http = True
 """
+
 from __future__ import absolute_import
 
 import hashlib
@@ -59,6 +60,7 @@ import struct
 
 import bindings
 from bindings import manifest as rustmanifest, revisionstore
+
 from sapling import (
     bundle2,
     bundlerepo,
@@ -93,7 +95,6 @@ from sapling.i18n import _, _n
 from sapling.node import bin, hex, nullid, short
 from sapling.pycompat import range
 
-from .. import clienttelemetry
 from ..remotefilelog import (
     cmdtable as remotefilelogcmdtable,
     resolveprefetchopts,
@@ -106,7 +107,6 @@ from ..remotefilelog.contentstore import unioncontentstore
 from ..remotefilelog.datapack import memdatapack
 from ..remotefilelog.historypack import memhistorypack
 from ..remotefilelog.metadatastore import unionmetadatastore
-
 
 try:
     from itertools import zip_longest
@@ -218,7 +218,6 @@ def uisetup(ui):
     )
     extensions.wrapfunction(debugcommands, "_debugbundle2part", _debugbundle2part)
     extensions.wrapfunction(repair, "_collectfiles", collectfiles)
-    extensions.wrapfunction(repair, "striptrees", striptrees)
     extensions.wrapfunction(repair, "_collectmanifest", _collectmanifest)
     extensions.wrapfunction(repair, "stripmanifest", stripmanifest)
     extensions.wrapfunction(bundle2, "_addpartsfromopts", _addpartsfromopts)
@@ -330,6 +329,14 @@ def stripmanifest(orig, repo, striprev, tr, files):
     orig(repo, striprev, tr, files)
 
 
+def _addtreecaps(caps):
+    caps = set(caps)
+    caps.add("gettreepack")
+    caps.add("designatednodes")
+    caps.add("treeonly")
+    return list(caps)
+
+
 def reposetup(ui, repo):
     # Update "{manifest}" again since it might be rewritten by templatekw.init.
     templatekw.defaulttempl["manifest"] = "{node}"
@@ -337,14 +344,14 @@ def reposetup(ui, repo):
     if not isinstance(repo, localrepo.localrepository):
         return
 
-    repo.svfs.treemanifestserver = False
-    clientreposetup(repo)
+    repo.name = repo.ui.config("remotefilelog", "reponame", "unknown")
+
+    def _capabilities(orig, repo, proto):
+        return _addtreecaps(orig(repo, proto))
+
+    extensions.wrapfunction(wireproto, "_capabilities", _capabilities)
 
     wraprepo(repo)
-
-
-def clientreposetup(repo):
-    repo.name = repo.ui.config("remotefilelog", "reponame", "unknown")
 
 
 def wraprepo(repo):
@@ -375,10 +382,7 @@ def wraprepo(repo):
 
         def _restrictcapabilities(self, caps):
             caps = super(treerepository, self)._restrictcapabilities(caps)
-            caps.add("designatednodes")
-            caps.add("gettreepack")
-            caps.add("treeonly")
-            return caps
+            return _addtreecaps(caps)
 
         def forcebfsprefetch(self, mfnodes):
             self._bfsprefetch(mfnodes)
@@ -393,14 +397,6 @@ def wraprepo(repo):
 
     repo.__class__ = treerepository
     repo._treefetches = 0
-
-
-def _prunesharedpacks(repo, packpath):
-    """Repack the packpath if it has too many packs in it"""
-    try:
-        numentries = len(os.listdir(packpath))
-    except OSError:
-        return
 
 
 def setuptreestores(repo, mfl):
@@ -587,20 +583,11 @@ class basetreemanifestlog:
 
     def makeruststore(self):
         assert not self._iseager
-        remotestore = revisionstore.pyremotestore(remotetreestore(self._repo))
         mask = os.umask(0o002)
         try:
-            self.treescmstore = self._repo._rsrepo.treescmstore(
-                remotestore,
-            )
+            self.treescmstore = self._repo._rsrepo.treescmstore()
             self.datastore = self.treescmstore
-            self.historystore = revisionstore.metadatastore(
-                self._repo.svfs.vfs.base,
-                self.ui._rcfg,
-                remotestore,
-                None,
-                "manifests",
-            )
+            self.historystore = self.treescmstore.metadatastore()
         finally:
             os.umask(mask)
 
@@ -715,7 +702,7 @@ class treemanifestctx:
             raise NotImplemented("native trees don't support shallow " "readdelta yet")
         else:
             md = _buildtree(self._manifestlog)
-            for f, ((n1, fl1), (n2, fl2)) in pycompat.iteritems(parentmf.diff(mf)):
+            for f, ((n1, fl1), (n2, fl2)) in parentmf.diff(mf).items():
                 if n2:
                     md[f] = n2
                     if fl2:
@@ -849,7 +836,7 @@ def debuggetroottree(ui, repo, rootnode):
 def _difftoaddremove(diff):
     added = []
     removed = []
-    for filename, (old, new) in pycompat.iteritems(diff):
+    for filename, (old, new) in diff.items():
         if new is not None and new[0] is not None:
             added.append((filename, new[0], new[1]))
         else:
@@ -938,61 +925,6 @@ def _prefetchonlytrees(repo, opts):
         basemfnode.add(repo[base].manifestnode())
 
     repo.prefetchtrees(mfnodes, basemfnodes=basemfnode)
-
-
-def _gettrees(
-    repo,
-    remote,
-    rootdir,
-    mfnodes,
-    basemfnodes,
-    directories,
-    start,
-    depth,
-    ondemandfetch=False,
-):
-    if "gettreepack" not in shallowutil.peercapabilities(remote):
-        raise error.Abort(_("missing gettreepack capability on remote"))
-    bundle = remote.gettreepack(rootdir, mfnodes, basemfnodes, directories, depth)
-
-    try:
-        op = bundle2.processbundle(repo, bundle, None)
-
-        receivednodes = op.records[RECEIVEDNODE_RECORD]
-        count = 0
-        missingnodes = set(mfnodes)
-
-        for reply in receivednodes:
-            # If we're doing on-demand tree fetching, this means that we are not
-            # trying to fetch complete trees. Consequently, the set of mfnodes
-            # passed in are not all different versions of the same root
-            # directory -- instead they correspond to individual subdirectories
-            # within a single tree, which we are explicitly not downloading in
-            # its entirety. This means we should not check the directory path
-            # when checking for missing nodes in the response.
-            if ondemandfetch:
-                missingnodes.difference_update(n for d, n in reply)
-            else:
-                missingnodes.difference_update(n for d, n in reply if d == rootdir)
-            count += len(reply)
-        perftrace.tracevalue("Fetched", count)
-        if op.repo.ui.configbool("remotefilelog", "debug"):
-            duration = util.timer() - start
-            op.repo.ui.warn(_("%s trees fetched over %0.2fs\n") % (count, duration))
-
-        if missingnodes:
-            raise shallowutil.MissingNodesError(
-                (("", n) for n in missingnodes),
-                "tree nodes missing from server response",
-            )
-    except bundle2.AbortFromPart as exc:
-        repo.ui.debug("remote: abort: %s\n" % exc)
-        # Give stderr some time to reach the client, so we can read it into the
-        # currently pushed ui buffer, instead of it randomly showing up in a
-        # future ui read.
-        raise shallowutil.MissingNodesError((("", n) for n in mfnodes), hint=exc.hint)
-    except error.BundleValueError as exc:
-        raise error.Abort(_("missing support for %s") % exc)
 
 
 def _registerbundle2parts():
@@ -1136,16 +1068,6 @@ def createtreepackpart(repo, outgoing, partname, sendtrees=shallowbundle.AllTree
     part.addparam("category", PACK_CATEGORY)
 
     return part
-
-
-def getfallbackpath(repo):
-    if hasattr(repo, "fallbackpath"):
-        return repo.fallbackpath
-    else:
-        path = repo.ui.config("paths", "default")
-        if not path:
-            raise error.Abort("no remote server configured to fetch trees from")
-        return path
 
 
 def pull(orig, ui, repo, *pats, **opts):
@@ -1440,6 +1362,9 @@ class EagerHistoryStore:
     def add(self, filename, node, p1, p2, linknode, copyfrom):
         self._added[(filename, node)] = (p1, p2, linknode, copyfrom)
 
+    def getsharedmutable(self):
+        return self
+
 
 class EagerDataStore:
     def __init__(self, store):
@@ -1493,6 +1418,9 @@ class EagerDataStore:
     def prefetch(self, items):
         # EagerRepoStore is not lazy.
         pass
+
+    def getsharedmutable(self):
+        return self
 
     def __getattr__(self, name):
         return getattr(self._store, name)
@@ -1593,80 +1521,6 @@ def _generatepackstream(
     yield wirepack.closepart()
 
 
-class remotetreestore:
-    def __init__(self, repo):
-        self._repo = repo
-        self.ui = repo.ui
-
-    def _interactivedebug(self):
-        """Returns True if this is an interactive command running in debug mode."""
-        return self.ui.interactive() and self.ui.configbool("remotefilelog", "debug")
-
-    def prefetch(self, datastore, historystore, keys):
-        if usehttpfetching(self._repo):
-            # http fetching is handled inside the content store, so raise a
-            # KeyError here.
-            raise shallowutil.MissingNodesError(keys)
-        else:
-            if self._interactivedebug():
-                n = len(keys)
-                (firstpath, firstnode) = keys[0]
-                firstnode = hex(firstnode)
-                self.ui.write_err(
-                    _n(
-                        "fetching tree for ('%(path)s', %(node)s)\n",
-                        "fetching %(num)s trees\n",
-                        n,
-                    )
-                    % {"path": firstpath, "node": firstnode, "num": n}
-                )
-
-            return self._sshgetdesignatednodes(keys)
-
-    @perftrace.tracefunc("SSH On-Demand Fetch Trees")
-    def _sshgetdesignatednodes(self, keys):
-        """
-        Fetch the specified tree nodes over SSH.
-
-        This method requires the server to support the "designatednodes"
-        capability. This capability overloads the gettreepack wireprotocol
-        command to allow the client to specify an exact set of tree nodes
-        to fetch; the server will then provide only those nodes.
-
-        Returns False if the server does not support "designatednodes",
-        and True otherwise.
-        """
-        fallbackpath = getfallbackpath(self._repo)
-        with self._repo.connectionpool.get(fallbackpath) as conn:
-            if "designatednodes" not in conn.peer.capabilities():
-                raise error.ProgrammingError("designatednodes must be supported")
-
-            mfnodes = [node for path, node in keys]
-            directories = [path for path, node in keys]
-
-            if self.ui.configbool("remotefilelog", "debug") and len(keys) == 1:
-                name = keys[0][0]
-                node = keys[0][1]
-                msg = _("fetching tree %r %s") % (name, hex(node))
-                self.ui.warn(msg + "\n")
-
-            start = util.timer()
-            with self.ui.timesection("getdesignatednodes"):
-                _gettrees(
-                    self._repo,
-                    conn.peer,
-                    "",
-                    mfnodes,
-                    [],
-                    directories,
-                    start,
-                    depth=1,
-                    ondemandfetch=True,
-                )
-
-        return True
-
-
 def _debugcmdfindtreemanifest(orig, ctx):
     manifest = ctx.manifest()
     # Check if the manifest we have is a treemanifest.
@@ -1720,11 +1574,6 @@ def collectfiles(orig, repo, striprev):
             files.update(repo[x].files())
 
     return sorted(files)
-
-
-def striptrees(orig, repo, tr, striprev, files):
-    if not treeenabled(repo.ui):
-        return orig(repo, tr, striprev, files)
 
 
 def _addpartsfromopts(orig, ui, repo, bundler, source, outgoing, *args, **kwargs):

@@ -44,6 +44,7 @@
 #include "eden/fs/inodes/TreePrefetchLease.h"
 #include "eden/fs/journal/Journal.h"
 #include "eden/fs/model/Tree.h"
+#include "eden/fs/model/TreeAuxData.h"
 #include "eden/fs/model/TreeEntry.h"
 #include "eden/fs/model/git/GitIgnoreStack.h"
 #include "eden/fs/nfs/NfsDirList.h"
@@ -1221,6 +1222,46 @@ std::optional<ObjectId> TreeInode::getObjectId() const {
   return state->treeHash;
 }
 
+ImmediateFuture<std::optional<Hash32>> TreeInode::getDigestHash(
+    const ObjectFetchContextPtr& fetchContext) {
+  auto state = contents_.rlock();
+
+  if (!state->isMaterialized()) {
+    // If a tree is not materialized, it should have a hash value.
+    return getObjectStore()
+        .getTreeDigestHash(state->treeHash.value(), fetchContext)
+        .thenValue([](Hash32 hash) { return std::make_optional(hash); });
+  }
+  return ImmediateFuture<std::optional<Hash32>>{std::nullopt};
+}
+
+ImmediateFuture<std::optional<uint64_t>> TreeInode::getDigestSize(
+    const ObjectFetchContextPtr& fetchContext) {
+  auto state = contents_.rlock();
+
+  if (!state->isMaterialized()) {
+    // If a tree is not materialized, it should have a hash size.
+    return getObjectStore()
+        .getTreeDigestSize(state->treeHash.value(), fetchContext)
+        .thenValue([](uint64_t size) { return std::make_optional(size); });
+  }
+  return ImmediateFuture<std::optional<uint64_t>>{std::nullopt};
+}
+
+ImmediateFuture<std::optional<TreeAuxData>> TreeInode::getTreeAuxData(
+    const ObjectFetchContextPtr& fetchContext) {
+  auto state = contents_.rlock();
+
+  if (!state->isMaterialized()) {
+    // If a tree is not materialized, it should have aux data.
+    return getObjectStore()
+        .getTreeAuxData(state->treeHash.value(), fetchContext)
+        .thenValue(
+            [](TreeAuxData treeAux) { return std::make_optional(treeAux); });
+  }
+  return ImmediateFuture<std::optional<TreeAuxData>>{std::nullopt};
+}
+
 FileInodePtr TreeInode::symlink(
     PathComponentPiece name,
     folly::StringPiece symlinkTarget,
@@ -2289,7 +2330,7 @@ bool TreeInode::readdirImpl(
   // It's very common for userspace to readdir() a directory to completion and
   // serially stat() every entry. Since stat() returns a file's size and a
   // directory's entry count in the st_nlink field, treat readdir() as a signal
-  // that we may want to prefetch metadata for all children.
+  // that we may want to prefetch aux data for all children.
 #ifndef _WIN32
   // TODO: enable readdir prefetching on Windows
   considerReaddirPrefetch(context);
@@ -3131,7 +3172,8 @@ ImmediateFuture<Unit> TreeInode::checkout(
                                  << self->getLogPath() << ": " << numErrors
                                  << " errors";
                     });
-          });
+          })
+      .ensure([ctx] { ctx->increaseCheckoutCounter(1); });
 }
 
 bool TreeInode::canShortCircuitCheckout(
@@ -3203,6 +3245,7 @@ void TreeInode::computeCheckoutActions(
   if (contents->treeHash.has_value() &&
       canShortCircuitCheckout(
           ctx, contents->treeHash.value(), fromTree, toTree)) {
+    ctx->increaseCheckoutCounter(this->getInMemoryDescendants());
     return;
   }
 
@@ -3294,9 +3337,38 @@ std::shared_ptr<CheckoutAction> TreeInode::processCheckoutEntry(
     TreeInodeState& state,
     const Tree::value_type* oldScmEntry,
     const Tree::value_type* newScmEntry,
+    std::vector<IncompleteInodeLoad>& pendingLoads,
+    bool& wasDirectoryListModified) {
+  auto ret = processCheckoutEntryImpl(
+      ctx,
+      state,
+      oldScmEntry,
+      newScmEntry,
+      pendingLoads,
+      wasDirectoryListModified);
+  if (!ret) {
+    const auto& name = oldScmEntry ? oldScmEntry->first : newScmEntry->first;
+    if (auto it = state.entries.find(name); it != state.entries.end()) {
+      if (auto treeInode = it->second.asTreeOrNull()) {
+        // If we didn't get a checkout action for this entry but still were able
+        // to find a treeInode representing it, it means we won't recurse on it
+        // so we increase our "completed" checkout count by its descendants.
+        auto increase = treeInode ? treeInode->getInMemoryDescendants() : 0;
+        ctx->increaseCheckoutCounter(1 + increase);
+      }
+    }
+  }
+  return ret;
+}
+
+std::shared_ptr<CheckoutAction> TreeInode::processCheckoutEntryImpl(
+    CheckoutContext* ctx,
+    TreeInodeState& state,
+    const Tree::value_type* oldScmEntry,
+    const Tree::value_type* newScmEntry,
     vector<IncompleteInodeLoad>& pendingLoads,
     bool& wasDirectoryListModified) {
-  XLOG(DBG5) << "processCheckoutEntry(" << getLogPath() << "): "
+  XLOG(DBG5) << "processCheckoutEntryImpl(" << getLogPath() << "): "
              << (oldScmEntry
                      ? oldScmEntry->second.toLogString(oldScmEntry->first)
                      : "(null)")
@@ -3597,6 +3669,9 @@ ImmediateFuture<InvalidationRequired> TreeInode::checkoutUpdateEntry(
   auto treeInode = inode.asTreePtrOrNull();
   bool windowsSymlinksEnabled = ctx->getWindowsSymlinksEnabled();
   if (!treeInode) {
+    // Regardless of what we'll do with the inode, we can consider it as "done"
+    // since it isn't a treeInode, so we add that to our counters.
+    ctx->increaseCheckoutCounter(1);
     // If the target of the update is not a directory, then we know we do not
     // need to recurse into it, looking for more conflicts, so we can exit here.
     if (ctx->isDryRun()) {
@@ -4531,6 +4606,20 @@ void TreeInode::childWasStat(bool isFile, const ObjectFetchContext& context) {
   doPrefetch(prefetchSet, context);
 }
 
+uint64_t TreeInode::getInMemoryDescendants() {
+  int64_t inMemoryDescendants =
+      inMemoryDescendants_.load(std::memory_order_relaxed);
+  if (inMemoryDescendants < 0) {
+    // maybe make inMemoryDescendants_ 0?
+    return 0;
+  }
+  return static_cast<uint64_t>(inMemoryDescendants);
+}
+
+void TreeInode::increaseInMemoryDescendants(int64_t inc) {
+  inMemoryDescendants_.fetch_add(inc, std::memory_order_relaxed);
+}
+
 void TreeInode::considerReaddirPrefetch(
     const ObjectFetchContextPtr& /*context*/) {
   auto currentState = prefetchState_.load(std::memory_order_relaxed);
@@ -4587,7 +4676,7 @@ void TreeInode::doPrefetch(
   // doPrefetch() is called by stat(), under the assumption that a readdir()
   // followed by stat() on a child will precede stat() calls on the remainder of
   // the children. For example, `ls -l` or `find -ls`. To optimize that common
-  // situation, load trees and blob metadata in parallel here.
+  // situation, load trees and blob aux data in parallel here.
 
   auto prefetchLease =
       getMount()->tryStartTreePrefetch(inodePtrFromThis(), context);
@@ -4659,7 +4748,7 @@ void TreeInode::doPrefetch(
           load.finish();
         }
 
-        return collectAll(std::move(inodeFutures))
+        return collectAllSafe(std::move(inodeFutures))
             .thenTry([lease = std::move(lease)](auto&&) {
               XLOG(DBG4) << "finished prefetch for "
                          << lease.getTreeInode()->getLogPath();

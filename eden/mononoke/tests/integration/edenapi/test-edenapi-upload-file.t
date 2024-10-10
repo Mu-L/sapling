@@ -7,15 +7,13 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
 Set up local hgrc and Mononoke config.
-  $ REPONAME="test/repo"
   $ setup_common_config
   $ setup_configerator_configs
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag << EOF
   > B
   > |
@@ -24,14 +22,14 @@ Initialize test repo.
 
 import testing repo
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ setup_mononoke_config
   $ start_and_wait_for_mononoke_server
 Check responses.
 
-  $ sl debugapi -e uploadfilecontents -i '[({"Sha1":"03cfd743661f07975fa2f1220c5194cbaff48451"}, b"abc\n")]'
+  $ hg debugapi mono:repo -e uploadfilecontents -i '[({"Sha1":"03cfd743661f07975fa2f1220c5194cbaff48451"}, b"abc\n")]'
   [{"data": {"id": {"AnyFileContentId": {"Sha1": bin("03cfd743661f07975fa2f1220c5194cbaff48451")}},
              "metadata": {"FileContentTokenMetadata": {"content_size": 4}},
              "bubble_id": None},
@@ -54,10 +52,10 @@ Check responses.
                                 114,
                                 101]}}]
 
-  $ sl debugapi -e ephemeralprepare -i None -i None
+  $ hg debugapi mono:repo -e ephemeralprepare -i None -i None
   {"bubble_id": 1}
 
-  $ sl debugapi -e uploadfilecontents -i '[({"Sha1":"7b18d017f89f61cf17d47f92749ea6930a3f1deb"}, b"def\n")]' -i 1
+  $ hg debugapi mono:repo -e uploadfilecontents -i '[({"Sha1":"7b18d017f89f61cf17d47f92749ea6930a3f1deb"}, b"def\n")]' -i 1
   [{"data": {"id": {"AnyFileContentId": {"Sha1": bin("7b18d017f89f61cf17d47f92749ea6930a3f1deb")}},
              "metadata": {"FileContentTokenMetadata": {"content_size": 4}},
              "bubble_id": 1},

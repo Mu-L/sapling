@@ -77,7 +77,7 @@ impl BlobstoreValue for ContentChunk {
             context.finish()
         };
 
-        let data = compact_protocol::serialize(&self.into_thrift());
+        let data = compact_protocol::serialize(self.into_thrift());
 
         Blob::new(id, data)
     }
@@ -119,6 +119,7 @@ pub fn new_blob_and_pointer<B: Into<Bytes>>(bytes: B) -> (ContentChunkBlob, Cont
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
 
     use super::*;
@@ -147,7 +148,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn bad_thrift() {
         let thrift_fc = thrift::content::ContentChunk::UnknownField(-1);
         ContentChunk::from_thrift(thrift_fc).expect_err("unexpected OK - unknown field");

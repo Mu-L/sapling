@@ -5,6 +5,7 @@
  * GNU General Public License version 2.
  */
 
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,29 +17,30 @@ use configmodel::Config;
 use configmodel::ConfigExt;
 use edenapi::Builder;
 use fn_error_context::context;
+use hgtime::HgTime;
 use parking_lot::Mutex;
 use progress_model::AggregatingProgressBar;
 
-use crate::contentstore::check_cache_buster;
 use crate::indexedlogauxstore::AuxStore;
 use crate::indexedlogdatastore::IndexedLogHgIdDataStore;
 use crate::indexedlogdatastore::IndexedLogHgIdDataStoreConfig;
 use crate::indexedlogtreeauxstore::TreeAuxStore;
 use crate::indexedlogutil::StoreType;
-use crate::lfs::LfsRemote;
+use crate::lfs::LfsClient;
 use crate::lfs::LfsStore;
 use crate::scmstore::activitylogger::ActivityLogger;
 use crate::scmstore::file::FileStoreMetrics;
 use crate::scmstore::tree::TreeMetadataMode;
 use crate::scmstore::FileStore;
 use crate::scmstore::TreeStore;
+use crate::util::check_run_once;
+use crate::util::get_cache_path;
 use crate::util::get_indexedlogdatastore_aux_path;
 use crate::util::get_indexedlogdatastore_path;
 use crate::util::get_indexedloghistorystore_path;
 use crate::util::get_local_path;
 use crate::util::get_tree_aux_store_path;
-use crate::ContentStore;
-use crate::ExtStoredPolicy;
+use crate::util::RUN_ONCE_FILENAME;
 use crate::IndexedLogHgIdHistoryStore;
 use crate::SaplingRemoteApiFileStore;
 use crate::SaplingRemoteApiTreeStore;
@@ -55,7 +57,6 @@ pub struct FileStoreBuilder<'a> {
     lfs_cache: Option<Arc<LfsStore>>,
 
     edenapi: Option<Arc<SaplingRemoteApiFileStore>>,
-    contentstore: Option<Arc<ContentStore>>,
     cas_client: Option<Arc<dyn CasClient>>,
 }
 
@@ -71,7 +72,6 @@ impl<'a> FileStoreBuilder<'a> {
             lfs_local: None,
             lfs_cache: None,
             edenapi: None,
-            contentstore: None,
             cas_client: None,
         }
     }
@@ -119,21 +119,6 @@ impl<'a> FileStoreBuilder<'a> {
     pub fn lfs_local(mut self, lfs_local: Arc<LfsStore>) -> Self {
         self.lfs_local = Some(lfs_local);
         self
-    }
-
-    pub fn contentstore(mut self, contentstore: Arc<ContentStore>) -> Self {
-        self.contentstore = Some(contentstore);
-        self
-    }
-
-    #[context("Get ExtStored Policy somehow failed")]
-    fn get_extstored_policy(&self) -> Result<ExtStoredPolicy> {
-        // This is to keep compatibility w/ the Python lfs extension.
-        // Contentstore would "upgrade" Python LFS pointers from the pack store
-        // to indexedlog store during repack, but scmstore doesn't have a repack
-        // notion. It doesn't seem bad to just always allow LFS pointers stored
-        // in the non-LFS pointer storage.
-        Ok(ExtStoredPolicy::Use)
     }
 
     #[context("unable to get LFS threshold")]
@@ -187,7 +172,6 @@ impl<'a> FileStoreBuilder<'a> {
             Some(Arc::new(IndexedLogHgIdDataStore::new(
                 self.config,
                 get_indexedlogdatastore_path(local_path)?,
-                self.get_extstored_policy()?,
                 &config,
                 StoreType::Permanent,
             )?))
@@ -198,7 +182,7 @@ impl<'a> FileStoreBuilder<'a> {
 
     #[context("failed to build indexedlog cache")]
     pub fn build_indexedlog_cache(&self) -> Result<Option<Arc<IndexedLogHgIdDataStore>>> {
-        let cache_path = match cache_path(self.config, &self.suffix)? {
+        let cache_path = match get_cache_path(self.config, &self.suffix)? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -220,7 +204,6 @@ impl<'a> FileStoreBuilder<'a> {
         Ok(Some(Arc::new(IndexedLogHgIdDataStore::new(
             self.config,
             get_indexedlogdatastore_path(cache_path)?,
-            self.get_extstored_policy()?,
             &config,
             StoreType::Rotated,
         )?)))
@@ -228,7 +211,7 @@ impl<'a> FileStoreBuilder<'a> {
 
     #[context("failed to build aux cache")]
     pub fn build_aux_cache(&self) -> Result<Option<Arc<AuxStore>>> {
-        let cache_path = match cache_path(self.config, &self.suffix)? {
+        let cache_path = match get_cache_path(self.config, &self.suffix)? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -261,7 +244,7 @@ impl<'a> FileStoreBuilder<'a> {
             return Ok(None);
         }
 
-        let cache_path = match cache_path(self.config, &self.suffix)? {
+        let cache_path = match get_cache_path(self.config, &self.suffix)? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -272,14 +255,9 @@ impl<'a> FileStoreBuilder<'a> {
     #[context("failed to build config revisionstore")]
     pub fn build(mut self) -> Result<FileStore> {
         tracing::trace!(target: "revisionstore::filestore", "checking cache");
-        if self.contentstore.is_none() {
-            if let Some(cache_path) = cache_path(self.config, &self.suffix)? {
-                check_cache_buster(&self.config, &cache_path);
-            }
+        if let Some(cache_path) = get_cache_path(self.config, &self.suffix)? {
+            check_cache_buster(&self.config, &cache_path);
         }
-
-        tracing::trace!(target: "revisionstore::filestore", "processing extstored policy");
-        let extstored_policy = self.get_extstored_policy()?;
 
         tracing::trace!(target: "revisionstore::filestore", "processing lfs threshold");
         let lfs_threshold_bytes = self.get_lfs_threshold()?.map(|b| b.value());
@@ -322,7 +300,7 @@ impl<'a> FileStoreBuilder<'a> {
             if let Some(ref lfs_cache) = lfs_cache {
                 // TODO(meyer): Refactor upload functionality so we don't need to use LfsRemote with it's own references to the
                 // underlying stores.
-                Some(Arc::new(LfsRemote::new(
+                Some(Arc::new(LfsClient::new(
                     lfs_cache.clone(),
                     lfs_local.clone(),
                     self.config,
@@ -341,16 +319,6 @@ impl<'a> FileStoreBuilder<'a> {
             } else {
                 Some(self.build_edenapi()?)
             }
-        } else {
-            None
-        };
-
-        tracing::trace!(target: "revisionstore::filestore", "processing contentstore");
-        let contentstore = if self
-            .config
-            .get_or_default::<bool>("scmstore", "contentstorefallback")?
-        {
-            self.contentstore
         } else {
             None
         };
@@ -387,16 +355,19 @@ impl<'a> FileStoreBuilder<'a> {
             .config
             .get_or("scmstore", "max-prefetch-size", || 100_000)?;
 
-        let cas_client = if self.config.get_or_default("scmstore", "fetch-from-cas")? {
+        let cas_client = if self.config.get_or_default("scmstore", "fetch-from-cas")?
+            || self
+                .config
+                .get_or_default("scmstore", "fetch-files-from-cas")?
+        {
             self.cas_client
         } else {
-            tracing::debug!(target: "cas", "scmstore disabled (scmstore.fetch-from-cas=false)");
+            tracing::debug!(target: "cas", "scmstore disabled (scmstore.fetch-from-cas=false and scmstore.fetch-files-from-cas=false)");
             None
         };
 
         tracing::trace!(target: "revisionstore::filestore", "constructing FileStore");
         Ok(FileStore {
-            extstored_policy,
             lfs_threshold_bytes,
             edenapi_retries,
             allow_write_lfs_ptrs,
@@ -416,7 +387,6 @@ impl<'a> FileStoreBuilder<'a> {
             cas_client,
 
             activity_logger,
-            contentstore,
             metrics: FileStoreMetrics::new(),
 
             aux_cache,
@@ -424,24 +394,6 @@ impl<'a> FileStoreBuilder<'a> {
             lfs_progress: AggregatingProgressBar::new("fetching", "LFS"),
             flush_on_drop: true,
         })
-    }
-}
-
-// Return remotefilelog cache path, or None if there is no cache path
-// (e.g. because we have no repo name).
-fn cache_path(config: &dyn Config, suffix: &Option<PathBuf>) -> Result<Option<PathBuf>> {
-    match crate::util::get_cache_path(config, suffix) {
-        Ok(p) => Ok(Some(p)),
-        Err(err) => {
-            if matches!(
-                err.downcast_ref::<configmodel::Error>(),
-                Some(configmodel::Error::NotSet(_, _))
-            ) {
-                Ok(None)
-            } else {
-                Err(err)
-            }
-        }
     }
 }
 
@@ -454,7 +406,6 @@ pub struct TreeStoreBuilder<'a> {
     indexedlog_local: Option<Arc<IndexedLogHgIdDataStore>>,
     indexedlog_cache: Option<Arc<IndexedLogHgIdDataStore>>,
     edenapi: Option<Arc<SaplingRemoteApiTreeStore>>,
-    contentstore: Option<Arc<ContentStore>>,
     tree_aux_store: Option<Arc<TreeAuxStore>>,
     filestore: Option<Arc<FileStore>>,
     cas_client: Option<Arc<dyn CasClient>>,
@@ -470,7 +421,6 @@ impl<'a> TreeStoreBuilder<'a> {
             indexedlog_local: None,
             indexedlog_cache: None,
             edenapi: None,
-            contentstore: None,
             tree_aux_store: None,
             filestore: None,
             cas_client: None,
@@ -509,11 +459,6 @@ impl<'a> TreeStoreBuilder<'a> {
 
     pub fn indexedlog_local(mut self, indexedlog: Arc<IndexedLogHgIdDataStore>) -> Self {
         self.indexedlog_local = Some(indexedlog);
-        self
-    }
-
-    pub fn contentstore(mut self, contentstore: Arc<ContentStore>) -> Self {
-        self.contentstore = Some(contentstore);
         self
     }
 
@@ -560,7 +505,6 @@ impl<'a> TreeStoreBuilder<'a> {
             Some(Arc::new(IndexedLogHgIdDataStore::new(
                 self.config,
                 get_indexedlogdatastore_path(local_path)?,
-                ExtStoredPolicy::Use,
                 &config,
                 StoreType::Permanent,
             )?))
@@ -571,7 +515,7 @@ impl<'a> TreeStoreBuilder<'a> {
 
     #[context("failed to build indexedlog cache")]
     pub fn build_indexedlog_cache(&self) -> Result<Option<Arc<IndexedLogHgIdDataStore>>> {
-        let cache_path = match cache_path(self.config, &self.suffix)? {
+        let cache_path = match get_cache_path(self.config, &self.suffix)? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -594,7 +538,6 @@ impl<'a> TreeStoreBuilder<'a> {
         Ok(Some(Arc::new(IndexedLogHgIdDataStore::new(
             self.config,
             get_indexedlogdatastore_path(cache_path)?,
-            ExtStoredPolicy::Use,
             &config,
             StoreType::Rotated,
         )?)))
@@ -627,7 +570,7 @@ impl<'a> TreeStoreBuilder<'a> {
     pub fn build_historystore_local(&self) -> Result<Option<Arc<IndexedLogHgIdHistoryStore>>> {
         Ok(if let Some(local_path) = &self.local_path {
             Some(Arc::new(IndexedLogHgIdHistoryStore::new(
-                get_indexedloghistorystore_path(local_path)?,
+                get_indexedloghistorystore_path(local_path.join("manifests"))?,
                 self.config,
                 StoreType::Permanent,
             )?))
@@ -638,7 +581,7 @@ impl<'a> TreeStoreBuilder<'a> {
 
     #[context("failed to build shared history")]
     pub fn build_historystore_cache(&self) -> Result<Option<Arc<IndexedLogHgIdHistoryStore>>> {
-        let cache_path = match cache_path(self.config, &None)? {
+        let cache_path = match get_cache_path(self.config, &Some("manifests"))? {
             Some(p) => p,
             None => return Ok(None),
         };
@@ -655,10 +598,8 @@ impl<'a> TreeStoreBuilder<'a> {
         // TODO(meyer): Clean this up, just copied and pasted from the other version & did some ugly hacks to get this
         // (the SaplingRemoteApiAdapter stuff needs to be fixed in particular)
         tracing::trace!(target: "revisionstore::treestore", "checking cache");
-        if self.contentstore.is_none() {
-            if let Some(cache_path) = cache_path(self.config, &self.suffix)? {
-                check_cache_buster(&self.config, &cache_path);
-            }
+        if let Some(cache_path) = get_cache_path(self.config, &self.suffix)? {
+            check_cache_buster(&self.config, &cache_path);
         }
 
         tracing::trace!(target: "revisionstore::treestore", "processing local");
@@ -701,31 +642,14 @@ impl<'a> TreeStoreBuilder<'a> {
         };
 
         tracing::trace!(target: "revisionstore::treestore", "processing historystore");
-        let (historystore_local, historystore_cache) = if self
-            .config
-            .get_or_default("scmstore", "handle-tree-parents")?
-        {
-            (
-                self.build_historystore_local()?,
-                self.build_historystore_cache()?,
-            )
-        } else {
-            (None, None)
-        };
+        let (historystore_local, historystore_cache) = (
+            self.build_historystore_local()?,
+            self.build_historystore_cache()?,
+        );
 
         let prefetch_tree_parents = self
             .config
             .get_or_default("scmstore", "prefetch-tree-parents")?;
-
-        tracing::trace!(target: "revisionstore::treestore", "processing contentstore");
-        let contentstore = if self
-            .config
-            .get_or_default::<bool>("scmstore", "contentstorefallback")?
-        {
-            self.contentstore
-        } else {
-            None
-        };
 
         let tree_metadata_mode = match self.config.get("scmstore", "tree-metadata-mode").as_deref()
         {
@@ -744,7 +668,11 @@ impl<'a> TreeStoreBuilder<'a> {
             );
         }
 
-        let cas_client = if self.config.get_or_default("scmstore", "fetch-from-cas")? {
+        let cas_client = if self.config.get_or_default("scmstore", "fetch-from-cas")?
+            || self
+                .config
+                .get_or_default("scmstore", "fetch-trees-from-cas")?
+        {
             if self.cas_client.is_some() {
                 if !fetch_tree_aux_data {
                     tracing::warn!(target: "cas", "augmented tree fetching disabled (scmstore.fetch-tree-aux-data=false)");
@@ -756,7 +684,7 @@ impl<'a> TreeStoreBuilder<'a> {
 
             self.cas_client
         } else {
-            tracing::debug!(target: "cas", "scmstore disabled (scmstore.fetch-from-cas=false)");
+            tracing::debug!(target: "cas", "scmstore disabled (scmstore.fetch-from-cas=false and scmstore.fetch-trees-from-cas=false)");
             None
         };
 
@@ -767,7 +695,6 @@ impl<'a> TreeStoreBuilder<'a> {
             cache_to_local_cache: true,
             edenapi,
             cas_client,
-            contentstore,
             tree_aux_store,
             historystore_local,
             historystore_cache,
@@ -793,4 +720,43 @@ fn use_edenapi_via_config(config: &dyn Config) -> Result<bool> {
         }
     }
     Ok(use_edenapi)
+}
+
+/// Reads the configs and deletes the hgcache if a hgcache-purge.$KEY=$DATE value hasn't already
+/// been processed.
+pub fn check_cache_buster(config: &dyn Config, store_path: &Path) {
+    for key in config.keys("hgcache-purge").into_iter() {
+        if let Some(cutoff) = config
+            .get("hgcache-purge", &key)
+            .and_then(|c| HgTime::parse(&c))
+        {
+            if check_run_once(store_path, &key, cutoff) {
+                let _ = delete_hgcache(store_path);
+                break;
+            }
+        }
+    }
+}
+
+/// Recursively deletes the contents of the path, excluding the run-once marker file.
+/// Ignores errors on individual files or directories.
+fn delete_hgcache(store_path: &Path) -> Result<()> {
+    for file in fs::read_dir(store_path)? {
+        let _ = (|| -> Result<()> {
+            let file = file?;
+            if file.file_name() == RUN_ONCE_FILENAME {
+                return Ok(());
+            }
+
+            let path = file.path();
+            let file_type = file.file_type()?;
+            if file_type.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                fs::remove_file(path)?;
+            }
+            Ok(())
+        })();
+    }
+    Ok(())
 }

@@ -18,6 +18,8 @@ use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::log_cross_environment_session_id;
+
 pub const ENV_SAPLING_CLIENT_ENTRY_POINT: &str = "SAPLING_CLIENT_ENTRY_POINT";
 pub const ENV_SAPLING_CLIENT_CORRELATOR: &str = "SAPLING_CLIENT_CORRELATOR";
 
@@ -77,6 +79,7 @@ fn new_client_request_info() -> ClientRequestInfo {
 
     tracing::info!(target: "clienttelemetry", client_entry_point=entry_point.to_string());
     tracing::info!(target: "clienttelemetry", client_correlator=correlator);
+    log_cross_environment_session_id();
 
     ClientRequestInfo::new_ext(entry_point, correlator)
 }
@@ -107,8 +110,10 @@ pub struct ClientRequestInfo {
     pub correlator: String,
 }
 
-#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Copy, Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub enum ClientEntryPoint {
+    #[default]
+    Unknown,
     Sapling,
     EdenFs,
     Fbclone,
@@ -125,6 +130,8 @@ pub enum ClientEntryPoint {
     Walker,
     MegarepoTool,
     MegarepoBacksyncer,
+    MegarepoBookmarksValidator,
+    MegarepoCommitValidator,
     MegarepoForwardsyncer,
     MononokeAdmin,
     GitImport,
@@ -195,6 +202,7 @@ impl ClientRequestInfo {
 impl Display for ClientEntryPoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let out = match self {
+            ClientEntryPoint::Unknown => "unknown",
             ClientEntryPoint::Sapling => "sapling",
             ClientEntryPoint::EdenFs => "edenfs",
             ClientEntryPoint::Fbclone => "fbclone",
@@ -210,6 +218,8 @@ impl Display for ClientEntryPoint {
             ClientEntryPoint::Walker => "walker",
             ClientEntryPoint::MegarepoTool => "megarepo_tool",
             ClientEntryPoint::MegarepoBacksyncer => "megarepo_backsyncer",
+            ClientEntryPoint::MegarepoBookmarksValidator => "megarepo_bookmarks_validator",
+            ClientEntryPoint::MegarepoCommitValidator => "megarepo_commit_validator",
             ClientEntryPoint::MegarepoForwardsyncer => "megarepo_forwardsyncer",
             ClientEntryPoint::MononokeAdmin => "mononoke_admin",
             ClientEntryPoint::GitImport => "git_import",
@@ -249,6 +259,8 @@ impl TryFrom<&str> for ClientEntryPoint {
             "walker" => Ok(ClientEntryPoint::Walker),
             "megarepo_tool" => Ok(ClientEntryPoint::MegarepoTool),
             "megarepo_backsyncer" => Ok(ClientEntryPoint::MegarepoBacksyncer),
+            "megarepo_bookmarks_validator" => Ok(ClientEntryPoint::MegarepoBookmarksValidator),
+            "megarepo_commit_validator" => Ok(ClientEntryPoint::MegarepoCommitValidator),
             "megarepo_forwardsyncer" => Ok(ClientEntryPoint::MegarepoForwardsyncer),
             "mononoke_admin" => Ok(ClientEntryPoint::MononokeAdmin),
             "git_import" => Ok(ClientEntryPoint::GitImport),
@@ -371,6 +383,24 @@ mod tests {
             Some(ClientEntryPoint::MegarepoBacksyncer),
             ClientEntryPoint::try_from(ClientEntryPoint::MegarepoBacksyncer.to_string().as_ref())
                 .ok()
+        );
+        assert_eq!(
+            Some(ClientEntryPoint::MegarepoBookmarksValidator),
+            ClientEntryPoint::try_from(
+                ClientEntryPoint::MegarepoBookmarksValidator
+                    .to_string()
+                    .as_ref()
+            )
+            .ok()
+        );
+        assert_eq!(
+            Some(ClientEntryPoint::MegarepoCommitValidator),
+            ClientEntryPoint::try_from(
+                ClientEntryPoint::MegarepoCommitValidator
+                    .to_string()
+                    .as_ref()
+            )
+            .ok()
         );
         assert_eq!(
             Some(ClientEntryPoint::MegarepoForwardsyncer),

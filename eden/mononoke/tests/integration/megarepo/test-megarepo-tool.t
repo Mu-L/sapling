@@ -18,8 +18,8 @@ setup configuration
 
 setup hg server repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ function createfile { mkdir -p "$(dirname  $1)" && echo "$1" > "$1" && hg add "$1"; }
 
 -- create some semblance of fbsource
@@ -52,10 +52,10 @@ setup hg server repo
   $ cd $TESTTMP
 
 setup repo-pull
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
 
 blobimport
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
   $ export COMMIT_DATE="1985-09-04T00:00:00.00Z"
 move things in fbsource
@@ -128,7 +128,7 @@ start mononoke server
   $ start_and_wait_for_mononoke_server
 pull the result
   $ cd $TESTTMP/repo-pull
-  $ hgmn -q pull && hgmn -q up master
+  $ hg -q pull && hg -q up master
   $ ls -1
   arvr
   arvr-legacy

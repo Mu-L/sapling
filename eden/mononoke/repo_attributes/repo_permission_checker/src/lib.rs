@@ -59,6 +59,9 @@ pub trait RepoPermissionChecker: Send + Sync + 'static {
     /// read-only state** of the repository.
     async fn check_if_read_only_bypass_allowed(&self, identities: &MononokeIdentitySet) -> bool;
 
+    /// Check whether the give identities are permitted to **bypass all the hooks** of the repository
+    async fn check_if_all_hooks_bypass_allowed(&self, identities: &MononokeIdentitySet) -> bool;
+
     /// Check whether the given identities are permitted to **act as a
     /// service** to make modifications to the repository.  This means
     /// making any modification to the repository that the named service
@@ -109,10 +112,32 @@ pub trait RepoPermissionChecker: Send + Sync + 'static {
     }
 }
 
+/// The type of the repo ACL based on type of the target repo
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RepoAclType {
+    /// The ACL type is unknown for this repo
+    Unknown,
+    /// The ACL is fo a Git repo
+    Git,
+    /// The ACL is for Sapling repo
+    Sapling,
+}
+
+impl RepoAclType {
+    fn from_name(repo_name: Option<&str>) -> Self {
+        match repo_name {
+            Some(repo_name) if repo_name.starts_with("repos/git/") => RepoAclType::Git,
+            Some(_) => RepoAclType::Sapling,
+            None => RepoAclType::Unknown,
+        }
+    }
+}
+
 pub struct ProdRepoPermissionChecker {
     repo_permchecker: BoxPermissionChecker,
     service_permchecker: BoxPermissionChecker,
     repo_region_permcheckers: HashMap<String, BoxPermissionChecker>,
+    repo_acl_type: RepoAclType,
 }
 
 impl ProdRepoPermissionChecker {
@@ -126,6 +151,7 @@ impl ProdRepoPermissionChecker {
         global_allowlist: &[Identity],
     ) -> Result<Self> {
         let mut repo_permchecker_builder = PermissionCheckerBuilder::new();
+        let repo_acl_type = RepoAclType::from_name(repo_hipster_acl);
         if let Some(acl_name) = repo_hipster_acl {
             repo_permchecker_builder = repo_permchecker_builder.allow(
                 acl_provider.repo_acl(acl_name).await.with_context(|| {
@@ -180,6 +206,7 @@ impl ProdRepoPermissionChecker {
             repo_permchecker,
             service_permchecker,
             repo_region_permcheckers,
+            repo_acl_type,
         })
     }
 }
@@ -235,6 +262,15 @@ impl RepoPermissionChecker for ProdRepoPermissionChecker {
             .await
     }
 
+    async fn check_if_all_hooks_bypass_allowed(&self, identities: &MononokeIdentitySet) -> bool {
+        // Non-scm based bypasses are only allowed for git repos
+        self.repo_acl_type == RepoAclType::Git
+            && self
+                .repo_permchecker
+                .check_set(identities, &["write_no_hooks"])
+                .await
+    }
+
     async fn check_if_service_writes_allowed(
         &self,
         identities: &MononokeIdentitySet,
@@ -287,11 +323,69 @@ impl RepoPermissionChecker for AlwaysAllowRepoPermissionChecker {
         true
     }
 
+    async fn check_if_all_hooks_bypass_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        true
+    }
+
     async fn check_if_service_writes_allowed(
         &self,
         _identities: &MononokeIdentitySet,
         _service_name: &str,
     ) -> bool {
         true
+    }
+}
+
+pub struct NeverAllowRepoPermissionChecker {}
+
+impl NeverAllowRepoPermissionChecker {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[async_trait]
+impl RepoPermissionChecker for NeverAllowRepoPermissionChecker {
+    async fn check_if_read_access_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        false
+    }
+
+    async fn check_if_any_region_read_access_allowed(
+        &self,
+        _identities: &MononokeIdentitySet,
+    ) -> bool {
+        false
+    }
+
+    async fn check_if_region_read_access_allowed<'a>(
+        &'a self,
+        _region_hipster_acls: &'a [&'a str],
+        _identities: &'a MononokeIdentitySet,
+    ) -> bool {
+        false
+    }
+
+    async fn check_if_draft_access_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        false
+    }
+
+    async fn check_if_write_access_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        false
+    }
+
+    async fn check_if_read_only_bypass_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        false
+    }
+
+    async fn check_if_all_hooks_bypass_allowed(&self, _identities: &MononokeIdentitySet) -> bool {
+        false
+    }
+
+    async fn check_if_service_writes_allowed(
+        &self,
+        _identities: &MononokeIdentitySet,
+        _service_name: &str,
+    ) -> bool {
+        false
     }
 }

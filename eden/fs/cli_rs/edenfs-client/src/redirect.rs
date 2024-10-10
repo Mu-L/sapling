@@ -42,7 +42,7 @@ use util::path::absolute;
 use crate::checkout::CheckoutConfig;
 use crate::checkout::EdenFsCheckout;
 use crate::fsutil::forcefully_remove_dir_all;
-#[cfg(unix)]
+use crate::fsutil::remove_file;
 use crate::instance::EdenFsInstance;
 use crate::mounttable::read_mount_table;
 
@@ -221,9 +221,6 @@ pub enum RedirectionState {
     #[serde(rename = "symlink-incorrect")]
     /// The Symlink Is Present but points to the wrong place
     SymlinkIncorrect,
-    #[serde(rename = "real-dir-with-data")]
-    /// There's a directory and it contains data,
-    RealDirWithData,
 }
 
 impl fmt::Display for RedirectionState {
@@ -237,7 +234,6 @@ impl fmt::Display for RedirectionState {
                 Self::NotMounted => "not-mounted",
                 Self::SymlinkMissing => "symlink-missing",
                 Self::SymlinkIncorrect => "symlink-incorrect",
-                Self::RealDirWithData => "real-dir-with-data",
             }
         )
     }
@@ -807,11 +803,95 @@ impl Redirection {
         Ok(())
     }
 
+    fn _is_deletable_path(&self, path: &Path) -> bool {
+        let deletable_paths = EdenFsInstance::global().get_config().map_or_else(
+            |_| Vec::new(),
+            |config| config.redirections.redirect_fixup_deletable_paths,
+        );
+
+        let is_deletable_path = deletable_paths.contains(&path.display().to_string());
+        if is_deletable_path {
+            println!(
+                "`{}` is a path that should only have auto-generated content hence should be safe to delete it to recover your redirections.
+If this path should not be deleted automatically, please reach out to 'EdenFS Windows Users' (https://fb.workplace.com/groups/edenfswindows) to correct this.",
+                path.display()
+            );
+        }
+
+        is_deletable_path
+    }
+
+    fn _handle_non_empty_dir(
+        &self,
+        checkout: &EdenFsCheckout,
+        force_remove: bool,
+        cli_name: &str,
+    ) -> Result<RepoPathDisposition> {
+        if force_remove || self._is_deletable_path(&self.repo_path) {
+            println!(
+                "Redirection path found to be a non-empty directory. Attempting to remove this directory and its content."
+            );
+            match forcefully_remove_dir_all(&self.expand_repo_path(checkout)) {
+                Ok(_) => Ok(RepoPathDisposition::DoesNotExist),
+                Err(e) => {
+                    println!("System error occured while removing directory: {}", e);
+                    Err(EdenFsError::Other(anyhow!(
+                        "Failed to delete a non-empty directory (full path `{}`).
+This happens mostly when some of its files are in use by another process.
+To detect and kill such processes, follow https://fburl.com/edenfs-redirection-non-empty-directory.",
+                        self.expand_repo_path(checkout).display()
+                    )))
+                }
+            }
+        } else {
+            Err(EdenFsError::Other(anyhow!(
+                "A non-empty directory (full path `{}`) found. Either-
+- Try again after reviewing and manually deleting the directory, or 
+- Run `eden redirect {} --force` with relevant params (if any) to attempt inline deletion of the directory if none of its files are in use.",
+                self.expand_repo_path(checkout).display(),
+                cli_name
+            )))
+        }
+    }
+
+    fn _handle_file_repo_path(
+        &self,
+        checkout: &EdenFsCheckout,
+        force_remove: bool,
+        cli_name: &str,
+    ) -> Result<RepoPathDisposition> {
+        if force_remove || self._is_deletable_path(&self.repo_path) {
+            println!("Redirection path found to be a file. Attempting to remove this file.");
+            match remove_file(&self.expand_repo_path(checkout)) {
+                Ok(_) => Ok(RepoPathDisposition::DoesNotExist),
+                Err(e) => {
+                    println!("System error occured while removing file: {}", e);
+                    Err(EdenFsError::Other(anyhow!(
+                        "Failed to delete the file (full path `{}`).
+This happens mostly when the file is being used by another process.
+To detect and kill such processes, follow https://fburl.com/edenfs-redirection-non-empty-directory.",
+                        self.expand_repo_path(checkout).display()
+                    )))
+                }
+            }
+        } else {
+            Err(EdenFsError::Other(anyhow!(
+                "Redirection path found to be a file (full path `{}`). Either-
+- Try again after reviewing and manually deleting the file, or 
+- Run `eden redirect {} --force` with relevant params (if any) to attempt inline deletion of the file if it is not in use by another process.",
+                self.expand_repo_path(checkout).display(),
+                cli_name
+            )))
+        }
+    }
+
     #[async_recursion]
     pub async fn remove_existing(
         &self,
         checkout: &EdenFsCheckout,
         fail_if_bind_mount: bool,
+        force_remove: bool,
+        cli_name: &str,
     ) -> Result<RepoPathDisposition> {
         let repo_path = self.expand_repo_path(checkout);
         let disposition = RepoPathDisposition::analyze(&repo_path)
@@ -841,7 +921,9 @@ impl Redirection {
             // remove the empty directory that was the mount point
             // To avoid infinite recursion, tell the next call to fail if
             // the disposition is still a bind mount
-            return self.remove_existing(checkout, true).await;
+            return self
+                .remove_existing(checkout, true, force_remove, cli_name)
+                .await;
         }
 
         if disposition == RepoPathDisposition::IsEmptyDir {
@@ -850,50 +932,34 @@ impl Redirection {
                 Err(_) => return Ok(disposition),
             }
         }
+
+        if disposition == RepoPathDisposition::IsNonEmptyDir {
+            return self._handle_non_empty_dir(checkout, force_remove, cli_name);
+        }
+
+        if disposition == RepoPathDisposition::IsFile {
+            return self._handle_file_repo_path(checkout, force_remove, cli_name);
+        }
+
         Ok(disposition)
     }
 
-    pub async fn apply(&self, checkout: &EdenFsCheckout, force: bool) -> Result<()> {
-        // Check for non-empty directory. We only care about this if we are creating a symlink type redirection or bind type redirection on Windows.
-        let disposition = self
-            .remove_existing(checkout, false)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to remove existing redirection {}",
-                    self.repo_path.display()
-                )
-            })?;
-        if disposition == RepoPathDisposition::IsNonEmptyDir
-            && (self.redir_type == RedirectionType::Symlink
-                || (self.redir_type == RedirectionType::Bind && cfg!(windows)))
-        {
-            // Part of me would like to show this error even if we're going
-            // to mount something over the top, but on macOS the act of mounting
-            // disk image can leave marker files like `.automounted` in the
-            // directory that we mount over, so let's only treat this as a hard
-            // error if we want to redirect using a symlink.
-            if !force {
+    pub async fn apply(
+        &self,
+        checkout: &EdenFsCheckout,
+        force: bool,
+        cli_name: &str,
+    ) -> Result<()> {
+        let disposition = match self.remove_existing(checkout, false, force, cli_name).await {
+            Ok(d) => d,
+            Err(e) => {
                 return Err(EdenFsError::Other(anyhow!(
-                    "Cannot redirect `{}` because it is a non-empty directory (full path `{}`). Either-
-- Try again after reviewing and manually deleting the directory, or 
-- Use `--force` parameter in this command to attempt inline deletion of the directory if none of its files are in use.",
+                    "Failed to remove existing redirection `{}`.\nReason- {}",
                     self.repo_path.display(),
-                    self.expand_repo_path(checkout).display()
+                    e
                 )));
-            } else {
-                println!("Attempting to forcefully remove the directory.");
-                if forcefully_remove_dir_all(&self.expand_repo_path(checkout)).is_err() {
-                    return Err(EdenFsError::Other(anyhow!(
-                        "Cannot redirect `{}` because it is a non-empty directory (full path `{}`) and force attempt of directory deletion failed.
- This happens mostly when some of its files are in use by another process.
- To detect and kill such processes, follow https://fburl.com/edenfs-redirection-non-empty-directory.",
-                        self.repo_path.display(),
-                        self.expand_repo_path(checkout).display()
-                    )));
-                };
             }
-        }
+        };
 
         if disposition == RepoPathDisposition::IsFile {
             return Err(EdenFsError::Other(anyhow!(
@@ -1124,12 +1190,16 @@ pub fn get_configured_redirections(
     // User-specific things have the highest precedence
     if let Some(user_redirs) = &checkout.redirections {
         for (repo_path, redir_type) in user_redirs {
+            let target = checkout
+                .redirection_targets
+                .as_ref()
+                .and_then(|targets| targets.get(repo_path));
             redirs.insert(
                 repo_path.clone(),
                 Redirection {
                     repo_path: repo_path.clone(),
                     redir_type: *redir_type,
-                    target: None,
+                    target: target.cloned(),
                     source: USER_REDIRECTION_SOURCE.to_string(),
                     state: Some(RedirectionState::MatchesConfiguration),
                 },
@@ -1256,11 +1326,7 @@ pub fn get_effective_redirections(
                 // that the symlink is effectively missing, even if it
                 // isn't literally missing.  eg: EPERM means we can't
                 // resolve it, so it is effectively no good.
-                redir.state = if is_dir_with_data(&checkout.path().join(&redir.repo_path))? {
-                    Some(RedirectionState::RealDirWithData)
-                } else {
-                    Some(RedirectionState::SymlinkMissing)
-                };
+                redir.state = Some(RedirectionState::SymlinkMissing)
             }
         }
         redirs.insert(rel_path, redir);
@@ -1441,7 +1507,7 @@ pub async fn try_add_redirection(
             )
         })?;
 
-    let redir = Redirection {
+    let mut redir = Redirection {
         repo_path: resolved_repo_path.clone(),
         redir_type,
         target: None,
@@ -1496,13 +1562,18 @@ pub async fn try_add_redirection(
         }
     }
 
-    redir.apply(checkout, force).await.with_context(|| {
+    redir.apply(checkout, force, "add").await.with_context(|| {
         format!(
             "Failed to apply redirection '{}' for checkout {}",
             redir.repo_path.display(),
             checkout.path().display()
         )
     })?;
+
+    // If apply() was successful, we can expect that the `expand_target_abspath`
+    // was successfull and not handling the `Err` case.
+    // Setting target here to make it part of eden checkout config.
+    redir.target = redir.expand_target_abspath(checkout).ok().flatten();
 
     // We expressly allow replacing an existing configuration in order to
     // support a user with a local ad-hoc override for global- or profile-

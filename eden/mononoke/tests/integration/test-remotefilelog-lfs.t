@@ -12,9 +12,8 @@ Setup repo config (we use blob_files to share across Mononoke and API Server):
   $ cd $TESTTMP
 
 Setup hg repo, create a commit there. No LFS blobs yet.
-  $ hginit_treemanifest repo-hg-nolfs
-  $ cd repo-hg-nolfs
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Commit small file
   $ echo s > smallfile
@@ -23,7 +22,7 @@ Commit small file
   $ cd ..
 
 Blobimport the hg repo to Mononoke
-  $ blobimport repo-hg-nolfs/.hg repo
+  $ blobimport repo/.hg repo
 
 Start Mononoke with LFS enabled.
   $ start_and_wait_for_mononoke_server
@@ -31,28 +30,26 @@ Start Mononoke API server, to serve LFS blobs
   $ lfs_uri="$(lfs_server --scuba-dataset "file://$TESTTMP/scuba.json")/repo"
 
 Create a new client repository. Enable LFS there.
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg-nolfs repo-hg-lfs --noupdate --config extensions.remotenames=
-  $ cd repo-hg-lfs
-  $ setup_hg_client
+  $ hg clone -q mono:repo repo-lfs --noupdate
+  $ cd repo-lfs
   $ setup_hg_modern_lfs "$lfs_uri" 1000B "$TESTTMP/lfs-cache1"
 
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
 Update in the client repo
-  $ hgmn pull -q
-  $ hgmn update -r master_bookmark -q
+  $ hg pull -q
+  $ hg update -r master_bookmark -q
 
 Perform LFS push
   $ LONG="$(yes A 2>/dev/null | head -c 2000)"
   $ echo "$LONG" > lfs-largefile
   $ echo "${LONG}for-rename" > lfs-largefile-for-rename
   $ hg commit -Aqm "add lfs-large files"
-  $ hgmn push -r . --to master_bookmark -v
-  pushing rev 99765c8d839c to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v
+  pushing rev 99765c8d839c to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found
@@ -75,8 +72,8 @@ Perform LFS push
 # Rename a file
   $ hg mv lfs-largefile-for-rename lfs-largefile-renamed
   $ hg commit -Aqm "rename"
-  $ hgmn push -r . --to master_bookmark -v
-  pushing rev c651f052c52d to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v
+  pushing rev c651f052c52d to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found
@@ -96,8 +93,8 @@ Verify that if we fail to upload LFS blobs first, the push fails
 
   $ echo "${LONG}ANOTHER-LFS" > f
   $ hg commit -m f -A f
-  $ hgmn push -r . --to master_bookmark -v
-  pushing rev e4337405c947 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v
+  pushing rev e4337405c947 to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found
@@ -137,30 +134,29 @@ Verify that if we fail to upload LFS blobs first, the push fails
   $ cd ..
 
 Create a new client repository, using getpack (with its own cachepath)
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg-nolfs repo-hg-lfs3 --noupdate --config extensions.remotenames=
-  $ cd repo-hg-lfs3
-  $ setup_hg_client
+  $ hg clone -q mono:repo repo-lfs3 --noupdate
+  $ cd repo-lfs3
   $ setup_hg_modern_lfs "$lfs_uri" 1000B "$TESTTMP/lfs-cache3"
 
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > [remotefilelog]
   > fetchpacks = True
   > getpackversion = 2
   > cachepath=$TESTTMP/cachepath-alt
   > EOF
 
-  $ hgmn pull -v
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -v
+  pulling from mono:repo
   searching for changes
   all local heads known remotely
+  no changes found
   adding changesets
   adding manifests
   adding file changes
  
-  $ hgmn update -r master_bookmark -v
+  $ hg update -r master_bookmark -v
   resolving manifests
   3 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
@@ -170,7 +166,7 @@ Create a new client repository, using getpack (with its own cachepath)
   $ sha256sum lfs-largefile-renamed
   d19bca751e178f8cce59e1b872e0fd5857951c2577a2318aefad3253c317d982  lfs-largefile-renamed
 
-  $ hgmn st --change . -C
+  $ hg st --change . -C
   A lfs-largefile-renamed
     lfs-largefile-for-rename
   R lfs-largefile-for-rename

@@ -1,8 +1,7 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
-load("//antlir/fbpkg:fbpkg.bzl", "fbpkg")
+load("//fbpkg:fbpkg.bzl", "fbpkg")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "derived_data_metrics_tailer",
@@ -27,12 +26,11 @@ rust_binary(
         "//common/rust/shed/fbinit:fbinit-tokio",
         "//common/rust/shed/services:services",
         "//common/rust/shed/stats:stats",
-        "//common/rust/thrift/srclient:srclient",
         "//eden/mononoke/cmdlib:cmdlib_logging",
         "//eden/mononoke/common/retry:retry",
         "//eden/mononoke/derived_data:derived_data_constants",
         "//eden/mononoke/scs/if:source_control-rust",
-        "//eden/mononoke/scs/if:source_control-rust-clients",
+        "//eden/mononoke/scs/raw_client_lib:scs_client_raw",
     ],
 )
 

@@ -97,6 +97,9 @@ class PrivHelperServer : private UnixSocket::ReceiveCallback {
   UnixSocket::Message processSetUseEdenFs(
       folly::io::Cursor& cursor,
       UnixSocket::Message& request);
+  UnixSocket::Message processGetPid();
+
+  void unmountStaleMount(const std::string& mountPoint);
 
   /**
    * Verify that the user has the right credentials to mount/unmount this path.
@@ -105,7 +108,7 @@ class PrivHelperServer : private UnixSocket::ReceiveCallback {
    * leading to the mount point. A std::domain_error exception will be raised
    * if the user doesn't have access to the mount point.
    */
-  void sanityCheckMountPoint(const std::string& mountPoint);
+  void sanityCheckMountPoint(const std::string& mountPoint, bool isNfs = false);
 
   // These methods are virtual so we can override them during unit tests
   virtual folly::File

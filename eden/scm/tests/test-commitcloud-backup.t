@@ -4,7 +4,6 @@
 
 #inprocess-hg-incompatible
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
 
   $ enable amend
   $ setconfig infinitepushbackup.hostname=testhost
@@ -295,7 +294,7 @@ Throw in an empty transaction - this should not trigger a backup.
 Check the logs, make sure just one process was started
   $ cat $TESTTMP/logs/test/*
   
-  * starting: *hg cloud upload * (glob)
+  * starting: * cloud upload * (glob)
   commitcloud: head 'ffeec75ec603' hasn't been uploaded yet
   edenapi: queue 2 commits for upload
   edenapi: queue 0 files for upload

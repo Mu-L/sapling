@@ -8,7 +8,7 @@ edition = "2021"
 license = "GPLv2+"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-trait = "0.1.71"
 bounded_traversal = { version = "0.1.0", path = "../../common/bounded_traversal" }
 bulk_derivation = { version = "0.1.0", path = "../../derived_data/bulk_derivation" }
@@ -26,5 +26,5 @@ futures = { version = "0.3.30", features = ["async-await", "compat"] }
 mononoke_types = { version = "0.1.0", path = "../../mononoke_types" }
 parking_lot = { version = "0.12.1", features = ["send_guard"] }
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }

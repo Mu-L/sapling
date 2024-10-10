@@ -274,6 +274,10 @@ impl MPathElementPrefix {
         Ok(Self(SmallVec::from_slice(s)))
     }
 
+    pub fn to_smallvec(self) -> SmallVec<[u8; 24]> {
+        self.0
+    }
+
     /// Append a byte to the end of the prefix.
     pub fn push(&mut self, c: u8) -> Result<()> {
         if self.0.len() == MPATH_ELEMENT_MAX_LENGTH {
@@ -343,11 +347,12 @@ impl std::fmt::Debug for MPathElementPrefix {
 mod tests {
     use std::mem::size_of;
 
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
 
     use super::*;
 
-    #[test]
+    #[mononoke::test]
     fn test_mpath_element_size() {
         // MPathElement size is important as we have a lot of them.
         // Test so we are aware of any change.

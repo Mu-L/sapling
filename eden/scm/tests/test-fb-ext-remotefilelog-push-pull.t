@@ -1,8 +1,7 @@
 #debugruntest-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
-  $ setconfig devel.print-metrics= devel.skip-metrics=scmstore,watchman
+  $ setconfig devel.print-metrics=ssh
 
   $ hginit master
   $ cd master
@@ -17,13 +16,13 @@
 
   $ hgcloneshallow ssh://user@dummy/master shallow -q
   1 files fetched over 1 fetches - (1 misses, 0.00% hit ratio) over *s (glob) (?)
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
   $ hgcloneshallow ssh://user@dummy/master shallow2 -q
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
 We should see the remotefilelog capability here, which advertises that
 the server supports our custom getfiles method.
@@ -31,10 +30,10 @@ the server supports our custom getfiles method.
   $ cd master
   $ echo 'hello' | hg -R . serve --stdio
   * (glob)
-  capabilities: lookup * remotefilelog getfile (glob)
+  capabilities: *getfile* (glob)
   $ echo 'capabilities' | hg -R . serve --stdio ; echo
   * (glob)
-  * remotefilelog getfile (glob)
+  *getfile* (glob)
 
 # pull to shallow from full
 
@@ -48,9 +47,9 @@ the server supports our custom getfiles method.
   adding changesets
   adding manifests
   adding file changes
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
   $ hg up tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
@@ -89,9 +88,9 @@ the server supports our custom getfiles method.
   adding manifests
   adding file changes
   2 files fetched over 1 fetches - (2 misses, 0.00% hit ratio) over *s (glob) (?)
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
   $ hg up tip
   3 files updated, 0 files merged, 0 files removed, 0 files unresolved
@@ -114,9 +113,9 @@ the server supports our custom getfiles method.
   remote: adding changesets
   remote: adding manifests
   remote: adding file changes
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
   $ cd ../shallow2
   $ hg up tip
@@ -134,9 +133,9 @@ the server supports our custom getfiles method.
   remote: adding changesets
   remote: adding manifests
   remote: adding file changes
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
   $ cd ../master
   $ hg log -l 1 -r 'desc(a)' --style compact
@@ -173,13 +172,13 @@ the server supports our custom getfiles method.
 
   $ hginit multimf-master
   $ hgcloneshallow ssh://user@dummy/multimf-master multimf-shallow -q
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
   $ hgcloneshallow ssh://user@dummy/multimf-master multimf-shallow2 -q
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
   $ cd multimf-shallow
   $ echo a > a
   $ hg commit -qAm a
@@ -215,9 +214,9 @@ the server supports our custom getfiles method.
   adding changesets
   adding manifests
   adding file changes
-  { metrics : { ssh : { connections : 1,
-                        read : { bytes : *}, (glob)
-                        write : { bytes : *}}}} (glob)
+  ssh_connections: 1
+  ssh_read_bytes: * (glob)
+  ssh_write_bytes: * (glob)
 
   $ hg up -q 'desc(c22)'
   $ hg log -f -T '{node}\n' c

@@ -30,6 +30,8 @@ use crate::basename_suffix_skeleton_manifest_v3::BssmV3Entry;
 use crate::blob::Blob;
 use crate::blob::BlobstoreValue;
 use crate::bonsai_changeset::BonsaiChangeset;
+use crate::case_conflict_skeleton_manifest::CaseConflictSkeletonManifest;
+use crate::case_conflict_skeleton_manifest::CcsmEntry;
 use crate::content_chunk::ContentChunk;
 use crate::content_metadata_v2::ContentMetadataV2;
 use crate::deleted_manifest_v2::DeletedManifestV2;
@@ -43,6 +45,8 @@ use crate::redaction_key_list::RedactionKeyList;
 use crate::sharded_map::ShardedMapNode;
 use crate::sharded_map_v2::ShardedMapV2Node;
 use crate::skeleton_manifest::SkeletonManifest;
+use crate::skeleton_manifest_v2::SkeletonManifestV2;
+use crate::skeleton_manifest_v2::SkeletonManifestV2Entry;
 use crate::test_manifest::TestManifest;
 use crate::test_sharded_manifest::TestShardedManifest;
 use crate::test_sharded_manifest::TestShardedManifestEntry;
@@ -164,6 +168,22 @@ pub struct BssmV3DirectoryId(Blake2);
 /// An identifier for a sharded map node used in basename suffix manifest v3
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
 pub struct ShardedMapV2NodeBssmV3Id(Blake2);
+
+/// An identifier for skeleton manifest v2 directory
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct SkeletonManifestV2Id(Blake2);
+
+/// An identifier for a sharded map node used in skeleton manifest v2
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct ShardedMapV2NodeSkeletonManifestV2Id(Blake2);
+
+/// An identifier for case conflicts skeleton manifest
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct CaseConflictSkeletonManifestId(Blake2);
+
+/// An identifier for a sharded map node used in case conflicts skeleton manifest
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
+pub struct ShardedMapV2NodeCcsmId(Blake2);
 
 /// An identifier for an fsnode
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash)]
@@ -599,6 +619,38 @@ impl_typed_hash! {
 }
 
 impl_typed_hash! {
+    hash_type => SkeletonManifestV2Id,
+    thrift_hash_type => thrift::id::SkeletonManifestV2Id,
+    value_type => SkeletonManifestV2,
+    context_type => SkeletonManifestV2Context,
+    context_key => "skmf2",
+}
+
+impl_typed_hash! {
+    hash_type => ShardedMapV2NodeSkeletonManifestV2Id,
+    thrift_hash_type => thrift::id::ShardedMapV2NodeId,
+    value_type => ShardedMapV2Node<SkeletonManifestV2Entry>,
+    context_type => ShardedMapV2NodeSkeletonManifestV2Context,
+    context_key => "skmf2.map2node",
+}
+
+impl_typed_hash! {
+    hash_type => CaseConflictSkeletonManifestId,
+    thrift_hash_type => thrift::id::CaseConflictSkeletonManifestId,
+    value_type => CaseConflictSkeletonManifest,
+    context_type => CaseConflictSkeletonManifestContext,
+    context_key => "ccsm",
+}
+
+impl_typed_hash! {
+    hash_type => ShardedMapV2NodeCcsmId,
+    thrift_hash_type => thrift::id::ShardedMapV2NodeId,
+    value_type => ShardedMapV2Node<CcsmEntry>,
+    context_type => ShardedMapV2NodeCcsmContext,
+    context_key => "ccsm.map2node",
+}
+
+impl_typed_hash! {
     hash_type => FsnodeId,
     thrift_hash_type => thrift::id::FsnodeId,
     value_type => Fsnode,
@@ -737,6 +789,7 @@ impl From<ChangesetId> for EdenapiCommitId {
 #[cfg(test)]
 mod test {
     use bytes::Bytes;
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
 
     use super::*;
@@ -757,7 +810,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn thrift_convert_bytes_consistent_for_ids() {
         let id = ShardedMapNodeDMv2Id::from_byte_array([1; 32]);
         let bytes_1 = Bytes::from(id.clone());
@@ -772,7 +825,7 @@ mod test {
         assert_eq!(rev_id_2_2, rev_id_2_1);
     }
 
-    #[test]
+    #[mononoke::test]
     fn blobstore_key() {
         // These IDs are persistent, and this test is really to make sure that they don't change
         // accidentally.
@@ -790,6 +843,12 @@ mod test {
 
         let id = ShardedMapV2NodeBssmV3Id::from_byte_array([1; 32]);
         assert_eq!(id.blobstore_key(), format!("bssm3.map2node.blake2.{}", id));
+
+        let id = ShardedMapV2NodeSkeletonManifestV2Id::from_byte_array([1; 32]);
+        assert_eq!(id.blobstore_key(), format!("skmf2.map2node.blake2.{}", id));
+
+        let id = ShardedMapV2NodeCcsmId::from_byte_array([1; 32]);
+        assert_eq!(id.blobstore_key(), format!("ccsm.map2node.blake2.{}", id));
 
         let id = ShardedMapV2NodeTestShardedManifestId::from_byte_array([1; 32]);
         assert_eq!(
@@ -817,6 +876,12 @@ mod test {
 
         let id = BssmV3DirectoryId::from_byte_array([1; 32]);
         assert_eq!(id.blobstore_key(), format!("bssm3.blake2.{}", id),);
+
+        let id = SkeletonManifestV2Id::from_byte_array([1; 32]);
+        assert_eq!(id.blobstore_key(), format!("skmf2.blake2.{}", id),);
+
+        let id = CaseConflictSkeletonManifestId::from_byte_array([1; 32]);
+        assert_eq!(id.blobstore_key(), format!("ccsm.blake2.{}", id),);
 
         let id = TestManifestId::from_byte_array([1; 32]);
         assert_eq!(id.blobstore_key(), format!("testmanifest.blake2.{}", id),);
@@ -852,7 +917,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_serialize_deserialize() {
         let id = ChangesetId::new(Blake2::from_byte_array([1; 32]));
         let serialized = serde_json::to_string(&id).unwrap();
@@ -895,6 +960,16 @@ mod test {
         assert_eq!(id, deserialized);
 
         let id = BssmV3DirectoryId::from_byte_array([1; 32]);
+        let serialized = serde_json::to_string(&id).unwrap();
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(id, deserialized);
+
+        let id = SkeletonManifestV2Id::from_byte_array([1; 32]);
+        let serialized = serde_json::to_string(&id).unwrap();
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(id, deserialized);
+
+        let id = CaseConflictSkeletonManifestId::from_byte_array([1; 32]);
         let serialized = serde_json::to_string(&id).unwrap();
         let deserialized = serde_json::from_str(&serialized).unwrap();
         assert_eq!(id, deserialized);

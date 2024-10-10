@@ -14,7 +14,7 @@ use mononoke_types::BonsaiChangeset;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::ChangesetHook;
+use crate::BookmarkHook;
 use crate::CrossRepoPushSource;
 use crate::HookConfig;
 use crate::HookExecution;
@@ -26,6 +26,7 @@ use crate::PushAuthoredBy;
 pub struct BlockNewBookmarkCreationsByNameConfig {
     #[serde(with = "serde_regex")]
     blocked_bookmarks: Regex,
+    message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,12 +45,12 @@ impl BlockNewBookmarkCreationsByNameHook {
 }
 
 #[async_trait]
-impl ChangesetHook for BlockNewBookmarkCreationsByNameHook {
+impl BookmarkHook for BlockNewBookmarkCreationsByNameHook {
     async fn run<'this: 'cs, 'ctx: 'this, 'cs, 'fetcher: 'cs>(
         &'this self,
         ctx: &'ctx CoreContext,
         bookmark: &BookmarkKey,
-        _changeset: &'cs BonsaiChangeset,
+        _from: &'cs BonsaiChangeset,
         content_manager: &'fetcher dyn HookStateProvider,
         _cross_repo_push_source: CrossRepoPushSource,
         _push_authored_by: PushAuthoredBy,
@@ -60,14 +61,21 @@ impl ChangesetHook for BlockNewBookmarkCreationsByNameHook {
         }
 
         if self.config.blocked_bookmarks.is_match(bookmark.as_str()) {
-            return Ok(HookExecution::Rejected(HookRejectionInfo::new_long(
-                "Bookmark creation is restricted in this repository.",
-                format!(
-                    "Creation of bookmark \"{}\" was blocked because it matched the '{}' regular expression",
-                    bookmark.as_str(),
-                    self.config.blocked_bookmarks.as_str(),
-                ),
-            )));
+            if let Some(message) = &self.config.message {
+                return Ok(HookExecution::Rejected(HookRejectionInfo::new_long(
+                    "Bookmark creation is restricted in this repository.",
+                    message.clone(),
+                )));
+            } else {
+                return Ok(HookExecution::Rejected(HookRejectionInfo::new_long(
+                    "Bookmark creation is restricted in this repository.",
+                    format!(
+                        "Creation of bookmark \"{}\" was blocked because it matched the '{}' regular expression",
+                        bookmark.as_str(),
+                        self.config.blocked_bookmarks.as_str(),
+                    ),
+                )));
+            }
         }
         Ok(HookExecution::Accepted)
     }

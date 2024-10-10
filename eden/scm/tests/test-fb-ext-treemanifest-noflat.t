@@ -3,7 +3,6 @@
 
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
 
   $ configure mutation-norecord
   $ . "$TESTDIR/library.sh"
@@ -28,10 +27,6 @@ This file tests that normal mercurial operations never read the flat manifests
   $ hginit master
   $ cd master
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [treemanifest]
-  > server=True
   > [remotefilelog]
   > server=True
   > shallowtrees=True

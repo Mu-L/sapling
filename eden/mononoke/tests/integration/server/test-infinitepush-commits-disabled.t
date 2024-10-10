@@ -16,8 +16,8 @@ setup common configuration for these tests
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ touch a && hg addremove && hg ci -q -ma
   adding a
   $ hg log -T '{short(node)}\n'
@@ -29,12 +29,12 @@ create master bookmark
   $ cd $TESTTMP
 
 setup repo-push and repo-pull
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
 
 blobimport
 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
 
@@ -54,8 +54,8 @@ Do infinitepush (aka commit cloud) push
   $ echo new > newfile
   $ hg addremove -q
   $ hg ci -m new
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --to "scratch/123"
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --to "scratch/123"
+  pushing to mono:repo
   searching for changes
   remote: Command failed
   remote:   Error:
@@ -99,7 +99,7 @@ Commit should have been rejected
   > server=False
   > branchpattern=re:scratch/.+
   > EOF
-  $ hgmn pull -r 47da8b81097c5534f3eb7947a8764dd323cffe3d
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 47da8b81097c5534f3eb7947a8764dd323cffe3d
+  pulling from mono:repo
   abort: 47da8b81097c5534f3eb7947a8764dd323cffe3d not found!
   [255]

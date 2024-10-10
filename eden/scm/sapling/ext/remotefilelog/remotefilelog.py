@@ -11,6 +11,7 @@ import collections
 import os
 
 from bindings import revisionstore
+
 from sapling import ancestor, error, filelog, mdiff, pycompat, revlog, util
 from sapling.i18n import _
 from sapling.node import bin, hex, nullid
@@ -229,9 +230,15 @@ class remotefilelog:
         # The content comparison is expensive as well, since we have to load
         # the content from the store and from disk. Let's just check the
         # node instead.
-        p1, p2, linknode, copyfrom = self.repo.fileslog.metadatastore.getnodeinfo(
-            self.filename, node
-        )
+        try:
+            p1, p2, linknode, copyfrom = self.repo.fileslog.metadatastore.getnodeinfo(
+                self.filename, node
+            )
+        except KeyError:
+            # for subtree copy, we are reusing the old filelog node but with a new filename,
+            # so the key (filename, node) is not in the metadatastore, let's just do a full
+            # comparison.
+            return self.read(node) != text
 
         if copyfrom or text.startswith(b"\1\n"):
             meta = {}
@@ -426,7 +433,7 @@ class remotefilelog:
             return nullid
 
         revmap, parentfunc = self._buildrevgraph(a, b)
-        nodemap = dict(((v, k) for (k, v) in pycompat.iteritems(revmap)))
+        nodemap = dict(((v, k) for (k, v) in revmap.items()))
 
         ancs = ancestor.ancestors(parentfunc, revmap[a], revmap[b])
         if ancs:
@@ -441,7 +448,7 @@ class remotefilelog:
             return nullid
 
         revmap, parentfunc = self._buildrevgraph(a, b)
-        nodemap = dict(((v, k) for (k, v) in pycompat.iteritems(revmap)))
+        nodemap = dict(((v, k) for (k, v) in revmap.items()))
 
         ancs = ancestor.commonancestorsheads(parentfunc, revmap[a], revmap[b])
         return list(map(nodemap.__getitem__, ancs))
@@ -457,7 +464,7 @@ class remotefilelog:
         parentsmap = collections.defaultdict(list)
         allparents = set()
         for mapping in (amap, bmap):
-            for node, pdata in pycompat.iteritems(mapping):
+            for node, pdata in mapping.items():
                 parents = parentsmap[node]
                 p1, p2, linknode, copyfrom = pdata
                 # Don't follow renames (copyfrom).
@@ -515,62 +522,17 @@ class remotefileslog(filelog.fileslog):
 
     def __init__(self, repo):
         super(remotefileslog, self).__init__(repo)
-        self._edenapistore = None
         self.makeruststore(repo)
 
-    def edenapistore(self, repo):
-        if self._edenapistore is None:
-            useedenapi = repo.ui.configbool("remotefilelog", "http")
-            if repo.ui.config("ui", "ssh") == "false":
-                # Cannot use ssh. Force EdenAPI.
-                useedenapi = True
-            if repo.nullableedenapi is not None and useedenapi:
-                self._edenapistore = repo.edenapi.filestore()
-
-        return self._edenapistore
-
-    def makesharedonlyruststore(self, repo):
-        """Build non-local stores.
-
-        There are handful of cases where we need to force prefetch data
-        that is present in the local store, for this specific case, let's
-        build shared-only stores.
-
-        Do not use it except in the fileserverclient.prefetch method!
-        """
-
-        sharedonlyremotestore = revisionstore.pyremotestore(
-            fileserverclient.getpackclient(repo)
-        )
-        edenapistore = self.edenapistore(repo)
-
-        mask = os.umask(0o002)
-        try:
-            sharedonlycontentstore = self.filestore.getsharedmutable()
-            sharedonlymetadatastore = revisionstore.metadatastore(
-                None,
-                repo.ui._rcfg,
-                sharedonlyremotestore,
-                edenapistore,
-            )
-        finally:
-            os.umask(mask)
-
-        return sharedonlycontentstore, sharedonlymetadatastore
-
     def makeruststore(self, repo):
-        remotestore = revisionstore.pyremotestore(fileserverclient.getpackclient(repo))
-
-        edenapistore = self.edenapistore(repo)
-
         mask = os.umask(0o002)
         try:
-            self.filestore = repo._rsrepo.filescmstore(remotestore)
+            self.filestore = repo._rsrepo.filescmstore()
+            edenapi = repo.nullableedenapi
             self.metadatastore = revisionstore.metadatastore(
-                repo.svfs.vfs.base,
+                repo.svfs.base,
                 repo.ui._rcfg,
-                remotestore,
-                edenapistore,
+                edenapi.filestore() if edenapi else None,
             )
         finally:
             os.umask(mask)

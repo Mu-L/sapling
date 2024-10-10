@@ -12,11 +12,12 @@ name = "thrift_convert_tests"
 path = "tests/lib.rs"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 bufsize = "1.0.5"
 bytes = { version = "1.6.0", features = ["serde"] }
 fbthrift = { version = "0.0.1+unstable", git = "https://github.com/facebook/fbthrift.git", branch = "main" }
 thrift_convert_proc_macros = { version = "0.1.0", path = "proc_macros" }
 
 [dev-dependencies]
+mononoke_macros = { version = "0.1.0", path = "../../mononoke_macros" }
 thrift_convert_test = { version = "0.1.0", path = "tests/if" }

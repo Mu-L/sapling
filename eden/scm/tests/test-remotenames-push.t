@@ -3,8 +3,7 @@
 #require no-eden
 
 #inprocess-hg-incompatible
-  $ setconfig experimental.allowfilepeer=True
-  > mkcommit()
+  $ mkcommit()
   > {
   >    echo $1 > $1
   >    hg add $1
@@ -20,7 +19,7 @@ Set up extension and repos to clone over wire protocol
   $ hg init repo1
   $ hg clone  ssh://user@dummy/repo1 repo2
   no changes found
-  updating to branch default
+  updating to tip
   0 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd repo2
 
@@ -145,7 +144,7 @@ Set up server repo
 
 Set up client repo
   $ hg clone rnserver rnclient
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd rnclient
   $ hg book --all

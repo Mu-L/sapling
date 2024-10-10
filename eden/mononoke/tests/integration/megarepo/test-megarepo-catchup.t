@@ -9,8 +9,8 @@
   $ setup_common_config $REPOTYPE
 
   $ cd "$TESTTMP"  
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo a > a && hg add a && hg ci -m 'large repo first commit'
   $ echo b > b && hg add b && hg ci -m 'large repo second commit'
   $ hg book -r . pre_merge_head_bookmark
@@ -34,7 +34,7 @@
   $ hg addremove -q
   $ hg ci -m 'small repo first commit'
   $ hg book -r . small_repo_head_bookmark
-  $ cd "$TESTTMP/repo-hg"
+  $ cd "$TESTTMP/repo"
 
   $ hg up -q head_bookmark
   $ hg merge -q small_repo_head_bookmark
@@ -104,10 +104,10 @@
   
 
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-client --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo-client --noupdate
 
 blobimport
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
   $ megarepo_tool create-catchup-head-deletion-commits \
   > --head-bookmark head_bookmark \
@@ -126,18 +126,14 @@ blobimport
   * Pushrebased to * (glob)
   $ start_and_wait_for_mononoke_server
   $ cd "$TESTTMP/repo-client"
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  adding remote bookmark head_bookmark
-  adding remote bookmark pre_merge_head_bookmark
-  adding remote bookmark small_repo_head_bookmark
-  $ hgmn up head_bookmark
+  $ hg up head_bookmark
   6 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark head_bookmark)
   $ ls
   a
   ab
@@ -147,7 +143,6 @@ blobimport
   unchanged_files
   $ hg log -G
   @  commit:      * (glob)
-  │  bookmark:    head_bookmark
   │  bookmark:    default/head_bookmark
   │  hoistedname: head_bookmark
   │  user:        user
@@ -160,7 +155,6 @@ blobimport
   │  summary:     [MEGAREPO CATCHUP DELETE] deletion commit (0)
   │
   │ o  commit:      f910c17f2a72
-  │ │  bookmark:    small_repo_head_bookmark
   │ │  bookmark:    default/small_repo_head_bookmark
   │ │  hoistedname: small_repo_head_bookmark
   │ │  user:        test
@@ -188,7 +182,6 @@ blobimport
   │    summary:     small repo first commit
   │
   o  commit:      * (glob)
-  │  bookmark:    pre_merge_head_bookmark
   │  bookmark:    default/pre_merge_head_bookmark
   │  hoistedname: pre_merge_head_bookmark
   │  user:        test

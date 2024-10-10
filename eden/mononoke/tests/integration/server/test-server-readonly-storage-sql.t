@@ -17,9 +17,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ hg debugdrawdag <<EOF
   > C
   > |
@@ -33,8 +32,7 @@ create master bookmark
 
 blobimport, succeeding
   $ cd ..
-  $ rm -rf ./repo
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 check the read sql path still works with readonly storage
   $ mononoke_newadmin --with-readonly-storage=true bookmarks -R repo log master_bookmark

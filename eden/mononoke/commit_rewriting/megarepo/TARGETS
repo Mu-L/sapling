@@ -1,8 +1,7 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "megarepolib",
@@ -13,6 +12,7 @@ rust_library(
         "//common/rust/shed/fbinit:fbinit",
         "//common/rust/shed/fbinit:fbinit-tokio",
         "//eden/mononoke/filestore:filestore",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/tests/fixtures:fixtures",
         "//eden/mononoke/tests/utils:tests_utils",
     ],
@@ -46,14 +46,11 @@ rust_library(
 rust_binary(
     name = "megarepotool",
     srcs = glob(["tool/**/*.rs"]),
-    named_deps = {
-        "futures-old": "fbsource//third-party/rust:futures-old",
-        "futures_ext": "//common/rust/shed/futures_01_ext:futures_01_ext",
-    },
     test_deps = [
         "fbsource//third-party/rust:tokio",
         "//common/rust/shed/fbinit:fbinit-tokio",
         "//eden/mononoke/commit_rewriting/cross_repo_sync:cross_repo_sync_test_utils",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/repo_factory:test_repo_factory",
         "//eden/mononoke/tests/fixtures:fixtures",
         "//eden/mononoke/tests/utils:tests_utils",
@@ -79,7 +76,6 @@ rust_binary(
         "//eden/mononoke/blobrepo_utils:blobrepo_utils",
         "//eden/mononoke/blobstore:blobstore",
         "//eden/mononoke/blobstore:blobstore_factory",
-        "//eden/mononoke/blobstore:cacheblob",
         "//eden/mononoke/bonsai_git_mapping:bonsai_git_mapping",
         "//eden/mononoke/bonsai_globalrev_mapping:bonsai_globalrev_mapping",
         "//eden/mononoke/bonsai_hg_mapping:bonsai_hg_mapping",

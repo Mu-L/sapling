@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "manifoldblob",
@@ -14,6 +13,7 @@ rust_library(
         "fbsource//third-party/rust:rand",
         "//common/rust/shed/borrowed:borrowed",
         "//common/rust/shed/fbinit:fbinit-tokio",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
     ],
     deps = [
         "fbsource//third-party/rust:anyhow",

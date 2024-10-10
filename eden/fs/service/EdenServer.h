@@ -65,7 +65,8 @@ class EdenConfig;
 class EdenMount;
 class EdenServiceHandler;
 class SaplingBackingStore;
-class IHiveLogger;
+class IFileAccessLogger;
+class IScribeLogger;
 class Journal;
 class LocalStore;
 class MountInfo;
@@ -153,7 +154,8 @@ class EdenServer : private TakeoverHandler {
       std::shared_ptr<const EdenConfig> edenConfig,
       ActivityRecorderFactory activityRecorderFactory,
       BackingStoreFactory* backingStoreFactory,
-      std::shared_ptr<IHiveLogger> hiveLogger,
+      std::shared_ptr<IFileAccessLogger> fileAccessLogger,
+      std::shared_ptr<IScribeLogger> scribeLogger,
       std::shared_ptr<StartupStatusChannel> startupStatusChannel,
       std::string version = std::string{});
 
@@ -653,6 +655,9 @@ class EdenServer : private TakeoverHandler {
   // Detects when NFS backed repos are being crawled.
   void detectNfsCrawl();
 
+  // Run eden doctor to report issues.
+  void runEdenDoctor();
+
   // Cancel all subscribers on all mounts so that we can tear
   // down the thrift server without blocking
   void shutdownSubscribers();
@@ -717,6 +722,31 @@ class EdenServer : private TakeoverHandler {
         folly::Future<std::optional<TakeoverData>>::makeEmpty();
   };
   folly::Synchronized<RunStateData> runningState_;
+
+#ifdef __APPLE__
+  folly::dynamic nfsStatOutput_;
+  std::optional<std::string> mapCounterNameForNFSStat(
+      std::pair<std::string, std::string> nfsStatsCounter);
+  std::optional<long long> getNFSStatCounterValue(
+      std::string nfsStatsCounterMacOSName);
+  /**
+   * `nfsstat` provides stats from NFS clients and servers on macOS devices used
+   * to populate ODS. The keys below are the concatenation of the sub-path names
+   * returned from `nfsstat`, the values are the names that we use for edenFS
+   * ODS. If the names change we can add/update the key to keep our edenFS ODS
+   * names consistent.
+   */
+  std::map<std::string, std::string> kNfsStatsToEdenStatsMap_{
+      {"Client Info.RPC Info.Requests", "requests"},
+      {"Client Info.RPC Info.Retries", "retries"},
+      {"Client Info.RPC Info.X Replies", "replies"},
+      {"Client Info.RPC Info.TimedOut", "timed_out"},
+      {"Client Info.RPC Info.Invalid", "invalid"}};
+  folly::Synchronized<std::chrono::steady_clock::time_point>
+      lastTimeUpdatedNfsStat_;
+  // Update NFS stats if needed. Return false if NFS stats are not available.
+  bool updateNFSStatsIfNeeded();
+#endif
 
   /**
    * The EventBase driving the main thread loop.
@@ -855,5 +885,8 @@ class EdenServer : private TakeoverHandler {
   PeriodicFnTask<&EdenServer::detectNfsCrawl> detectNfsCrawlTask_{
       this,
       "detect_nfs_crawl"};
+  PeriodicFnTask<&EdenServer::runEdenDoctor> edenDoctorTask_{
+      this,
+      "run_eden_doctor"};
 };
 } // namespace facebook::eden

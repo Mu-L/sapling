@@ -12,27 +12,28 @@ name = "dbcommitcloud_test"
 path = "tests/main.rs"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-trait = "0.1.71"
 bonsai_hg_mapping = { version = "0.1.0", path = "../bonsai_hg_mapping" }
 changeset_info = { version = "0.1.0", path = "../derived_data/changeset_info" }
 clientinfo = { version = "0.1.0", path = "../../scm/lib/clientinfo" }
 commit_cloud_helpers = { version = "0.1.0", path = "helpers" }
+commit_cloud_types = { version = "0.1.0", path = "types" }
 context = { version = "0.1.0", path = "../server/context" }
-edenapi_types = { version = "0.1.0", path = "../../scm/lib/edenapi/types" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+futures_stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 mercurial_types = { version = "0.1.0", path = "../mercurial/types" }
 metaconfig_types = { version = "0.1.0", path = "../metaconfig/types" }
 mononoke_types = { version = "0.1.0", path = "../mononoke_types" }
 permission_checker = { version = "0.1.0", path = "../permission_checker" }
 repo_derived_data = { version = "0.1.0", path = "../repo_attributes/repo_derived_data" }
-serde = { version = "1.0.185", features = ["derive", "rc"] }
-serde_json = { version = "1.0.100", features = ["float_roundtrip", "unbounded_depth"] }
+serde_json = { version = "1.0.125", features = ["float_roundtrip", "unbounded_depth"] }
 sql = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 sql_construct = { version = "0.1.0", path = "../common/sql_construct" }
 sql_ext = { version = "0.1.0", path = "../common/rust/sql_ext" }
 
 [dev-dependencies]
-fbinit = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fbinit = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit-tokio = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+mononoke_macros = { version = "0.1.0", path = "../mononoke_macros" }
 once_cell = "1.12"

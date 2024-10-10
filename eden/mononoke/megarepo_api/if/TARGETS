@@ -1,7 +1,7 @@
 load("@fbcode_macros//build_defs:thrift_library.bzl", "thrift_library")
 load("//common/automock:automock.bzl", "thrift_plugin_automock")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 thrift_library(
     name = "megarepo_configs",
@@ -33,19 +33,5 @@ thrift_library(
     },
     deps = [
         "//thrift/annotation:rust",
-    ],
-)
-
-thrift_library(
-    name = "megarepo_types-thrift",
-    languages = [
-        "rust",
-    ],
-    thrift_srcs = {
-        "megarepo_types_thrift.thrift": [],
-    },
-    deps = [
-        "//eden/mononoke/mononoke_types/serialization:mononoke_types_serialization",
-        "//eden/mononoke/scs/if:source_control",
     ],
 )

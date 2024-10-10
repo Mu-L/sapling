@@ -1,9 +1,8 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load("//eden/mononoke/facebook:lib.bzl", "tokio_dependency_test")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "mononoke_hg_sync_job",
@@ -23,6 +22,7 @@ rust_binary(
         "//eden/mononoke/blobstore:memblob",
         "//eden/mononoke/bonsai_globalrev_mapping:bonsai_globalrev_mapping",
         "//eden/mononoke/mercurial:mercurial_types-mocks",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/mononoke_types:mononoke_types-mocks",
         "//eden/mononoke/repo_factory:test_repo_factory",
         "//eden/mononoke/tests/utils:tests_utils",

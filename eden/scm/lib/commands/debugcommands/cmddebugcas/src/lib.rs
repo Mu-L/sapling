@@ -12,6 +12,8 @@ use clidispatch::abort;
 use clidispatch::ReqCtx;
 use cmdutil::define_flags;
 use cmdutil::Result;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use manifest::FileMetadata;
 use manifest::FsNodeMetadata;
 use manifest::Manifest;
@@ -19,6 +21,7 @@ use repo::Repo;
 use types::fetch_mode::FetchMode;
 use types::AugmentedTree;
 use types::CasDigest;
+use types::CasDigestType;
 use types::RepoPath;
 use workingcopy::WorkingCopy;
 
@@ -34,7 +37,7 @@ define_flags! {
     }
 }
 
-pub fn run(ctx: ReqCtx<DebugCasOpts>, repo: &mut Repo, wc: &mut WorkingCopy) -> Result<u8> {
+pub fn run(ctx: ReqCtx<DebugCasOpts>, repo: &Repo, wc: &WorkingCopy) -> Result<u8> {
     let client = match cas_client::new(ctx.config().clone())? {
         Some(client) => client,
         None => abort!("no CAS client constructor registered"),
@@ -57,11 +60,22 @@ pub fn run(ctx: ReqCtx<DebugCasOpts>, repo: &mut Repo, wc: &mut WorkingCopy) -> 
                 let aux =
                     repo.tree_store()?
                         .get_tree_aux_data(path, hgid, FetchMode::AllowRemote)?;
-                let fetch_res = block_on(client.fetch(&[CasDigest {
-                    hash: aux.augmented_manifest_id,
-                    size: aux.augmented_manifest_size,
-                }]))?;
-                for (digest, res) in fetch_res {
+
+                let fetch_res = block_on(async {
+                    client
+                        .fetch(
+                            &[CasDigest {
+                                hash: aux.augmented_manifest_id,
+                                size: aux.augmented_manifest_size,
+                            }],
+                            CasDigestType::Tree,
+                        )
+                        .await
+                        .try_collect::<Vec<_>>()
+                        .await
+                })?;
+
+                for (digest, res) in fetch_res.into_iter().flatten() {
                     write!(output, "tree path {path}, node {hgid}, digest {digest:?}, ")?;
 
                     match res {
@@ -78,11 +92,22 @@ pub fn run(ctx: ReqCtx<DebugCasOpts>, repo: &mut Repo, wc: &mut WorkingCopy) -> 
                 let aux = repo
                     .file_store()?
                     .get_aux(path, hgid, FetchMode::AllowRemote)?;
-                let fetch_res = block_on(client.fetch(&[CasDigest {
-                    hash: aux.blake3,
-                    size: aux.total_size,
-                }]))?;
-                for (digest, res) in fetch_res {
+
+                let fetch_res = block_on(async {
+                    client
+                        .fetch(
+                            &[CasDigest {
+                                hash: aux.blake3,
+                                size: aux.total_size,
+                            }],
+                            CasDigestType::File,
+                        )
+                        .await
+                        .try_collect::<Vec<_>>()
+                        .await
+                })?;
+
+                for (digest, res) in fetch_res.into_iter().flatten() {
                     write!(output, "file path {path}, node {hgid}, digest {digest:?}, ")?;
 
                     match res {

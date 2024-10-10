@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,17 +31,16 @@ use tracing::field;
 use types::errors::NetworkError;
 use types::fetch_mode::FetchMode;
 use types::CasDigest;
+use types::CasDigestType;
 use types::Key;
 use types::Sha256;
 
-use crate::datastore::HgIdDataStore;
-use crate::datastore::RemoteDataStore;
 use crate::error::ClonableError;
 use crate::indexedlogauxstore::AuxStore;
 use crate::indexedlogdatastore::Entry;
 use crate::indexedlogdatastore::IndexedLogHgIdDataStore;
 use crate::lfs::LfsPointersEntry;
-use crate::lfs::LfsRemoteInner;
+use crate::lfs::LfsRemote;
 use crate::lfs::LfsStore;
 use crate::lfs::LfsStoreEntry;
 use crate::scmstore::attrs::StoreAttrs;
@@ -57,8 +57,6 @@ use crate::scmstore::FileStore;
 use crate::scmstore::StoreFile;
 use crate::util;
 use crate::ContentHash;
-use crate::ContentStore;
-use crate::ExtStoredPolicy;
 use crate::Metadata;
 use crate::SaplingRemoteApiFileStore;
 use crate::StoreKey;
@@ -78,7 +76,6 @@ pub struct FetchState {
     metrics: FileStoreFetchMetrics,
 
     // Config
-    extstored_policy: ExtStoredPolicy,
     compute_aux_data: bool,
 
     lfs_enabled: bool,
@@ -102,7 +99,6 @@ impl FetchState {
 
             lfs_pointers: HashMap::new(),
 
-            extstored_policy: file_store.extstored_policy,
             compute_aux_data: file_store.compute_aux_data,
             lfs_progress: file_store.lfs_progress.clone(),
             lfs_enabled,
@@ -181,40 +177,7 @@ impl FetchState {
         Ok(LazyFile::IndexedLog(mmap_entry))
     }
 
-    fn ugprade_lfs_pointers(&mut self, entries: Vec<(Key, Entry)>, lfs_store: Option<&LfsStore>) {
-        for (key, entry) in entries {
-            match entry.try_into() {
-                Ok(ptr) => {
-                    if let Some(lfs_store) = lfs_store {
-                        // Promote this indexedlog LFS pointer to the
-                        // pointer store if it isn't already present. This
-                        // should only happen when the Python LFS extension
-                        // is in play.
-                        if let Ok(None) = lfs_store
-                            .fetch_available(&key.clone().into(), self.fetch_mode.ignore_result())
-                        {
-                            if let Err(err) = lfs_store.add_pointer(ptr) {
-                                self.errors.keyed_error(key, err);
-                            }
-                        }
-                    } else {
-                        // If we don't have somewhere to upgrade pointer,
-                        // track as a "found" pointer so it will be fetched
-                        // from the remote store subsequently.
-                        self.found_pointer(key, ptr, true)
-                    }
-                }
-                Err(err) => self.errors.keyed_error(key, err),
-            }
-        }
-    }
-
-    pub(crate) fn fetch_indexedlog(
-        &mut self,
-        store: &IndexedLogHgIdDataStore,
-        lfs_store: Option<&LfsStore>,
-        loc: StoreLocation,
-    ) {
+    pub(crate) fn fetch_indexedlog(&mut self, store: &IndexedLogHgIdDataStore, loc: StoreLocation) {
         let pending = self.pending_nonlfs(FileAttributes::CONTENT);
         if pending.is_empty() {
             return;
@@ -240,7 +203,6 @@ impl FetchState {
         let mut count = 0;
         let mut errors = 0;
         let mut error: Option<String> = None;
-        let mut lfs_pointers_to_upgrade = Vec::new();
 
         self.metrics.indexedlog.store(loc).fetch(pending.len());
 
@@ -267,13 +229,7 @@ impl FetchState {
                         found += 1;
 
                         if entry.metadata().is_lfs() && self.lfs_enabled {
-                            // This is mainly for tests. We are handling the transition
-                            // from the Python lfs extension (which stored pointers in the
-                            // regular file store), the remotefilelog lfs implementation
-                            // (which stores pointers in a separate store).
-                            if self.extstored_policy == ExtStoredPolicy::Use {
-                                lfs_pointers_to_upgrade.push((key.clone(), entry));
-                            }
+                            return None;
                         } else {
                             return Some(LazyFile::IndexedLog(entry).into());
                         }
@@ -293,8 +249,6 @@ impl FetchState {
 
                 None
             });
-
-        self.ugprade_lfs_pointers(lfs_pointers_to_upgrade, lfs_store);
 
         self.metrics
             .indexedlog
@@ -330,6 +284,7 @@ impl FetchState {
         let mut errors = 0;
         let mut count = 0;
         let mut error: Option<String> = None;
+        let ignore_results = self.fetch_mode.ignore_result() && !have_cas;
 
         let mut wants_aux = FileAttributes::AUX;
         if have_cas && loc == StoreLocation::Cache {
@@ -343,7 +298,7 @@ impl FetchState {
             .iter_pending(wants_aux, self.compute_aux_data, |key| {
                 count += 1;
 
-                let res = if self.fetch_mode.ignore_result() {
+                let res = if ignore_results {
                     store.contains(key.hgid).map(|contains| {
                         if contains {
                             // Insert a stub entry if caller is ignoring the results.
@@ -722,6 +677,12 @@ impl FetchState {
     }
 
     pub(crate) fn fetch_cas(&mut self, cas_client: &dyn CasClient) {
+        if self.common.request_attrs == FileAttributes::AUX {
+            // If we are only requesting aux data, don't bother querying CAS. Aux data is
+            // required to query CAS, so CAS cannot possibly help.
+            return;
+        }
+
         let span = tracing::info_span!(
             "fetch_cas",
             keys = field::Empty,
@@ -783,16 +744,12 @@ impl FetchState {
         let mut error = 0;
         let mut reqs = 0;
 
-        // TODO: configure
-        let max_batch_size = 1000;
         let start_time = Instant::now();
 
-        for chunk in digests.chunks(max_batch_size) {
-            reqs += 1;
-
-            // TODO: should we fan out here into multiple requests?
-            match block_on(cas_client.fetch(chunk)) {
+        block_on(async {
+            cas_client.fetch(&digests, CasDigestType::File).await.for_each(|results| match results {
                 Ok(results) => {
+                    reqs += 1;
                     for (digest, data) in results {
                         let Some(key) = digest_to_key.remove(&digest) else {
                             tracing::error!("got CAS result for unrequested digest {:?}", digest);
@@ -807,7 +764,7 @@ impl FetchState {
                                 self.errors.keyed_error(key, err);
                             }
                             Ok(None) => {
-                                tracing::error!(target: "cas", ?key, ?digest, "file not in cas");
+                                tracing::trace!(target: "cas", ?key, ?digest, "file not in cas");
                                 // miss
                             }
                             Ok(Some(data)) => {
@@ -823,18 +780,18 @@ impl FetchState {
                             }
                         }
                     }
+                    future::ready(())
                 }
                 Err(err) => {
                     tracing::error!(?err, "overall CAS error");
-                    let err = ClonableError::new(err);
-                    for digest in chunk {
-                        if let Some(key) = digest_to_key.get(digest) {
-                            self.errors.keyed_error(key.clone(), err.clone().into());
-                        }
-                    }
+
+                    // Don't propagate CAS error - we want to fall back to SLAPI.
+                    reqs += 1;
+                    error += 1;
+                    future::ready(())
                 }
-            }
-        }
+            }).await;
+        });
 
         span.record("hits", found);
         span.record("requests", reqs);
@@ -848,7 +805,7 @@ impl FetchState {
 
     pub(crate) fn fetch_lfs_remote(
         &mut self,
-        store: &LfsRemoteInner,
+        store: &LfsRemote,
         _local: Option<Arc<LfsStore>>,
         cache: Option<Arc<LfsStore>>,
     ) {
@@ -934,117 +891,6 @@ impl FetchState {
         }
         for error in other_errors.into_iter() {
             self.errors.other_error(error);
-        }
-    }
-
-    fn found_contentstore(&mut self, key: Key, bytes: Vec<u8>, meta: Metadata) {
-        if meta.is_lfs() {
-            self.metrics.contentstore.hit_lfsptr(1);
-            // Do nothing. We're trying to avoid exposing LFS pointers to the consumer of this API.
-            // We very well may need to expose LFS Pointers to the caller in the end (to match ContentStore's
-            // ExtStoredPolicy behavior), but hopefully not, and if so we'll need to make it type safe.
-            tracing::warn!("contentstore fallback returned serialized lfs pointer");
-        } else {
-            tracing::warn!(
-                "contentstore fetched a file scmstore couldn't, \
-                this indicates a bug or unsupported configuration: \
-                fetched key '{}', found {} bytes of content with metadata {:?}.",
-                key,
-                bytes.len(),
-                meta,
-            );
-            self.metrics.contentstore.hit(1);
-            self.found_attributes(key, LazyFile::ContentStore(bytes.into(), meta).into())
-        }
-    }
-
-    fn fetch_contentstore_inner(
-        &mut self,
-        store: &ContentStore,
-        pending: &mut Vec<StoreKey>,
-    ) -> Result<()> {
-        let fetch_start = std::time::Instant::now();
-
-        debug!(
-            "ContentStore Fallback  - Count = {count}",
-            count = pending.len()
-        );
-        let mut found = 0;
-        let mut errors = 0;
-        let mut error: Option<String> = None;
-
-        store.prefetch(pending)?;
-
-        for store_key in pending.drain(..) {
-            let key = store_key.clone().maybe_into_key().expect(
-                "no Key present in StoreKey, even though this should be guaranteed by pending_storekey",
-            );
-            // Using the ContentStore API, fetch the hg file blob, then, if it's found, also fetch the file metadata.
-            // Returns the requested file as Result<(Option<Vec<u8>>, Option<Metadata>)>
-            // Produces a Result::Err if either the blob or metadata get returned an error
-            let res = store
-                .get(store_key.clone())
-                .map(|store_result| store_result.into())
-                .and_then({
-                    let store_key = store_key.clone();
-                    |maybe_blob| {
-                        Ok((
-                            maybe_blob,
-                            store
-                                .get_meta(store_key)
-                                .map(|store_result| store_result.into())?,
-                        ))
-                    }
-                });
-
-            match res {
-                Ok((Some(blob), Some(meta))) => {
-                    found += 1;
-                    self.found_contentstore(key, blob, meta)
-                }
-                Err(err) => {
-                    self.metrics.contentstore.err(1);
-                    errors += 1;
-                    if error.is_none() {
-                        error.replace(format!("{}: {}", key, err));
-                    }
-                    self.errors.keyed_error(key, err)
-                }
-                _ => {
-                    self.metrics.contentstore.miss(1);
-                }
-            }
-        }
-
-        self.metrics
-            .contentstore
-            .time_from_duration(fetch_start.elapsed())
-            .ok();
-
-        if found != 0 {
-            debug!("    Found = {found}", found = found);
-        }
-        if errors != 0 {
-            debug!(
-                "    Errors = {errors}, Error = {error:?}",
-                errors = errors,
-                error = error
-            );
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn fetch_contentstore(&mut self, store: &ContentStore) {
-        let mut pending = self.pending_storekey(FileAttributes::CONTENT);
-        if pending.is_empty() {
-            return;
-        }
-        self.metrics.contentstore.fetch(pending.len());
-        if let Err(err) = self.fetch_contentstore_inner(store, &mut pending) {
-            debug!("ContentStore upper error - Error = {err:?}", err = err);
-            self.errors.other_error(err);
-            self.metrics.contentstore.err(pending.len());
         }
     }
 

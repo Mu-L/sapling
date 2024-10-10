@@ -6,7 +6,7 @@
 
   $ . "${TEST_FIXTURES}/library.sh"
   $ REPOTYPE="blob_files"
-  $ ENABLED_DERIVED_DATA='["git_commits", "git_trees", "git_delta_manifests_v2", "unodes", "filenodes", "hgchangesets"]' setup_common_config $REPOTYPE
+  $ GIT_LFS_INTERPRET_POINTERS=1 ENABLED_DERIVED_DATA='["git_commits", "git_trees", "git_delta_manifests_v2", "unodes", "filenodes", "hgchangesets", "ccsm", "skeleton_manifests"]' setup_common_config $REPOTYPE
   $ testtool_drawdag -R repo << EOF
   > A-B-C
   > # bookmark: C heads/main
@@ -19,8 +19,13 @@
   $ mononoke_newadmin git-symref -R repo create --symref-name HEAD --ref-name main --ref-type branch
   Symbolic ref HEAD pointing to branch main has been added
 
+# Start up the LFS server
+  $ LFS_LOG="${TESTTMP}/lfs.log"
+  $ LFS_URL="$(lfs_server --log "$LFS_LOG")/repo"
+
 # Start up the Mononoke Git Service
-  $ mononoke_git_service
+  $ mononoke_git_service --upstream-lfs-server "$LFS_URL/download_sha256"
+  $ set_mononoke_as_source_of_truth_for_git
 
 # Clone the Git repo from Mononoke
   $ CLONE_URL="$MONONOKE_GIT_SERVICE_BASE_URL/repo.git"
@@ -46,15 +51,43 @@
   617601c79811cbbae338512798318b4e5b70c9ac 
 
 $ cd "$TESTTMP"
-  $ LFS_LOG="${TESTTMP}/lfs.log"
-  $ LFS_URL="$(lfs_server --log "$LFS_LOG")/repo"
   $ git lfs install --local
-  Updated Git hooks.
+  Updated ?it hooks. (glob)
   Git LFS initialized.
-  $ git_client -c "lfs.url=$LFS_URL" -c http.extraHeader="x-client-info: {\"request_info\": {\"entry_point\": \"CurlTest\", \"correlator\": \"test\"}}" lfs fetch --all
-  fetch: 1 object found, done.
+  $ git config lfs.url "$LFS_URL"
+  $ git config http.extraHeader "x-client-info: {\"request_info\": {\"entry_point\": \"CurlTest\", \"correlator\": \"test\"}}"
+  $ git_client lfs fetch --all
+  fetch: 1 object* found, done. (glob)
   fetch: Fetching all references...
   $ git lfs checkout
   Checking out LFS objects: 100% (1/1), 20 B | 0 B/s, done.
   $ cat large_file
   contents of LFS file (no-eol)
+
+Inspect bonsai for LFS flag
+  $ mononoke_newadmin fetch -R repo -B heads/main
+  BonsaiChangesetId: 198d25da38c153f3feecddeee7e49fe3fa16d7e0085ea919c183372bf42a66d4
+  Author: author
+  Message: C
+  FileChanges:
+  	 ADDED/MODIFIED: C 896ad5879a5df0403bfc93fc96507ad9c93b31b11f3d0fa05445da7918241e5d
+  	 ADDED/MODIFIED (LFS): large_file eb3b8226bb5383aefd8299990543f1f8588344c3b2c2d25182a2a7d1fb691473
+  
+Push a change to LFS file
+  $ git lfs track large_file
+  Tracking "large_file"
+  $ echo contents of LFS file with some extra > large_file
+  $ git commit -aqm "new LFS change"
+  $ quiet git_client push
+  $ mononoke_newadmin fetch -R repo -B heads/main
+  BonsaiChangesetId: bc0b66e9dda60bc3c73dc3b56f7a0b65e4eb830e76af6ab595bd5c3759e8983b
+  Author: mononoke <mononoke@mononoke>
+  Message: new LFS change
+  
+  FileChanges:
+  	 ADDED/MODIFIED (LFS): large_file 408fae710285e464a70ce854d2bdb3d11cba5c9b8d48b135c212c7760681ec31
+  
+  $ mononoke_newadmin filestore -R repo fetch  --content-id 5565e648e1bcd80444cedbfb0d86483e2c2ff1b4798d8114454a5de1f25d2248
+  version https://git-lfs.github.com/spec/v1
+  oid sha256:59c36b4306da9c142ec8feef7bce1964334161db72886faad535f9e2e3418170
+  size 37

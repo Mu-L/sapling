@@ -1,9 +1,7 @@
 
 #require no-eden
 
-#inprocess-hg-incompatible
 
-  $ disable treemanifest
 test command parsing and dispatch
 
   $ hg init a
@@ -44,12 +42,10 @@ Missing parameter for early option:
 
 Parsing of early options should stop at "--":
 
-  $ hg cat -- --config=hooks.pre-cat=false
-  --config=hooks.pre-cat=false: no such file in rev cb9a9f314b8b
-  [1]
-  $ hg cat -- --debugger
-  --debugger: no such file in rev cb9a9f314b8b
-  [1]
+  $ hg debug-args -- --config=hooks.pre-cat=false
+  ["--config=hooks.pre-cat=false"]
+  $ hg debug-args -- --debugger
+  ["--debugger"]
 
 Unparsable form of early options:
 
@@ -134,7 +130,6 @@ For compatibility reasons, HGPLAIN=+strictflags is not enabled by plain HGPLAIN:
   > cat = -r null
   > EOF
   $ hg cat a
-  a: no such file in rev 000000000000
   [1]
 
   $ cd "$TESTTMP"

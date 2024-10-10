@@ -11,10 +11,6 @@
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO_SUBMODULE="${TESTTMP}/origin/repo-submodule-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
   $ cat >> repos/repo/server.toml <<EOF
   > [[bookmarks]]
@@ -24,14 +20,6 @@
   > [[hooks]]
   > name="block_unannotated_tags"
   > config_json='{}'
-  > EOF
-
-  $ merge_just_knobs <<EOF
-  > {
-  >   "bools": {
-  >     "scm/mononoke:run_hooks_on_additional_changesets": true
-  >   }
-  > }
   > EOF
 
 # Setup git repository
@@ -75,8 +63,8 @@
    ! [remote rejected] completely_new_tag -> completely_new_tag (hooks failed:
     block_unannotated_tags for e8615d6f149b876be0a2f30a1c5bf0c42bf8e136: The un-annotated tag "tags/completely_new_tag" is not allowed in this repository.
   Use 'git tag [ -a | -s ]' for tags you want to propagate.
-    block_unannotated_tags for 8ce3eae44760b500bf3f2c3922a95dcd3c908e9e: The un-annotated tag "tags/completely_new_tag" is not allowed in this repository.
-  Use 'git tag [ -a | -s ]' for tags you want to propagate.)
+  
+  For more information about hooks and bypassing, refer https://fburl.com/wiki/mb4wtk1j)
   error: failed to push some refs to 'https://localhost:$LOCAL_PORT/repos/git/ro/repo.git'
   [1]
 

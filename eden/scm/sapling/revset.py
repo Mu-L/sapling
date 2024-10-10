@@ -38,7 +38,6 @@ from . import (
 )
 from .i18n import _
 
-
 # helpers for processing parsed tree
 getsymbol = revsetlang.getsymbol
 getstring = revsetlang.getstring
@@ -765,7 +764,7 @@ def bookmark(repo, subset, x):
             bms.add(repo[bmrev].rev())
         else:
             matchrevs = set()
-            for name, bmrev in pycompat.iteritems(repo._bookmarks):
+            for name, bmrev in repo._bookmarks.items():
                 if matcher(name):
                     matchrevs.add(bmrev)
             if not matchrevs:
@@ -920,10 +919,10 @@ def children(repo, subset, x):
 
 @predicate("closed()", safe=True, weight=10)
 def closed(repo, subset, x):
-    """Changeset is closed."""
+    """Deprecated. Changeset is closed."""
     # i18n: "closed" is a keyword
     getargs(x, 0, 0, _("closed takes no arguments"))
-    return subset.filter(lambda r: repo[r].closesbranch(), condrepr="<branch closed>")
+    return subset.filter(lambda r: False, condrepr="<branch closed>")
 
 
 @predicate("contains(pattern)", weight=100)
@@ -1427,13 +1426,10 @@ def hasfile(repo, subset, x):
 
 @predicate("head()", safe=True)
 def head(repo, subset, x):
-    """Changeset is a named branch head."""
+    """Changeset is a head."""
     # i18n: "head" is a keyword
     getargs(x, 0, 0, _("head takes no arguments"))
-    hs = set()
-    cl = repo.changelog
-    for ls in pycompat.itervalues(repo.branchmap()):
-        hs.update(cl.rev(h) for h in ls)
+    hs = set(repo.headrevs())
     return subset & baseset(hs, repo=repo)
 
 
@@ -1592,7 +1588,7 @@ def named(repo, subset, x):
             raise error.RepoLookupError(_("namespace '%s' does not exist") % ns)
         namespaces.add(repo.names[pattern])
     else:
-        for name, ns in pycompat.iteritems(repo.names):
+        for name, ns in repo.names.items():
             if matcher(name):
                 namespaces.add(ns)
         if not namespaces:
@@ -1716,14 +1712,9 @@ def outgoing(repo, subset, x):
             hint=_("see '@prog@ help config.paths'"),
         )
     dest = path.pushloc or path.loc
-    branches = path.branch, []
-
-    revs, checkout = hg.addbranchrevs(repo, repo, branches, [])
-    if revs:
-        revs = [repo.lookup(rev) for rev in revs]
     other = hg.peer(repo, {}, dest)
     with repo.ui.configoverride({("ui", "quiet"): True}):
-        outgoing = discovery.findcommonoutgoing(repo, other, onlyheads=revs)
+        outgoing = discovery.findcommonoutgoing(repo, other)
     cl = repo.changelog
     o = {cl.rev(r) for r in outgoing.missing}
     return subset & o
@@ -1934,22 +1925,19 @@ def remote(repo, subset, x):
     # i18n: "remote" is a keyword
     l = getargs(x, 0, 2, _("remote takes zero, one, or two arguments"))
 
-    q = "."
+    # Legacy default of using the current branch (which is now only "default").
+    # Maybe we should use the current remote bookmark (if one is checked out)?
+    q = "default"
     if len(l) > 0:
         # i18n: "remote" is a keyword
         q = getstring(l[0], _("remote requires a string id"))
-    if q == ".":
-        q = repo["."].branch()
 
     dest = ""
     if len(l) > 1:
         # i18n: "remote" is a keyword
         dest = getstring(l[1], _("remote requires a repository path"))
     dest = repo.ui.expandpath(dest or "default")
-    dest, branches = hg.parseurl(dest)
-    revs, checkout = hg.addbranchrevs(repo, repo, branches, [])
-    if revs:
-        revs = [repo.lookup(rev) for rev in revs]
+    dest = hg.parseurl(dest)
     other = hg.peer(repo, {}, dest)
     n = other.lookup(q)
     if n in repo:
@@ -2077,7 +2065,7 @@ def matching(repo, subset, x):
     getfieldfuncs = []
     _funcs = {
         "user": lambda r: repo[r].user(),
-        "branch": lambda r: repo[r].branch(),
+        "branch": lambda r: "default",
         "date": lambda r: repo[r].date(),
         "description": lambda r: repo[r].description(),
         "files": lambda r: repo[r].files(),
@@ -2137,7 +2125,7 @@ def roots(repo, subset, x):
 
 _sortkeyfuncs = {
     "rev": lambda c: c.rev(),
-    "branch": lambda c: c.branch(),
+    "branch": lambda c: "default",
     "desc": lambda c: c.description(),
     "user": lambda c: c.user(),
     "author": lambda c: c.user(),

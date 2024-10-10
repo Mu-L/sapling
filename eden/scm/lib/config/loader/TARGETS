@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
 load("@fbcode_macros//build_defs/lib:rust_oss.bzl", "rust_oss")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("sapling")
 
@@ -67,7 +66,6 @@ rust_library(
     deps = [
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:tracing",
-        "fbsource//third-party/rust:url",
         "//eden/scm/lib/config/model:configmodel",
         "//eden/scm/lib/config/set:configset",
         "//eden/scm/lib/config/static:staticconfig",
@@ -76,8 +74,10 @@ rust_library(
         "//eden/scm/lib/identity:identity",
         "//eden/scm/lib/minibytes:minibytes",
         "//eden/scm/lib/repo/repo-minimal-info:repo-minimal-info",
+        "//eden/scm/lib/repo/url:repourl",
         "//eden/scm/lib/util/hgplain:hgplain",
     ] + ([] if rust_oss.is_oss_build() else [
+        "//devx_www/cross_env_session_id:cross_env_session_id",
         "fbsource//third-party/rust:base64",
         "fbsource//third-party/rust:dirs",
         "fbsource//third-party/rust:filetime",
@@ -88,10 +88,12 @@ rust_library(
         "fbsource//third-party/rust:serde_urlencoded",
         "fbsource//third-party/rust:sha2",
         "fbsource//third-party/rust:tempfile",
+        "fbsource//third-party/rust:url",
         "fbsource//third-party/rust:zstd",
         "//common/rust/shed/hostcaps:hostcaps",
         "//eden/scm/lib/hgtime:hgtime",
         "//eden/scm/lib/http-client:http-client",
+        "//eden/scm/lib/io:io",
         "//eden/scm/lib/spawn-ext:spawn-ext",
         "//eden/scm/lib/types:types",
         "//eden/scm/lib/util:util",

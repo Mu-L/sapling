@@ -19,6 +19,7 @@ use fixtures::Linear;
 use fixtures::ManyFilesDirs;
 use fixtures::TestRepoFixture;
 use futures::try_join;
+use mononoke_macros::mononoke;
 use mononoke_types::hash::Sha256;
 use mononoke_types::path::MPath;
 use mononoke_types::DerivableType;
@@ -36,12 +37,13 @@ use crate::CreateInfo;
 use crate::FileType;
 use crate::Mononoke;
 use crate::MononokeError;
+use crate::MononokeRepo;
 use crate::RepoContext;
 use crate::StoreRequest;
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_commit(fb: FacebookInit) -> Result<(), Error> {
-    create_commit(fb, DerivableType::SkeletonManifests).await?;
+    create_commit(fb, DerivableType::SkeletonManifestsV2).await?;
 
     Ok(())
 }
@@ -54,11 +56,8 @@ async fn create_commit(
     derived_data_to_derive: DerivableType,
 ) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
@@ -184,19 +183,14 @@ async fn create_commit(
 // We expect that after creating a commit only derived a single specific derived data
 // type is derived for a parent changeset, and none derived for the newly created changeset.
 // This function validates it's actualy the case
-async fn validate_unnecessary_derived_data_is_not_derived(
+async fn validate_unnecessary_derived_data_is_not_derived<R: MononokeRepo>(
     ctx: &CoreContext,
-    repo: &RepoContext,
+    repo: &RepoContext<R>,
     parent_cs_id: ChangesetId,
     cs_id: ChangesetId,
     derived_data_to_derive: DerivableType,
 ) -> Result<(), Error> {
-    for ty in &repo
-        .blob_repo()
-        .repo_derived_data_arc()
-        .active_config()
-        .types
-    {
+    for ty in &repo.repo().repo_derived_data_arc().active_config().types {
         if *ty == DerivableType::GitTrees {
             // Derived data utils doesn't support git_trees, so we have to skip it
             continue;
@@ -218,12 +212,12 @@ async fn validate_unnecessary_derived_data_is_not_derived(
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn create_commit_bad_changes(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -233,10 +227,10 @@ async fn create_commit_bad_changes(fb: FacebookInit) -> Result<(), Error> {
         .build()
         .await?;
 
-    async fn create_changeset(
-        repo: &RepoContext,
+    async fn create_changeset<R: MononokeRepo>(
+        repo: &RepoContext<R>,
         changes: BTreeMap<MPath, CreateChange>,
-    ) -> Result<ChangesetContext, MononokeError> {
+    ) -> Result<ChangesetContext<R>, MononokeError> {
         let parent_hash = "b0d1bf77898839595ee0f0cba673dd6e3be9dadaaa78bc6dd2dea97ca6bee77e";
         let parents = vec![ChangesetId::from_str(parent_hash)?];
         let author = String::from("Test Author <test@example.com>");
@@ -332,14 +326,11 @@ async fn create_commit_bad_changes(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_merge_commit(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
@@ -347,11 +338,11 @@ async fn test_create_merge_commit(fb: FacebookInit) -> Result<(), Error> {
         .build()
         .await?;
 
-    async fn create_changeset(
-        repo: &RepoContext,
+    async fn create_changeset<R: MononokeRepo>(
+        repo: &RepoContext<R>,
         changes: BTreeMap<MPath, CreateChange>,
         parents: Vec<ChangesetId>,
-    ) -> Result<ChangesetContext, MononokeError> {
+    ) -> Result<ChangesetContext<R>, MononokeError> {
         let author = String::from("Test Author <test@example.com>");
         let author_date = FixedOffset::east_opt(0)
             .unwrap()
@@ -416,14 +407,11 @@ async fn test_create_merge_commit(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_merge_commit_parent_file_conflict(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
@@ -431,11 +419,11 @@ async fn test_merge_commit_parent_file_conflict(fb: FacebookInit) -> Result<(), 
         .build()
         .await?;
 
-    async fn create_changeset(
-        repo: &RepoContext,
+    async fn create_changeset<R: MononokeRepo>(
+        repo: &RepoContext<R>,
         changes: BTreeMap<MPath, CreateChange>,
         parents: Vec<ChangesetId>,
-    ) -> Result<ChangesetContext, MononokeError> {
+    ) -> Result<ChangesetContext<R>, MononokeError> {
         let author = String::from("Test Author <test@example.com>");
         let author_date = FixedOffset::east_opt(0)
             .unwrap()
@@ -516,14 +504,11 @@ async fn test_merge_commit_parent_file_conflict(fb: FacebookInit) -> Result<(), 
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_merge_commit_parent_tree_file_conflict(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx.clone(), "test")
         .await?
@@ -531,11 +516,11 @@ async fn test_merge_commit_parent_tree_file_conflict(fb: FacebookInit) -> Result
         .build()
         .await?;
 
-    async fn create_changeset(
-        repo: &RepoContext,
+    async fn create_changeset<R: MononokeRepo>(
+        repo: &RepoContext<R>,
         changes: BTreeMap<MPath, CreateChange>,
         parents: Vec<ChangesetId>,
-    ) -> Result<ChangesetContext, MononokeError> {
+    ) -> Result<ChangesetContext<R>, MononokeError> {
         let author = String::from("Test Author <test@example.com>");
         let author_date = FixedOffset::east_opt(0)
             .unwrap()

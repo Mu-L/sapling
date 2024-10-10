@@ -12,12 +12,12 @@ import type {Comparison} from 'shared/Comparison';
 import type {Json} from 'shared/typeUtils';
 
 import {Internal} from './Internal';
-import {logger} from 'isl/src/logger';
 import {browserPlatformImpl} from 'isl/src/platform/browerPlatformImpl';
+import {registerCleanup} from 'isl/src/utils';
 import {lazy} from 'react';
-import {tryJsonParse} from 'shared/utils';
 
 const VSCodeSettings = lazy(() => import('./VSCodeSettings'));
+const AddMoreCwdsHint = lazy(() => import('./AddMoreCwdsHint'));
 
 declare global {
   interface Window {
@@ -25,56 +25,7 @@ declare global {
   }
 }
 
-/**
- * Previously, persisted storage was backed by localStorage.
- * This is unreliable in vscode. Instead, we use extension storage.
- * If you previously used localStorage, let's load from there
- * initially, then clear localStorage to migrate.
- *
- * After this has rolled out to everyone, it's safe to delete this.
- */
-function tryGetStateFromLocalStorage(): Record<string, Json> | undefined {
-  const state: Record<string, Json> = {};
-  try {
-    const found = {...localStorage};
-    for (const key in found) {
-      state[key] = tryJsonParse(found[key] as string) ?? null;
-    }
-    if (localStorage.length > 0) {
-      // If we found localStorage, save it as persisted storage instead, then clear localStorage.
-      // We do this in a timeout because the clientToServerAPI is not initialized statically when this is run.
-      persistStateAsSoonAsPossible();
-      logger.info(
-        'Found initial state in localStorage. Saving to extension storage instead; clearing localStorage.',
-      );
-      localStorage.clear();
-    }
-    return state;
-  } catch (e) {
-    return undefined;
-  }
-}
-
-const persistedState: Record<string, Json> =
-  window.islInitialPersistedState ?? tryGetStateFromLocalStorage() ?? {};
-
-function persistStateAsSoonAsPossible() {
-  let tries = 20;
-  const persist = () => {
-    if (window.clientToServerAPI == null) {
-      if (tries-- > 0) {
-        setTimeout(persist, 100);
-      }
-      return;
-    }
-    window.clientToServerAPI?.postMessage({
-      type: 'platform/setPersistedState',
-      data: JSON.stringify(persistedState),
-    });
-    logger.info('Saved persisted state to extension storage');
-  };
-  setTimeout(persist, 10);
-}
+const persistedState: Record<string, Json> = window.islInitialPersistedState ?? {};
 
 export const vscodeWebviewPlatform: Platform = {
   platformName: 'vscode',
@@ -123,23 +74,28 @@ export const vscodeWebviewPlatform: Platform = {
   getPersistedState<T extends Json>(key: string): T | null {
     return persistedState[key] as T;
   },
-  setPersistedState<T extends Json>(key: string, value: T): void {
-    persistedState[key] = value;
+  setPersistedState<T extends Json>(key: string, value: T | undefined): void {
+    if (value === undefined) {
+      delete persistedState[key];
+    } else {
+      persistedState[key] = value;
+    }
 
-    // send entire state every time
     window.clientToServerAPI?.postMessage({
       type: 'platform/setPersistedState',
-      data: JSON.stringify(persistedState),
+      key,
+      data: value === undefined ? undefined : JSON.stringify(value),
     });
   },
   clearPersistedState(): void {
     for (const key in persistedState) {
       delete persistedState[key];
+      window.clientToServerAPI?.postMessage({
+        type: 'platform/setPersistedState',
+        key,
+        data: undefined,
+      });
     }
-    window.clientToServerAPI?.postMessage({
-      type: 'platform/setPersistedState',
-      data: undefined,
-    });
   },
   getAllPersistedState(): Json | undefined {
     return persistedState;
@@ -163,10 +119,63 @@ export const vscodeWebviewPlatform: Platform = {
 
   AdditionalDebugContent: Internal.AdditionalDebugContent,
   GettingStartedContent: Internal.GettingStartedContent,
-  GettingStartedBugNuxContent: Internal.GettingStartedBugNuxContent,
+  AddMoreCwdsHint,
   Settings: VSCodeSettings,
 };
 
 function getTheme(): ThemeColor {
   return document.body.className.includes('vscode-light') ? 'light' : 'dark';
+}
+
+/**
+ * VS Code has a bug where it will lose focus on webview elements (notably text areas) when tabbing out and back in.
+ * To mitigate, we save the currently focused element as elements are focused, and refocus it on window focus.
+ * We limit this to text areas, as in some cases it seems certain keypresses are passed through
+ * if ISL is visible with a modal input above it, and we don't want to accidentally click buttons.
+ */
+
+let lastFocused: HTMLElement | null = null;
+
+const handleWindowFocus = () => {
+  const lastTextArea = lastFocused;
+  if (isTextInputToPreserveFocusFor(lastTextArea)) {
+    lastTextArea?.focus?.({preventScroll: true});
+  }
+};
+
+const handleDocFocus = (e: FocusEvent) => {
+  // Note: we don't clear this in document's blur. This means you could blur the element,
+  // then blur and refocus the window, and refocus the previous element.
+  // This is weird, but preferred to losing focus.
+  lastFocused = e.target as HTMLElement;
+};
+
+// window focus is when we may need to refocus a previously focused element
+window.addEventListener('focus', handleWindowFocus);
+// document focus change lets us track what element needs to be refocused.
+document.addEventListener('focus', handleDocFocus, {capture: true});
+
+registerCleanup(
+  vscodeWebviewPlatform,
+  () => {
+    window.removeEventListener('focus', handleWindowFocus);
+    document.removeEventListener('focus', handleDocFocus);
+  },
+  import.meta.hot,
+);
+
+function isTextInputToPreserveFocusFor(el: Element | null) {
+  if (el == null) {
+    return false;
+  }
+  if (el.tagName === 'INPUT') {
+    const input = el as HTMLInputElement;
+    // Don't preserve focus for non-text elements (they may get interacted unexpectedly).
+    // Also skip for quick commit title, which might cause a quick commit if the Enter key is sent
+    return input.type === 'text' && input.dataset.testId !== 'quick-commit-title';
+  }
+  if (el.tagName === 'TEXTAREA') {
+    return true;
+  }
+  return false;
 }

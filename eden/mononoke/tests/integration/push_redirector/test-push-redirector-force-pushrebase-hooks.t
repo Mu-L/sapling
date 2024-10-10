@@ -8,7 +8,7 @@
   $ . "${TEST_FIXTURES}/library-push-redirector.sh"
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 create_large_small_repo
+  $ create_large_small_repo
   Adding synced mapping entry
   $ cd "$TESTTMP/mononoke-config"
   $ cat >> repos/large-mon/server.toml << CONFIG
@@ -42,15 +42,15 @@
 We can't force pushrebase to a shared bookmark, so create a test bookmark that only belongs
 to the small repo
   $ cd "$TESTTMP/small-hg-client"
-  $ REPONAME=small-mon hgmn up -q master_bookmark
-  $ REPONAME=small-mon sl push -r . --to test_bookmark --create
+  $ hg up -q master_bookmark
+  $ hg push -r . --to test_bookmark --create
   pushing rev 11f848659bfc to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark test_bookmark
   creating remote bookmark test_bookmark
 
 Force pushrebase to the small repo with one commit succeeds, and does not get
 blocked by deny_files
   $ echo 2 > 2 && hg addremove -q && hg ci -q -m newcommit
-  $ REPONAME=small-mon sl push -r . --to test_bookmark --force 2>&1 | grep moving
+  $ hg push -r . --to test_bookmark --force 2>&1 | grep moving
   moving remote bookmark test_bookmark from 11f848659bfc to ce81c7d38286
 -- newcommit was correctly pushed to test_bookmark
   $ log -r test_bookmark
@@ -60,24 +60,24 @@ blocked by deny_files
 
 -- newcommit is also present in the large repo (after a pull)
   $ cd "$TESTTMP"/large-hg-client
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ log -r bookprefix/test_bookmark
   o  newcommit [public;rev=3;819e91b238b7] default/bookprefix/test_bookmark
   │
   ~
 - compare the working copies
-  $ verify_wc bookprefix/test_bookmark
+  $ verify_wc $(hg log -r bookprefix/test_bookmark -T '{node}')
 
 Pushing to the small repo triggers deny_files, even though deny_files is only configured on the large repo.
 Note that the node is from the small repo, even though the hook is in the large repo
 
   $ cd "$TESTTMP"/small-hg-client
-  $ REPONAME=small-mon hgmn up -q test_bookmark
+  $ hg up -q test_bookmark
   $ mkdir -p f/.git
   $ echo 2 > f/.git/HEAD && hg addremove -q && hg ci -q -m .git
   $ hg log -T"small_node: {node}\n" -r .
   small_node: 6e6a22d48eb51db1e7b8af685d9c99c0d7f10f70
-  $ REPONAME=small-mon sl push -r . --to test_bookmark --force
+  $ hg push -r . --to test_bookmark --force
   pushing rev 6e6a22d48eb5 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark test_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 0 files for upload
@@ -93,13 +93,13 @@ Create a commit in the large repo that triggers deny_files.  Since we haven't en
 there, we are ok to create it.  Create a commit on top of that that is backsynced.
 
   $ cd "$TESTTMP"/large-hg-client
-  $ REPONAME=large-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ mkdir -p x/.git
   $ echo 2 > x/.git/HEAD && hg addremove -q && hg ci -q -m .git-large
   $ hg log -T "large_node: {node}\n" -r .
   large_node: d967862de4d54c47ba51e0259fb1f72d881efd73
   $ echo 3 > smallrepofolder/largerepofile && hg addremove -q && hg ci -q -m backsync
-  $ REPONAME=large-mon sl push --to master_bookmark
+  $ hg push --to master_bookmark
   pushing rev 148264a57519 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 2 commits for upload
   edenapi: queue 1 file for upload
@@ -116,21 +116,16 @@ there, we are ok to create it.  Create a commit on top of that that is backsynce
 
 Commit has been backsynced
   $ cd "$TESTTMP"/small-hg-client
-  $ REPONAME=small-mon hgmn pull -q
+  $ hg pull -q
   $ log -r master_bookmark
   o  backsync [public;rev=4;cd9bfa9f25eb] default/master_bookmark
   │
   ~
 
-Attempt to move test_bookmark to the new master_bookmark commit.  It fails because of the
-hook in the large repo.
-Note that since the large repo commit doesn't map to the small repo, we see the large repo
-changeset id.
+Attempt to move test_bookmark to the new master_bookmark commit.
+No hook runs because the hooks already ran for this changeset.
 
-  $ REPONAME=small-mon hgmn up -q master_bookmark
-  $ REPONAME=small-mon sl push -r . --to test_bookmark --pushvar NON_FAST_FORWARD=true
+  $ hg up -q master_bookmark
+  $ hg push -r . --to test_bookmark --pushvar NON_FAST_FORWARD=true
   pushing rev cd9bfa9f25eb to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark test_bookmark
   moving remote bookmark test_bookmark from ce81c7d38286 to cd9bfa9f25eb
-  abort: server error: hooks failed:
-    deny_files for df2c680c0ed6920fdfde5c9b67edf6272517fae607109ef7e9adaa33a3da113a: Denied filename 'x/.git/HEAD' matched name pattern '/[.]git/'. Rename or remove this file and try again.
-  [255]

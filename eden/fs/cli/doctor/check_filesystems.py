@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -45,6 +46,23 @@ from facebook.eden.ttypes import (
     SyncBehavior,
     TimeSpec,
 )
+
+try:
+    from eden.fs.cli.doctor.facebook.internal_error_messages import (
+        get_inode_count_advice,
+    )
+except ImportError:
+
+    def get_inode_count_advice() -> str:
+        return ""
+
+
+try:
+    from eden.fs.cli.doctor.facebook.internal_consts import get_darwin_known_crawlers
+except ImportError:
+
+    def get_darwin_known_crawlers() -> Dict[str, str]:
+        return {}
 
 
 def check_using_nfs_path(tracker: ProblemTracker, mount_path: Path) -> None:
@@ -529,6 +547,7 @@ class MissingFilesForInodes(PathsProblem, FixableProblem):
             ),
             severity=ProblemSeverity.ERROR,
         )
+        self.EDEN_FILE_RECREATE_TIME = 1
 
     def dry_run_msg(self) -> str:
         return (
@@ -561,19 +580,30 @@ class MissingFilesForInodes(PathsProblem, FixableProblem):
 {errors}
 """
             )
+        # wait a little bit for eden to recreate the path
+        time.sleep(self.EDEN_FILE_RECREATE_TIME)
 
     def check_fix(self) -> bool:
-        try:
-            for dirent_path in self._paths:
+        failed_fixed_paths = []
+        missing_path = False
+        for dirent_path in self._paths:
+            try:
                 self._get_fn(self._mount / dirent_path)
-            return True
-        except FileNotFoundError as ex:
-            print(f"Failed to remediate {self._paths}: {ex}")
-        except Exception as ex:
-            print(
-                f"Unexpected error trying to remediate missing files {self._paths}: {ex}"
-            )
-        return False
+            except FileNotFoundError as ex:
+                failed_fixed_paths.append(
+                    f"Path still missing: {self._mount / dirent_path}: {ex}"
+                )
+                missing_path = True
+            except Exception as ex:
+                failed_fixed_paths.append(
+                    f"Unexpected error trying to remediate missing file {self._mount / dirent_path}: {ex}"
+                )
+        if failed_fixed_paths:
+            errorMsg = "\n".join(failed_fixed_paths)
+            if missing_path:
+                errorMsg += "\nPaths may take some time to be recreated, verify that the files are still missing"
+            raise RemediationError(f"Failed to fix paths for: \n{errorMsg}")
+        return True
 
 
 class DuplicateInodes(PathsProblem):
@@ -876,7 +906,21 @@ def check_loaded_content(
         tracker.add_problem(SHA1ComputationFailedForLoadedInode(sha1_errors))
 
 
-class HighInodeCountProblem(Problem, FixableProblem):
+class HighInodeCountProblemDarwin(Problem):
+    def __init__(
+        self, info: CheckoutInfo, inode_count: int, additional_info: str
+    ) -> None:
+        self._info = info
+        self._additional_info = additional_info
+        self.fix_result: Optional[DebugInvalidateResponse] = None
+        super().__init__(
+            description=f"Mount point {self._info.path} has {inode_count} loaded files{self._additional_info}. High inode count may impact EdenFS performance.\n",
+            severity=ProblemSeverity.ADVICE,
+        )
+        self._remediation: str = get_inode_count_advice()
+
+
+class HighInodeCountProblemWindows(Problem, FixableProblem):
     def __init__(self, info: CheckoutInfo, inode_count: int, threshold: int) -> None:
         self._info = info
         self._threshold = threshold
@@ -935,12 +979,15 @@ class UnknownInodeCountProblem(Problem):
 def check_inode_counts(
     tracker: ProblemTracker, instance: EdenInstance, checkout: CheckoutInfo
 ) -> None:
-    # This check is specific to the Windows implementation.
-    if sys.platform != "win32":
+    # This check is specific to PrjFS and NFS
+    if sys.platform == "linux":
         return
 
+    (platform, default_threshold) = (
+        ("windows", 1_000_000) if sys.platform == "win32" else ("darwin", 3_000_000)
+    )
     threshold = instance.get_config_int(
-        "doctor.windows-inode-count-problem-threshold", 1_000_000
+        f"doctor.{platform}-inode-count-problem-threshold", default_threshold
     )
 
     inode_info = checkout.mount_inode_info
@@ -950,7 +997,48 @@ def check_inode_counts(
 
     inode_count = total_inode_count(inode_info)
     if inode_count > threshold:
-        tracker.add_problem(HighInodeCountProblem(checkout, inode_count, threshold))
+        if sys.platform == "win32":
+            tracker.add_problem(
+                HighInodeCountProblemWindows(checkout, inode_count, threshold)
+            )
+        else:
+            # Determine if any known crawlers are potentially causing the high inode problem
+            (running, installed) = ([], [])
+            for name, install_location in get_darwin_known_crawlers().items():
+                pgrep_ret = subprocess.run(
+                    ["pgrep", "-i", name],
+                    stdout=subprocess.PIPE,
+                    text=True,
+                ).returncode
+                if pgrep_ret == 0:
+                    # Appends if:
+                    # 1) CrashPlan is not in the crawler name
+                    # 2) CrashPlan is in the crawler name AND repo is in the home directory.
+                    if "CrashPlan" not in name or checkout.path.is_relative_to(
+                        Path.home()
+                    ):
+                        running.append(name)
+                elif Path(install_location).exists():
+                    # Appends if:
+                    # 1) CrashPlan is not in the crawler name
+                    # 2) CrashPlan is in the crawler name AND repo is in the home directory.
+                    if "CrashPlan" not in name or checkout.path.is_relative_to(
+                        Path.home()
+                    ):
+                        installed.append(name)
+
+            additional_info = ""
+            if len(running) > 0:
+                # Running tools must also be installed
+                additional_info = f' and known crawling tools are running/installed ({", ".join(running + installed)})'
+            elif len(installed) > 0:
+                additional_info = (
+                    f' and known crawling tools are installed ({", ".join(installed)})'
+                )
+
+            tracker.add_problem(
+                HighInodeCountProblemDarwin(checkout, inode_count, additional_info)
+            )
 
 
 class HgStatusAndDiffMismatch(PathsProblem):

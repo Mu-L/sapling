@@ -8,7 +8,7 @@
 
 # Create two repositories
   $ setup_common_config blob_files
-  $ REPOID=1 FILESTORE=1 FILESTORE_CHUNK_SIZE=10 setup_mononoke_repo_config lfs_repo
+  $ REPOID=1 FILESTORE=1 FILESTORE_CHUNK_SIZE=10 LFS_USE_UPSTREAM=1 setup_mononoke_repo_config lfs_repo
 
 # Start a "server" that never responds as the upstream
   $ upstream_port="$(get_free_socket)"
@@ -42,7 +42,7 @@
   * lfs_upload: imported blob Sha256(ab02c2a1923c8eb11cb3ddab70320746d71d32ad63f255698dc67c3295757746) (glob)
 
 # Downloading a present blob should succeed without talking to the upstream
-  $ hg --config extensions.lfs= debuglfsreceive ab02c2a1923c8eb11cb3ddab70320746d71d32ad63f255698dc67c3295757746 2048 "$lfs_proxy" | sha256sum
+  $ hg debuglfsreceive ab02c2a1923c8eb11cb3ddab70320746d71d32ad63f255698dc67c3295757746 2048 "$lfs_proxy" | sha256sum
   ab02c2a1923c8eb11cb3ddab70320746d71d32ad63f255698dc67c3295757746  -
 
   $ cat "$log_proxy"
@@ -63,8 +63,15 @@
 
 # Downloading a missing blob should however wait (we check that we took ~4 seconds for this)
 
-  $ hg --config extensions.lfs= debuglfsreceive 0000000000000000000000000000000000000000000000000000000000000000 2048 "$lfs_proxy"
-  abort: LFS HTTP error: HTTP Error 500: Internal Server Error (action=download)!
+  $ hg debuglfsreceive 0000000000000000000000000000000000000000000000000000000000000000 2048 "$lfs_proxy" --config lfs.backofftimes=
+  abort: Fetch failed: http://$LOCALIP:$LOCAL_PORT/lfs_repo/objects/batch POST: HTTP status 500 Internal Server Error. Returned headers: {
+      "x-request-id": * (glob)
+      "content-type": "application/vnd.git-lfs+json",
+      "server": "mononoke-lfs",
+      "x-load": * (glob)
+      "content-length": * (glob)
+      "date": * (glob)
+  }
   [255]
 
   $ cat "$log_proxy"

@@ -3,7 +3,6 @@
 #require no-eden
 
 #inprocess-hg-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ enable amend commitcloud infinitepush rebase remotenames fbcodereview
   $ configure dummyssh
@@ -13,11 +12,10 @@
   $ setconfig extensions.arcconfig="$TESTDIR/../sapling/ext/extlib/phabricator/arcconfig.py"
   $ setconfig devel.segmented-changelog-rev-compat=true
 
-  $ hg init server --config extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
+  $ hg init server
   $ cd server
   $ setconfig infinitepush.server=yes infinitepush.reponame=testrepo
   $ setconfig infinitepush.indextype=disk infinitepush.storetype=disk
-  $ setconfig treemanifest.server=True extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
   $ touch base
   $ hg commit -Aqm base
   $ hg bookmark master

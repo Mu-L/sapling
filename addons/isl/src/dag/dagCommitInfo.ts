@@ -11,6 +11,7 @@ import type {
   CommitInfo,
   CommitPhaseType,
   Hash,
+  RepoRelativePath,
   StableCommitMetadata,
   SuccessorInfo,
 } from '../types';
@@ -55,11 +56,12 @@ const CommitInfoExtRecord = Record<CommitInfoExtProps>({
   successorInfo: undefined,
   closestPredecessors: undefined,
   optimisticRevset: undefined,
-  filesSample: [],
+  filePathsSample: [],
   totalFileCount: 0,
   diffId: undefined,
   isFollower: undefined,
   stableCommitMetadata: undefined,
+  maxCommonPathPrefix: '',
 
   // WithPreviewType
   previewType: undefined,
@@ -153,8 +155,8 @@ export class DagCommitInfo extends SelfUpdate<CommitInfoExtRecord> {
     return this.inner.optimisticRevset;
   }
 
-  get filesSample(): ReadonlyArray<ChangedFile> {
-    return this.inner.filesSample;
+  get filePathsSample(): ReadonlyArray<RepoRelativePath> {
+    return this.inner.filePathsSample;
   }
 
   get totalFileCount(): number {
@@ -187,5 +189,9 @@ export class DagCommitInfo extends SelfUpdate<CommitInfoExtRecord> {
 
   get isYouAreHere(): boolean | undefined {
     return this.inner.isYouAreHere;
+  }
+
+  get maxCommonPathPrefix(): string {
+    return this.inner.maxCommonPathPrefix;
   }
 }

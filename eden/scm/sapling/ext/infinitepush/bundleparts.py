@@ -16,7 +16,6 @@ from sapling import (
     extensions,
     mutation,
     perftrace,
-    pycompat,
     revsetlang,
     util,
 )
@@ -148,7 +147,7 @@ def _getscratchbranchpartsimpl(
     parts.append(
         bundle2.bundlepart(
             constants.scratchbranchparttype.upper(),
-            advisoryparams=pycompat.iteritems(params),
+            advisoryparams=params.items(),
             data=cg,
         )
     )
@@ -280,7 +279,7 @@ def _bundlesetup() -> None:
         decodedbookmarks = bookmarks.decodebookmarks(part)
         toinsert = {}
         todelete = []
-        for bookmark, node in pycompat.iteritems(decodedbookmarks):
+        for bookmark, node in decodedbookmarks.items():
             if node:
                 toinsert[bookmark] = node
             else:

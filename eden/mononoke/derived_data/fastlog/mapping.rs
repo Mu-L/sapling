@@ -169,23 +169,25 @@ impl BonsaiDerivable for RootFastlog {
 async fn fetch_unode_parents<B: Blobstore>(
     ctx: &CoreContext,
     blobstore: &B,
-    unode_entry_id: Entry<ManifestUnodeId, FileUnodeId>,
+    unode_entry: Entry<ManifestUnodeId, FileUnodeId>,
 ) -> Result<Vec<Entry<ManifestUnodeId, FileUnodeId>>, Error> {
-    let unode_entry = unode_entry_id.load(ctx, blobstore).await?;
-
     let res = match unode_entry {
-        Entry::Tree(tree) => tree
-            .parents()
-            .clone()
-            .into_iter()
-            .map(Entry::Tree)
-            .collect(),
-        Entry::Leaf(leaf) => leaf
-            .parents()
-            .clone()
-            .into_iter()
-            .map(Entry::Leaf)
-            .collect(),
+        Entry::Tree(tree_id) => {
+            let tree = tree_id.load(ctx, blobstore).await?;
+            tree.parents()
+                .clone()
+                .into_iter()
+                .map(Entry::Tree)
+                .collect()
+        }
+        Entry::Leaf(leaf_id) => {
+            let leaf = leaf_id.load(ctx, blobstore).await?;
+            leaf.parents()
+                .clone()
+                .into_iter()
+                .map(Entry::Leaf)
+                .collect()
+        }
     };
     Ok(res)
 }
@@ -198,10 +200,10 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
 
-    use blobrepo::save_bonsai_changesets;
     use bonsai_hg_mapping::BonsaiHgMapping;
     use bookmarks::BookmarkKey;
     use bookmarks::Bookmarks;
+    use changesets_creation::save_changesets;
     use commit_graph::CommitGraph;
     use commit_graph::CommitGraphRef;
     use commit_graph::CommitGraphWriter;
@@ -222,6 +224,7 @@ mod tests {
     use maplit::btreemap;
     use mercurial_derivation::DeriveHgChangeset;
     use mercurial_types::HgChangesetId;
+    use mononoke_macros::mononoke;
     use mononoke_types::fastlog_batch::max_entries_in_fastlog_batch;
     use mononoke_types::fastlog_batch::MAX_BATCHES;
     use mononoke_types::fastlog_batch::MAX_LATEST_LEN;
@@ -260,15 +263,13 @@ mod tests {
         repo_identity: RepoIdentity,
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_single_empty_commit_no_parents(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
         let bcs = create_bonsai_changeset(vec![]);
         let bcs_id = bcs.get_changeset_id();
-        save_bonsai_changesets(vec![bcs], ctx.clone(), &repo)
-            .await
-            .unwrap();
+        save_changesets(&ctx, &repo, vec![bcs]).await.unwrap();
 
         let root_unode_mf_id = derive_fastlog_batch_and_unode(&ctx, bcs_id.clone(), &repo).await;
 
@@ -276,9 +277,9 @@ mod tests {
         assert_eq!(list, vec![(bcs_id, vec![])]);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_single_commit_no_parents(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         // This is the initial diff with no parents
@@ -311,9 +312,9 @@ mod tests {
         assert_eq!(list, vec![(bcs_id, vec![])]);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_linear(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let hg_cs_id = HgChangesetId::from_str("79a13814c5ce7330173ec04d279bf95ab3f652fb").unwrap();
@@ -339,9 +340,9 @@ mod tests {
         }
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_overflow(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let mut bonsais = vec![];
@@ -363,16 +364,14 @@ mod tests {
         }
 
         let latest = parents.first().unwrap();
-        save_bonsai_changesets(bonsais, ctx.clone(), &repo)
-            .await
-            .unwrap();
+        save_changesets(&ctx, &repo, bonsais).await.unwrap();
 
         verify_all_entries_for_commit(&ctx, &repo, *latest).await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_random_repo(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let mut rng = XorShiftRng::seed_from_u64(0); // reproducable Rng
@@ -384,9 +383,9 @@ mod tests {
         verify_all_entries_for_commit(&ctx, &repo, latest).await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_empty_commits(fb: FacebookInit) {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         let mut bonsais = vec![];
@@ -399,16 +398,14 @@ mod tests {
         }
 
         let latest = parents.first().unwrap();
-        save_bonsai_changesets(bonsais, ctx.clone(), &repo)
-            .await
-            .unwrap();
+        save_changesets(&ctx, &repo, bonsais).await.unwrap();
 
         verify_all_entries_for_commit(&ctx, &repo, *latest).await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_find_intersection_of_diffs_unodes_linear(fb: FacebookInit) -> Result<(), Error> {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         // This commit creates file "1" and "files"
@@ -439,7 +436,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_find_intersection_of_diffs_merge(fb: FacebookInit) -> Result<(), Error> {
         async fn test_single_find_unodes_merge(
             fb: FacebookInit,
@@ -447,7 +444,7 @@ mod tests {
             merge_files: BTreeMap<&str, Option<&str>>,
             expected: Vec<String>,
         ) -> Result<(), Error> {
-            let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+            let repo: TestRepo = Linear::get_repo(fb).await;
             let ctx = CoreContext::test_mock(fb);
             let manager = repo.repo_derived_data().manager();
 
@@ -468,9 +465,7 @@ mod tests {
             let merge_bcs_id = bcs.get_changeset_id();
 
             bonsais.push(bcs);
-            save_bonsai_changesets(bonsais, ctx.clone(), &repo)
-                .await
-                .unwrap();
+            save_changesets(&ctx, &repo, bonsais).await.unwrap();
 
             let mut parent_unodes = vec![];
 
@@ -569,12 +564,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_derive_merges(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
 
         {
-            let repo: TestRepo = MergeUneven::get_custom_test_repo(fb).await;
+            let repo: TestRepo = MergeUneven::get_repo(fb).await;
             let all_commits: Vec<_> = all_commits(ctx.clone(), repo.clone()).await?;
 
             for (bcs_id, _hg_cs_id) in all_commits {
@@ -583,7 +578,7 @@ mod tests {
         }
 
         {
-            let repo: TestRepo = MergeEven::get_custom_test_repo(fb).await;
+            let repo: TestRepo = MergeEven::get_repo(fb).await;
             let all_commits: Vec<_> = all_commits(ctx.clone(), repo.clone()).await?;
 
             for (bcs_id, _hg_cs_id) in all_commits {
@@ -592,7 +587,7 @@ mod tests {
         }
 
         {
-            let repo: TestRepo = UnsharedMergeEven::get_custom_test_repo(fb).await;
+            let repo: TestRepo = UnsharedMergeEven::get_repo(fb).await;
             let all_commits: Vec<_> = all_commits(ctx.clone(), repo.clone()).await?;
 
             for (bcs_id, _hg_cs_id) in all_commits {
@@ -601,7 +596,7 @@ mod tests {
         }
 
         {
-            let repo: TestRepo = UnsharedMergeUneven::get_custom_test_repo(fb).await;
+            let repo: TestRepo = UnsharedMergeUneven::get_repo(fb).await;
             let all_commits: Vec<_> = all_commits(ctx.clone(), repo.clone()).await?;
 
             for (bcs_id, _hg_cs_id) in all_commits {
@@ -612,9 +607,9 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_bfs_order(fb: FacebookInit) -> Result<(), Error> {
-        let repo: TestRepo = Linear::get_custom_test_repo(fb).await;
+        let repo: TestRepo = Linear::get_repo(fb).await;
         let ctx = CoreContext::test_mock(fb);
 
         //            E
@@ -662,7 +657,7 @@ mod tests {
         println!("e = {}", e.get_changeset_id());
         bonsais.push(e.clone());
 
-        save_bonsai_changesets(bonsais, ctx.clone(), &repo).await?;
+        save_changesets(&ctx, &repo, bonsais).await?;
 
         verify_all_entries_for_commit(&ctx, &repo, e.get_changeset_id()).await;
         Ok(())

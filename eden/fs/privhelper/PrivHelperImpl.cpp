@@ -71,7 +71,14 @@ class PrivHelperClientImpl : public PrivHelper,
         state_{ThreadSafeData{
             Status::NOT_STARTED,
             nullptr,
-            UnixSocket::makeUnique(nullptr, std::move(conn))}} {}
+            UnixSocket::makeUnique(nullptr, std::move(conn))}} {
+    pid_ = -1;
+    if (helperProc_.has_value()) {
+      pid_ = helperProc_->pid();
+    }
+    // If we need to get the pid from the server, we need to
+    // wait until the connection is started
+  }
   ~PrivHelperClientImpl() override {
     cleanup();
     XDCHECK_EQ(sendPending_, 0ul);
@@ -122,12 +129,14 @@ class PrivHelperClientImpl : public PrivHelper,
   Future<folly::Unit> setDaemonTimeout(
       std::chrono::nanoseconds duration) override;
   Future<folly::Unit> setUseEdenFs(bool useEdenFs) override;
+  Future<pid_t> getServerPid() override;
   int stop() override;
   int getRawClientFd() const override {
     auto state = state_.rlock();
     return state->conn_->getRawFd();
   }
   bool checkConnection() override;
+  int getPid() override;
 
  private:
   using PendingRequestMap =
@@ -358,6 +367,7 @@ class PrivHelperClientImpl : public PrivHelper,
   std::optional<SpawnedProcess> helperProc_;
   std::atomic<uint32_t> nextXid_{1};
   folly::Synchronized<ThreadSafeData> state_;
+  pid_t pid_;
 
   // sendPending_, and pendingRequests_ are only accessed from the
   // EventBase thread.
@@ -542,6 +552,16 @@ Future<Unit> PrivHelperClientImpl::setUseEdenFs(bool useEdenFs) {
       });
 }
 
+Future<pid_t> PrivHelperClientImpl::getServerPid() {
+  auto xid = getNextXid();
+  auto request = PrivHelperConn::serializeGetPidRequest(xid);
+
+  return sendAndRecv(xid, std::move(request))
+      .thenValue([](UnixSocket::Message&& response) {
+        return PrivHelperConn::parseGetPidResponse(response);
+      });
+}
+
 int PrivHelperClientImpl::stop() {
   const auto result = cleanup();
   if (result.hasError()) {
@@ -558,6 +578,19 @@ int PrivHelperClientImpl::stop() {
 bool PrivHelperClientImpl::checkConnection() {
   auto state = state_.rlock();
   return state->status == Status::RUNNING && state->conn_;
+}
+
+int PrivHelperClientImpl::getPid() {
+  if (pid_ == -1 && checkConnection()) {
+    // Get pid from server after connection is made
+    try {
+      pid_ = getServerPid().get();
+    } catch (const facebook::eden::PrivHelperError& ex) {
+      XLOG(ERR) << "Failed to get pid from privhelper: " << ex.what();
+      return -1;
+    }
+  }
+  return pid_;
 }
 
 } // unnamed namespace
@@ -825,6 +858,10 @@ class StubPrivHelper final : public PrivHelper {
     return folly::unit;
   }
 
+  folly::Future<pid_t> getServerPid() override {
+    return -1;
+  }
+
   int stop() override {
     return 0;
   }
@@ -838,6 +875,11 @@ class StubPrivHelper final : public PrivHelper {
     // in `eden doctor`. The Windows privhelper stub is always healthy, so
     // return true.
     return true;
+  }
+
+  int getPid() override {
+    // Since we don't have a privhelper process return -1 to mark no process
+    return -1;
   }
 };
 

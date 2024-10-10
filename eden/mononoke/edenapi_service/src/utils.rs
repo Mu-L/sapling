@@ -14,6 +14,7 @@ use gotham_ext::error::HttpError;
 use gotham_ext::middleware::request_context::RequestContext;
 use http::HeaderMap;
 use hyper::Body;
+use mononoke_api::MononokeRepo;
 use mononoke_api_hg::HgRepoContext;
 use mononoke_api_hg::RepoContextHgExt;
 use rate_limiting::Metric;
@@ -24,6 +25,7 @@ use crate::errors::MononokeErrorExt;
 use crate::middleware::request_dumper::RequestDumper;
 
 pub mod cbor;
+pub mod commit_cloud_types;
 pub mod convert;
 pub mod monitor;
 
@@ -38,21 +40,25 @@ pub use convert::to_hg_path;
 pub use convert::to_mpath;
 pub use convert::to_revlog_changeset;
 
-pub async fn get_repo(
-    sctx: &ServerContext,
+pub async fn get_repo<R: MononokeRepo>(
+    sctx: &ServerContext<R>,
     rctx: &RequestContext,
     name: impl AsRef<str>,
     throttle_metric: impl Into<Option<Metric>>,
-) -> Result<HgRepoContext, HttpError> {
-    rctx.ctx.session().check_load_shed()?;
+) -> Result<HgRepoContext<R>, HttpError> {
+    let mut scuba = rctx.ctx.scuba().clone();
+    rctx.ctx.session().check_load_shed(&mut scuba)?;
 
     if let Some(throttle_metric) = throttle_metric.into() {
-        rctx.ctx.session().check_rate_limit(throttle_metric).await?;
+        rctx.ctx
+            .session()
+            .check_rate_limit(throttle_metric, &mut scuba)
+            .await?;
     }
 
     let name = name.as_ref();
     sctx.mononoke_api()
-        .repo(rctx.ctx.clone(), name)
+        .repo(rctx.ctx.with_mutated_scuba(|_| scuba), name)
         .await
         .map_err(|e| e.into_http_error(ErrorKind::RepoLoadFailed(name.to_string())))?
         .with_context(|| ErrorKind::RepoDoesNotExist(name.to_string()))

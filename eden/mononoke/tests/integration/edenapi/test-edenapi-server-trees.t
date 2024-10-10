@@ -11,9 +11,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ echo "test content" > test.txt
@@ -27,7 +26,7 @@ Populate test repo
 
 Blobimport test repo.
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ start_and_wait_for_mononoke_server
@@ -47,7 +46,7 @@ Create and send tree request.
   > }
   > EOF
 
-  $ sl debugapi -e trees -f keys -f attrs --sort
+  $ hg debugapi mono:repo -e trees -f keys -f attrs --sort
   [{"key": {"node": bin("15024c4dc4a27b572d623db342ae6a08d7f7adec"),
             "path": ""},
     "data": b"test.txt\0186cafa3319c24956783383dc44c5cbc68c5a0ca\n",
@@ -93,7 +92,7 @@ Create and send tree request.
   > EOF
 
 Expected fallback (tree_aux_data is not returned)
-  $ sl debugapi -e trees -f keys -f attrs --sort
+  $ hg debugapi mono:repo -e trees -f keys -f attrs --sort
   [{"key": {"node": bin("15024c4dc4a27b572d623db342ae6a08d7f7adec"),
             "path": ""},
     "data": b"test.txt\0186cafa3319c24956783383dc44c5cbc68c5a0ca\n",
@@ -130,8 +129,8 @@ Expected fallback (tree_aux_data is not returned)
     "tree_aux_data": None}]
 
 Expected for tree_aux_data to be returned.
-  $ mononoke_newadmin derived-data -R repo derive --derived-data-types hg_augmented_manifests --hg-id $HG_ID_1 --hg-id $HG_ID_2 --from-predecessor
-  $ sl debugapi -e trees -f keys -f attrs --sort
+  $ mononoke_newadmin derived-data -R repo derive --derived-data-types hg_augmented_manifests -i $HG_ID_1 -i $HG_ID_2 --from-predecessor
+  $ hg debugapi mono:repo -e trees -f keys -f attrs --sort
   [{"key": {"node": bin("15024c4dc4a27b572d623db342ae6a08d7f7adec"),
             "path": ""},
     "data": b"test.txt\0186cafa3319c24956783383dc44c5cbc68c5a0ca\n",

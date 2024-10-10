@@ -15,8 +15,8 @@ setup configuration
 
 setup hg server repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > C
   > |
@@ -64,7 +64,7 @@ setup hg server repo
      pre_deletion_commit       0069ba24938a
 
   $ cd .. 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
   $ megarepo_tool gradual-merge \
   > stash \
   > "gradual merge" \
@@ -114,17 +114,18 @@ setup hg server repo
   * Now running pushrebase... (glob)
   * Pushrebased to * (glob)
 
-  $ start_and_wait_for_mononoke_server
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo --noupdate
-  $ cd repo
-  $ hgmn pull
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg clone -q mono:repo client --noupdate
+  $ cd client
+
+  $ start_and_wait_for_mononoke_server
+
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  updating bookmark head_bookmark
   $ hg log -G -T '{node|short} {desc|firstline}\n'
   o    * [MEGAREPO GRADUAL MERGE] gradual merge (2) (glob)
   ├─╮
@@ -148,9 +149,8 @@ setup hg server repo
       │
       o  426bada5c675 A
   
-  $ hgmn up head_bookmark
+  $ hg up head_bookmark
   6 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark head_bookmark)
   $ ls
   A
   B

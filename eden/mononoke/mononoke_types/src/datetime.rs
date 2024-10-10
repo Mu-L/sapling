@@ -213,6 +213,10 @@ impl Timestamp {
         DateTime::now().into()
     }
 
+    pub fn now_as_secs() -> Self {
+        Timestamp(Timestamp::now().timestamp_seconds() * SEC_IN_NS)
+    }
+
     pub fn from_timestamp_secs(ts: i64) -> Self {
         Timestamp(ts * SEC_IN_NS)
     }
@@ -273,6 +277,7 @@ impl From<Timestamp> for DateTime {
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
 
     use super::*;
@@ -288,7 +293,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn rfc3339() {
         // Valid RFC3339 strings.
         DateTime::from_rfc3339("2018-01-01T00:00:00Z").expect("unexpected err - UTC");
@@ -303,7 +308,7 @@ mod test {
         DateTime::from_rfc3339("2018-01-01T12:23:36").expect_err("unexpected Ok - no timezone");
     }
 
-    #[test]
+    #[mononoke::test]
     fn bad_inputs() {
         DateTime::from_timestamp(0, 86_400)
             .expect_err("unexpected OK - tz_offset_secs out of bounds");
@@ -315,7 +320,7 @@ mod test {
             .expect_err("unexpected OK - timestamp_secs out of bounds");
     }
 
-    #[test]
+    #[mononoke::test]
     fn bad_thrift() {
         DateTime::from_thrift(thrift::time::DateTime {
             timestamp_secs: 0,
@@ -339,7 +344,7 @@ mod test {
         .expect_err("unexpected OK - timestamp_secs out of bounds");
     }
 
-    #[test]
+    #[mononoke::test]
     fn timestamp_round_trip() {
         let ts0 = Timestamp::now();
         let dt0: DateTime = ts0.into();
@@ -349,14 +354,14 @@ mod test {
         assert_eq!(dt0, dt1);
     }
 
-    #[test]
+    #[mononoke::test]
     fn seconds() {
         let ts0 = Timestamp::from_timestamp_nanos(SEC_IN_NS);
         let ts1 = Timestamp::from_timestamp_secs(1);
         assert_eq!(ts0, ts1);
     }
 
-    #[test]
+    #[mononoke::test]
     fn gix_round_trip() {
         // Let's use ISO8601_STRICT (subset of rfc 3339) as our human readable reference for a timestamp to ensure we don't
         // only round trip between gix and our DateTime, but also that we are not doing a mistake

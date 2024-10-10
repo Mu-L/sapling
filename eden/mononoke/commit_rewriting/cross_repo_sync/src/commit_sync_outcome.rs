@@ -102,12 +102,12 @@ impl<R: Repo> CandidateSelectionHint<R> {
     /// Convert `self` into an appropriate variant of the `DesiredRelationship`
     /// if it is possible. Specifically:
     /// - `Only` variant does not represent a topological relationship, so cannot
-    ///  be converted into `DesiredRelationship`
+    ///   be converted into `DesiredRelationship`
     /// - `Exact` variant represents `DesiredRelationship::EqualTo`
     /// - `AncestorOfCommit` and `DescendantOfCommit` translate into
-    ///  corresponding `DesiredRelationship` variants
+    ///   corresponding `DesiredRelationship` variants
     /// - `AncestorOfBookmark` and `DescendantOfBookmark` behave either
-    ///  as their commit counterparts (if the bookmark exists), or as `Only` (otherwise)
+    ///   as their commit counterparts (if the bookmark exists), or as `Only` (otherwise)
     ///
     /// Note that hints, which refer to bookmarks may not be fully valid at the time
     /// of use: specifically, the bookmark may not exist. That should not be considered
@@ -175,6 +175,7 @@ impl<R: Repo> CandidateSelectionHint<R> {
 /// - `X` is an equivalent of `Y`
 /// - `B` and `C` don't touch any files form the small repo (`NotSyncCandidate`)
 /// - `A` and `D` are fully identical with the exception of their parent commits
+///
 /// Then both `A` and `D` are in `PluralCommitSyncOutcome::RewrittenAs` of `E`
 pub async fn get_plural_commit_sync_outcome<'a, M: SyncedCommitMapping>(
     ctx: &'a CoreContext,
@@ -659,15 +660,18 @@ mod tests {
     use cross_repo_sync_test_utils::TestRepo;
     use fbinit::FacebookInit;
     use live_commit_sync_config::TestLiveCommitSyncConfig;
+    use mononoke_macros::mononoke;
     use mononoke_types_mocks::changesetid::FOURS_CSID;
     use mononoke_types_mocks::changesetid::ONES_CSID;
     use mononoke_types_mocks::changesetid::THREES_CSID;
     use mononoke_types_mocks::changesetid::TWOS_CSID;
+    use rendezvous::RendezVousOptions;
     use sql::rusqlite::Connection as SqliteConnection;
     use sql::Connection;
     use sql_construct::SqlConstruct;
     use sql_ext::SqlConnections;
     use synced_commit_mapping::SqlSyncedCommitMapping;
+    use synced_commit_mapping::SqlSyncedCommitMappingBuilder;
     use synced_commit_mapping::SyncedCommitMappingEntry;
     use synced_commit_mapping::SyncedCommitSourceRepo;
     use test_repo_factory::TestRepoFactory;
@@ -691,9 +695,11 @@ mod tests {
         large_repo_id: RepositoryId,
     ) -> Result<SqlSyncedCommitMapping, Error> {
         let sqlite_con = SqliteConnection::open_in_memory()?;
-        sqlite_con.execute_batch(SqlSyncedCommitMapping::CREATION_QUERY)?;
+        sqlite_con.execute_batch(SqlSyncedCommitMappingBuilder::CREATION_QUERY)?;
         let con = Connection::with_sqlite(sqlite_con);
-        let m = SqlSyncedCommitMapping::from_sql_connections(SqlConnections::new_single(con));
+        let m =
+            SqlSyncedCommitMappingBuilder::from_sql_connections(SqlConnections::new_single(con))
+                .build(RendezVousOptions::for_test());
         for (small_bcs_id, large_bcs_id) in entires {
             m.add(
                 ctx,
@@ -767,7 +773,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_ancestor_hint_selector(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let blob_repo: TestRepo = TestRepoFactory::new(fb)?
@@ -851,7 +857,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_descendant_hint_selector(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let blob_repo: TestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -935,7 +941,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_exact_hint_selector(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
 
@@ -979,7 +985,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_bookmark_hint_selector(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let blob_repo: TestRepo = TestRepoFactory::new(fb)?
@@ -1038,7 +1044,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_only_hint(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let blob_repo: TestRepo = TestRepoFactory::new(fb)?

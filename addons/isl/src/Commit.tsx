@@ -5,13 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import type {UICodeReviewProvider} from './codeReview/UICodeReviewProvider';
 import type {DagCommitInfo} from './dag/dag';
 import type {CommitInfo, SuccessorInfo} from './types';
 import type {ReactNode} from 'react';
 import type {ContextMenuItem} from 'shared/ContextMenu';
 
 import {spacing} from '../../components/theme/tokens.stylex';
-import {Bookmarks, createBookmarkAtCommit} from './Bookmark';
+import {AllBookmarksTruncated, Bookmark, Bookmarks, createBookmarkAtCommit} from './Bookmark';
 import {openBrowseUrlForHash, supportsBrowseUrlForHash} from './BrowseRepo';
 import {hasUnsavedEditedCommitMessage} from './CommitInfoView/CommitInfoState';
 import {showComparison} from './ComparisonView/atoms';
@@ -27,16 +28,18 @@ import {UncommittedChanges} from './UncommittedChanges';
 import {tracker} from './analytics';
 import {clipboardLinkHtml} from './clipboard';
 import {
+  branchingDiffInfos,
   codeReviewProvider,
   diffSummary,
   latestCommitMessageTitle,
 } from './codeReview/CodeReviewInfo';
-import {DiffFollower, DiffInfo} from './codeReview/DiffBadge';
+import {DiffBadge, DiffFollower, DiffInfo} from './codeReview/DiffBadge';
 import {SyncStatus, syncStatusAtom} from './codeReview/syncStatus';
 import {FoldButton, useRunFoldPreview} from './fold';
 import {findPublicBaseAncestor} from './getCommitTree';
 import {t, T} from './i18n';
 import {IconStack} from './icons/IconStack';
+import {IrrelevantCwdIcon} from './icons/IrrelevantCwdIcon';
 import {atomFamilyWeak, readAtom, writeAtom} from './jotaiUtils';
 import {CONFLICT_SIDE_LABELS} from './mergeConflicts/state';
 import {getAmendToOperation, isAmendToAllowedForCommit} from './operationUtils';
@@ -51,6 +54,7 @@ import {
 import platform from './platform';
 import {CommitPreview, dagWithPreviews, uncommittedChangesWithPreviews} from './previews';
 import {RelativeDate, relativeDate} from './relativeDate';
+import {repoRelativeCwd, useIsIrrelevantToCwd} from './repositoryData';
 import {isNarrowCommitTree} from './responsive';
 import {selectedCommits, useCommitCallbacks} from './selection';
 import {inMergeConflicts, mergeConflicts} from './serverAPIState';
@@ -72,7 +76,7 @@ import {ComparisonType} from 'shared/Comparison';
 import {useContextMenu} from 'shared/ContextMenu';
 import {MS_PER_DAY} from 'shared/constants';
 import {useAutofocusRef} from 'shared/hooks';
-import {notEmpty} from 'shared/utils';
+import {notEmpty, nullthrows} from 'shared/utils';
 
 /**
  * Some preview types should not allow actions on top of them
@@ -120,6 +124,8 @@ export const Commit = memo(
   }) => {
     const isPublic = commit.phase === 'public';
     const isObsoleted = commit.successorInfo != null;
+
+    const isIrrelevantToCwd = useIsIrrelevantToCwd(commit);
 
     const handlePreviewedOperation = useRunPreviewedOperation();
     const runOperation = useRunOperation();
@@ -200,6 +206,20 @@ export const Commit = memo(
           });
         }
       }
+      if (!isPublic && commit.diffId != null) {
+        const provider = readAtom(codeReviewProvider);
+        const summary = readAtom(diffSummary(commit.diffId));
+        if (summary.value) {
+          const actions = provider?.getUpdateDiffActions(summary.value);
+          if (actions != null && actions.length > 0) {
+            items.push({
+              label: <T replace={{$number: commit.diffId}}>Update Diff $number</T>,
+              type: 'submenu',
+              children: actions,
+            });
+          }
+        }
+      }
       if (!isPublic && !actionsPrevented && !inConflicts) {
         const suggestedRebases = readAtom(suggestedRebaseDestinations);
         items.push({
@@ -207,7 +227,7 @@ export const Commit = memo(
           type: 'submenu',
           children:
             suggestedRebases?.map(([dest, name]) => ({
-              label: <T>{name}</T>,
+              label: name,
               onClick: () => {
                 const operation = getSuggestedRebaseOperation(
                   dest,
@@ -376,7 +396,8 @@ export const Commit = memo(
         className={
           'commit' +
           (commit.isDot ? ' head-commit' : '') +
-          (commit.successorInfo != null ? ' obsolete' : '')
+          (commit.successorInfo != null ? ' obsolete' : '') +
+          (isIrrelevantToCwd ? ' irrelevant' : '')
         }
         onContextMenu={contextMenu}
         data-testid={`commit-${commit.hash}`}>
@@ -387,6 +408,21 @@ export const Commit = memo(
             }
             commit={commit}
             previewType={previewType}>
+            {!isPublic && isIrrelevantToCwd && (
+              <Tooltip
+                title={
+                  <T
+                    replace={{
+                      $prefix: <pre>{commit.maxCommonPathPrefix}</pre>,
+                      $cwd: <pre>{readAtom(repoRelativeCwd)}</pre>,
+                    }}>
+                    This commit only contains files within: $prefix These are irrelevant to your
+                    current working directory: $cwd
+                  </T>
+                }>
+                <IrrelevantCwdIcon />
+              </Tooltip>
+            )}
             {isPublic ? null : (
               <span className="commit-title">
                 {commitLabel && <CommitLabel>{commitLabel}</CommitLabel>}
@@ -395,11 +431,16 @@ export const Commit = memo(
               </span>
             )}
             <UnsavedEditedMessageIndicator commit={commit} />
-            <Bookmarks bookmarks={commit.bookmarks} kind="local" />
-            <Bookmarks bookmarks={commit.remoteBookmarks} kind="remote" />
-            {commit?.stableCommitMetadata != null ? (
-              <Bookmarks bookmarks={commit.stableCommitMetadata} kind="stable" />
-            ) : null}
+            {!isPublic && <BranchingPrs bookmarks={commit.remoteBookmarks} />}
+            <AllBookmarksTruncated
+              local={commit.bookmarks}
+              remote={
+                isPublic
+                  ? commit.remoteBookmarks
+                  : /* draft commits with remote bookmarks are probably branching PRs, rendered above. */ []
+              }
+              stable={commit?.stableCommitMetadata ?? []}
+            />
             {isPublic ? <CommitDate date={commit.date} /> : null}
             {isNarrow ? commitActions : null}
           </DragToRebase>
@@ -430,6 +471,30 @@ export const Commit = memo(
     );
   },
 );
+
+function BranchingPrs({bookmarks}: {bookmarks: ReadonlyArray<string>}) {
+  const provider = useAtomValue(codeReviewProvider);
+  if (provider == null || !provider.supportBranchingPrs) {
+    // If we don't have a provider, just render them as bookmarks so they don't get hidden.
+    return <Bookmarks bookmarks={bookmarks} kind="remote" />;
+  }
+  return bookmarks.map(bookmark => (
+    <BranchingPr key={bookmark} provider={provider} bookmark={bookmark} />
+  ));
+}
+
+function BranchingPr({bookmark, provider}: {bookmark: string; provider: UICodeReviewProvider}) {
+  const branchName = nullthrows(provider.branchNameForRemoteBookmark)(bookmark);
+  const info = useAtomValue(branchingDiffInfos(branchName));
+  return (
+    <>
+      <Bookmark kind="remote">{bookmark}</Bookmark>
+      {info.value == null ? null : (
+        <DiffBadge diff={info.value} provider={provider} url={info.value.url} />
+      )}
+    </>
+  );
+}
 
 const styles = stylex.create({
   commitLabel: {

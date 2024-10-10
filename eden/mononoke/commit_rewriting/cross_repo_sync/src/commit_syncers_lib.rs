@@ -13,6 +13,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::anyhow;
+use anyhow::bail;
 use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Error;
@@ -29,6 +30,7 @@ use commit_transformation::FileChangeFilterApplication;
 use commit_transformation::FileChangeFilterFunc;
 use commit_transformation::MultiMover;
 use commit_transformation::RewriteOpts;
+use commit_transformation::StripCommitExtras;
 use context::CoreContext;
 use environment::Caching;
 use fbinit::FacebookInit;
@@ -40,9 +42,9 @@ use futures::stream::TryStreamExt;
 use futures::FutureExt;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use maplit::hashset;
+use metaconfig_types::CommitIdentityScheme;
 use metaconfig_types::CommitSyncConfigVersion;
 use metaconfig_types::CommitSyncDirection;
-use metaconfig_types::CommonCommitSyncConfig;
 use metaconfig_types::GitSubmodulesChangesAction;
 use mononoke_types::hash::GitSha1;
 use mononoke_types::BonsaiChangesetMut;
@@ -55,6 +57,7 @@ use mononoke_types::RepositoryId;
 use movers::Mover;
 use movers::Movers;
 use slog::info;
+use synced_commit_mapping::ArcSyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitMappingEntry;
 use synced_commit_mapping::SyncedCommitSourceRepo;
@@ -119,6 +122,7 @@ impl CommitRewriteResult {
 ///              not be present in the rewrite target
 /// - `Ok(Some(rewritten))` for a successful rewrite, which should be
 ///                         present in the rewrite target
+///
 /// The notion that the commit "should not be present in the rewrite
 /// target" means that the commit is not a merge and all of its changes
 /// were rewritten into nothingness by the `Mover`.
@@ -197,10 +201,10 @@ pub fn mover_to_multi_mover(mover: Mover) -> MultiMover<'static> {
     )
 }
 
-pub(crate) async fn remap_parents<'a, M: SyncedCommitMapping + Clone + 'static, R: Repo>(
+pub(crate) async fn remap_parents<'a, R: Repo>(
     ctx: &CoreContext,
     cs: &BonsaiChangesetMut,
-    commit_syncer: &'a CommitSyncer<M, R>,
+    commit_syncer: &'a CommitSyncer<R>,
     hint: CandidateSelectionHint<R>,
 ) -> Result<HashMap<ChangesetId, ChangesetId>, Error> {
     let mut remapped_parents = HashMap::new();
@@ -265,14 +269,13 @@ impl SyncedAncestorsVersions {
 /// ```
 ///
 /// In this case we'll return [U1, U2] and \[V1\]
-pub async fn find_toposorted_unsynced_ancestors<M, R>(
+pub async fn find_toposorted_unsynced_ancestors<R>(
     ctx: &CoreContext,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
     start_cs_id: ChangesetId,
     desired_relationship: Option<DesiredRelationship<R>>,
 ) -> Result<(Vec<ChangesetId>, SyncedAncestorsVersions), Error>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
 {
     let mut synced_ancestors_versions = SyncedAncestorsVersions::default();
@@ -375,9 +378,9 @@ where
 /// NOTE: because this is used to run initial imports of small repos into large
 /// repos, this function DOES NOT take into account hardcoded mappings in
 /// hg extra metadata, as `find_toposorted_unsynced_ancestors` does.
-pub async fn find_toposorted_unsynced_ancestors_with_commit_graph<'a, M, R>(
+pub async fn find_toposorted_unsynced_ancestors_with_commit_graph<'a, R>(
     ctx: &'a CoreContext,
-    commit_syncer: &'a CommitSyncer<M, R>,
+    commit_syncer: &'a CommitSyncer<R>,
     start_cs_id: ChangesetId,
 ) -> Result<(
     Vec<ChangesetId>,
@@ -386,7 +389,6 @@ pub async fn find_toposorted_unsynced_ancestors_with_commit_graph<'a, M, R>(
     Vec<ChangesetId>,
 )>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
 {
     let source_repo = commit_syncer.get_source_repo();
@@ -491,13 +493,9 @@ where
 /// This is written with assumption of no diamond merges (which are not supported by other parts of
 /// x_repo_sync) and that small repo bookmark is never moving backwards (which is not supported by
 /// other pieces of the infra).
-pub async fn get_version_and_parent_map_for_sync_via_pushrebase<
-    'a,
-    M: SyncedCommitMapping + Clone + 'static,
-    R,
->(
+pub async fn get_version_and_parent_map_for_sync_via_pushrebase<'a, R>(
     ctx: &'a CoreContext,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
     target_bookmark: &Target<BookmarkKey>,
     parent_version: CommitSyncConfigVersion,
     synced_ancestors_versions: &SyncedAncestorsVersions,
@@ -646,13 +644,9 @@ where
 /// be used in **VERY SPECIFIC** situations (e.g. repo merges) where we want
 /// to change the mapping version AND **WE ARE SURE THAT THE TARGET BOOKMARK IS
 /// WORKING COPY EQUIVALENT TO THE COMMIT WE'RE SYNCING**.
-pub async fn unsafe_get_parent_map_for_target_bookmark_rewrite<
-    'a,
-    M: SyncedCommitMapping + Clone + 'static,
-    R,
->(
+pub async fn unsafe_get_parent_map_for_target_bookmark_rewrite<'a, R>(
     ctx: &'a CoreContext,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
     target_bookmark: &Target<BookmarkKey>,
     synced_ancestors_versions: &SyncedAncestorsVersions,
 ) -> Result<HashMap<ChangesetId, ChangesetId>, Error>
@@ -744,13 +738,8 @@ impl<R: Repo> CommitSyncRepos<R> {
         source_repo: R,
         target_repo: R,
         submodule_deps: SubmoduleDeps<R>,
-        common_commit_sync_config: &CommonCommitSyncConfig,
     ) -> Result<Self, Error> {
-        let sync_direction = commit_sync_direction_from_config(
-            &source_repo,
-            &target_repo,
-            common_commit_sync_config,
-        )?;
+        let sync_direction = commit_sync_direction_from_config(&source_repo, &target_repo)?;
         match sync_direction {
             CommitSyncDirection::SmallToLarge => Ok(CommitSyncRepos::SmallToLarge {
                 large_repo: target_repo,
@@ -838,6 +827,43 @@ impl<R: Repo> CommitSyncRepos<R> {
             CommitSyncRepos::SmallToLarge { .. } => CommitSyncDirection::SmallToLarge,
         }
     }
+
+    pub(crate) fn get_x_repo_sync_lease(&self) -> &Arc<dyn LeaseOps> {
+        self.get_large_repo().repo_cross_repo().sync_lease()
+    }
+
+    pub(crate) fn get_mapping(&self) -> &ArcSyncedCommitMapping {
+        self.get_large_repo()
+            .repo_cross_repo()
+            .synced_commit_mapping()
+    }
+    /// Whether Hg or Git extras should be stripped from the commit when rewriting
+    /// it for this source and target repo pair, to avoid creating many to one
+    /// mappings between repos.
+    ///
+    /// For example: if the source repo is Hg and the target repo is Git, two
+    /// commits that differ only by hg extra would be mapped to the same git commit.
+    /// In this case, hg extras have to be stripped when syncing from Hg to Git.
+    pub(crate) fn get_strip_commit_extras(&self) -> Result<StripCommitExtras> {
+        let source_scheme = &self
+            .get_source_repo()
+            .repo_config()
+            .default_commit_identity_scheme;
+        let target_scheme = &self
+            .get_target_repo()
+            .repo_config()
+            .default_commit_identity_scheme;
+
+        match (source_scheme, target_scheme) {
+            (CommitIdentityScheme::HG, CommitIdentityScheme::GIT) => Ok(StripCommitExtras::Hg),
+            (CommitIdentityScheme::GIT, CommitIdentityScheme::HG) => Ok(StripCommitExtras::Git),
+            (CommitIdentityScheme::BONSAI, _) | (_, CommitIdentityScheme::BONSAI) => {
+                bail!("No repos should use bonsai as default scheme")
+            }
+
+            _ => Ok(StripCommitExtras::None),
+        }
+    }
 }
 
 /// Get the direction of the sync based on the common commit sync config.
@@ -846,8 +872,12 @@ impl<R: Repo> CommitSyncRepos<R> {
 pub fn commit_sync_direction_from_config<R: Repo>(
     source_repo: &R,
     target_repo: &R,
-    common_commit_sync_config: &CommonCommitSyncConfig,
 ) -> Result<CommitSyncDirection> {
+    let common_commit_sync_config = source_repo
+        .repo_cross_repo()
+        .live_commit_sync_config()
+        .get_common_config(source_repo.repo_identity().id())?;
+
     let is_small_repo = |repo: &R| {
         common_commit_sync_config
             .small_repos
@@ -874,10 +904,8 @@ pub fn commit_sync_direction_from_config<R: Repo>(
 pub fn get_small_and_large_repos<'a, R: Repo>(
     source_repo: &'a R,
     target_repo: &'a R,
-    common_commit_sync_config: &'a CommonCommitSyncConfig,
 ) -> Result<(&'a R, &'a R)> {
-    let sync_direction =
-        commit_sync_direction_from_config(source_repo, target_repo, common_commit_sync_config)?;
+    let sync_direction = commit_sync_direction_from_config(source_repo, target_repo)?;
     match sync_direction {
         CommitSyncDirection::SmallToLarge => Ok((source_repo, target_repo)),
         CommitSyncDirection::LargeToSmall => Ok((target_repo, source_repo)),
@@ -937,10 +965,10 @@ pub(crate) async fn get_movers_by_version(
     .await
 }
 
-pub async fn update_mapping_with_version<'a, M: SyncedCommitMapping + Clone + 'static, R: Repo>(
+pub async fn update_mapping_with_version<'a, R: Repo>(
     ctx: &'a CoreContext,
     mapped: HashMap<ChangesetId, ChangesetId>,
-    syncer: &'a CommitSyncer<M, R>,
+    syncer: &'a CommitSyncer<R>,
     version_name: &CommitSyncConfigVersion,
 ) -> Result<(), Error> {
     let xrepo_sync_disable_all_syncs =
@@ -957,7 +985,7 @@ pub async fn update_mapping_with_version<'a, M: SyncedCommitMapping + Clone + 's
         })
         .collect();
 
-    syncer.mapping.add_bulk(ctx, entries).await?;
+    syncer.get_mapping().add_bulk(ctx, entries).await?;
     Ok(())
 }
 
@@ -1005,51 +1033,40 @@ pub fn create_synced_commit_mapping_entry<R: Repo>(
 }
 
 #[derive(Clone)]
-pub struct Syncers<M: SyncedCommitMapping + Clone + 'static, R: Repo> {
-    pub large_to_small: CommitSyncer<M, R>,
-    pub small_to_large: CommitSyncer<M, R>,
+pub struct Syncers<R: Repo> {
+    pub large_to_small: CommitSyncer<R>,
+    pub small_to_large: CommitSyncer<R>,
 }
 
-pub fn create_commit_syncers<M, R>(
+pub fn create_commit_syncers<R>(
     ctx: &CoreContext,
     small_repo: R,
     large_repo: R,
     // Map from submodule path in the repo to the submodule's Mononoke repo
     // instance.
     submodule_deps: SubmoduleDeps<R>,
-    mapping: M,
     live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-    x_repo_sync_lease: Arc<dyn LeaseOps>,
-) -> Result<Syncers<M, R>, Error>
+) -> Result<Syncers<R>, Error>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
 {
-    let common_config =
-        live_commit_sync_config.get_common_config(large_repo.repo_identity().id())?;
-
     let small_to_large_commit_sync_repos = CommitSyncRepos::new(
         small_repo.clone(),
         large_repo.clone(),
         submodule_deps.clone(),
-        &common_config,
     )?;
     let large_to_small_commit_sync_repos =
-        CommitSyncRepos::new(large_repo, small_repo, submodule_deps, &common_config)?;
+        CommitSyncRepos::new(large_repo, small_repo, submodule_deps)?;
 
     let large_to_small_commit_syncer = CommitSyncer::new(
         ctx,
-        mapping.clone(),
         large_to_small_commit_sync_repos,
         live_commit_sync_config.clone(),
-        x_repo_sync_lease.clone(),
     );
     let small_to_large_commit_syncer = CommitSyncer::new(
         ctx,
-        mapping,
         small_to_large_commit_sync_repos,
         live_commit_sync_config,
-        x_repo_sync_lease,
     );
 
     Ok(Syncers {

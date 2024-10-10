@@ -13,9 +13,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ drawdag << EOS
@@ -45,24 +44,23 @@ Populate test repo
 
 Blobimport test repo.
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
-  $ ENABLE_API_WRITES=1 setup_mononoke_config
+  $ setup_mononoke_config
   $ start_and_wait_for_mononoke_server
 Clone the repo
   $ cd $TESTTMP
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
 
 Test move bookmark
-  $ sl debugapi -e setbookmark -i "'master_bookmark'" -i "'$E'" -i "'$C'"
+  $ hg debugapi -e setbookmark -i "'master_bookmark'" -i "'$E'" -i "'$C'"
   {"data": {"Ok": None}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark default/to_delete
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D
@@ -75,12 +73,12 @@ Inspect results
   
 
 Test delete bookmark
-  $ sl debugapi -e setbookmark -i "'to_delete'" -i "None" -i "'$E'"
+  $ hg debugapi -e setbookmark -i "'to_delete'" -i "None" -i "'$E'"
   {"data": {"Ok": None}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D
@@ -93,12 +91,12 @@ Inspect results
   
 
 Test create bookmark
-  $ sl debugapi -e setbookmark -i "'create_bookmark'" -i "'$B'" -i "None"
+  $ hg debugapi -e setbookmark -i "'create_bookmark'" -i "'$B'" -i "None"
   {"data": {"Ok": None}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D
@@ -111,18 +109,18 @@ Inspect results
   
 
 Test bookmark failure (empty from and to)
-  $ sl debugapi -e setbookmark -i "'master_bookmark'" -i "None" -i "None"
+  $ hg debugapi -e setbookmark -i "'master_bookmark'" -i "None" -i "None"
   {"data": {"Err": {"code": 0,
                     "message": "invalid SetBookmarkRequest, must specify at least one of 'to' or 'from'"}}}
 
 Test move bookmark failure (invalid from)
-  $ sl debugapi -e setbookmark -i "'master_bookmark'" -i "'$D'" -i "'$C'"
+  $ hg debugapi -e setbookmark -i "'master_bookmark'" -i "'$D'" -i "'$C'"
   {"data": {"Err": {"code": 0,
                     "message": "invalid request: Bookmark transaction failed"}}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D
@@ -136,13 +134,13 @@ Inspect results
 
 
 Test delete bookmark failure (invalid from)
-  $ sl debugapi -e setbookmark -i "'create_bookmark'" -i "None" -i "'$D'"
+  $ hg debugapi -e setbookmark -i "'create_bookmark'" -i "None" -i "'$D'"
   {"data": {"Err": {"code": 0,
                     "message": "invalid request: Bookmark transaction failed"}}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D
@@ -156,13 +154,13 @@ Inspect results
 
 
 Test create bookmark failure (already exists)
-  $ sl debugapi -e setbookmark -i "'create_bookmark'" -i "'$D'" -i "None"
+  $ hg debugapi -e setbookmark -i "'create_bookmark'" -i "'$D'" -i "None"
   {"data": {"Err": {"code": 0,
                     "message": "invalid request: Bookmark transaction failed"}}}
 
 Inspect results
-  $ sl pull -q
-  $ sl log -G -T '{node} {desc} {remotenames}\n' -r "all()"
+  $ hg pull -q
+  $ hg log -G -T '{node} {desc} {remotenames}\n' -r "all()"
   o  9bc730a19041f9ec7cb33c626e811aa233efb18c E default/master_bookmark
   │
   o  f585351a92f85104bff7c284233c338b10eb1df7 D

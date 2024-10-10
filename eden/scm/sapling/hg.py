@@ -49,7 +49,6 @@ from . import (
 )
 from .i18n import _
 
-
 release = lock.release
 
 # shared features
@@ -77,59 +76,17 @@ def _eager_or_local(path):
     return _local(path)
 
 
-def addbranchrevs(lrepo, other, branches, revs):
-    peer = other.peer()  # a courtesy to callers using a localrepo for other
-    hashbranch, branches = branches
-    if not hashbranch and not branches:
-        x = revs or None
-        if hasattr(revs, "first"):
-            y = revs.first()
-        elif revs:
-            y = revs[0]
-        else:
-            y = None
-        return x, y
-    if revs:
-        revs = list(revs)
-    else:
-        revs = []
+def parseurl(path):
+    """parse url#branch, returning url"""
 
-    if not peer.capable("branchmap"):
-        if branches:
-            raise error.Abort(_("remote branch lookup not supported"))
-        revs.append(hashbranch)
-        return revs, revs[0]
-    branchmap = peer.branchmap()
-
-    def primary(branch):
-        if branch == ".":
-            if not lrepo:
-                raise error.Abort(_("dirstate branch not accessible"))
-            branch = lrepo.dirstate.branch()
-        if branch in branchmap:
-            revs.extend(node.hex(r) for r in reversed(branchmap[branch]))
-            return True
-        else:
-            return False
-
-    for branch in branches:
-        if not primary(branch):
-            raise error.RepoLookupError(_("unknown branch '%s'") % branch)
-    if hashbranch:
-        if not primary(hashbranch):
-            revs.append(hashbranch)
-    return revs, revs[0]
-
-
-def parseurl(path, branches=None):
-    """parse url#branch, returning (url, (branch, branches))"""
+    # We no longer support hg branches, so just drop the branch
+    # fragment. The Rust clone supports fragments as bookmarks, so
+    # doesn't seem like we will need to bring fragment support back to
+    # Python.
 
     u = util.url(path)
-    branch = None
-    if u.fragment:
-        branch = u.fragment
-        u.fragment = None
-    return str(u), (branch, branches or [])
+    u.fragment = None
+    return str(u)
 
 
 schemes = {
@@ -219,10 +176,6 @@ def peer(uiorrepo, opts, path, create: bool = False):
     """return a repository peer for the specified path"""
     rui = remoteui(uiorrepo, opts)
     obj = _peerlookup(path).instance(rui, path, create, initial_config=None)
-    # Uncomment this once we stop using file clones in sandcastle
-    # if obj.local() and not rui.configbool("experimental", "allowfilepeer"):
-    #    raise error.Abort(_("cannot create peer for local file repository '%s'")
-    #        % path)
     _setuprepo(rui, obj)
     return obj.peer()
 
@@ -271,13 +224,11 @@ def share(
 
     if isinstance(source, str):
         origsource = ui.expandpath(source)
-        source, branches = parseurl(origsource)
+        source = parseurl(origsource)
         srcrepo = repository(ui, source)
-        rev, checkout = addbranchrevs(srcrepo, srcrepo, branches, None)
     else:
         srcrepo = source.local()
         origsource = source = srcrepo.url()
-        checkout = None
 
     sharedpath = srcrepo.sharedpath  # if our source is already sharing
     requirements = srcrepo.requirements.copy()
@@ -318,7 +269,7 @@ def share(
     # Reload repo so Rust repo picks up paths.default.
     r = repository(ui, destwvfs.base)
 
-    _postshareupdate(r, update, checkout=checkout)
+    _postshareupdate(r, update)
     return r
 
 
@@ -562,14 +513,12 @@ def clone(
         # Construct the srcpeer after the destpeer, so we can use the destrepo.ui
         # configs.
         if isinstance(source, str):
-            source, mayberevs = parseurl(origsource)
-            if len(mayberevs) == 1:
-                rev = rev or mayberevs[0]
+            source = parseurl(origsource)
             srcpeer = peer(destrepo.ui if destrepo else ui, peeropts, source)
 
-        branch = (None, [])
-        # pyre-fixme[61]: `srcpeer` is undefined, or not always defined.
-        rev, checkout = addbranchrevs(srcpeer, srcpeer, branch, rev)
+        checkout = None
+        if rev:
+            checkout = rev[0]
 
         source = util.urllocalpath(source)
 
@@ -758,6 +707,7 @@ def clone(
                     if update:
                         if update is not True:
                             checkout = srcpeer.lookup(update)
+                            status = _("updating to %s\n") % update
                         uprev = None
                         status = None
                         if checkout is not None:
@@ -773,21 +723,12 @@ def clone(
                             try:
                                 uprev = destrepo._bookmarks["@"]
                                 update = "@"
-                                bn = destrepo[uprev].branch()
-                                if bn == "default":
-                                    status = _("updating to bookmark @\n")
-                                else:
-                                    status = (
-                                        _("updating to bookmark @ on branch %s\n") % bn
-                                    )
+                                status = _("updating to bookmark @\n")
                             except KeyError:
-                                try:
-                                    uprev = destrepo.branchtip("default")
-                                except error.RepoLookupError:
-                                    uprev = destrepo.lookup("tip")
+                                uprev = destrepo.lookup("tip")
+                                status = _("updating to tip\n")
                         if not status:
-                            bn = destrepo[uprev].branch()
-                            status = _("updating to branch %s\n") % bn
+                            status = _("updating to %s\n") % uprev.hex()
                         destrepo.ui.status(status)
                         _update(destrepo, uprev)
                         if update in destrepo._bookmarks:
@@ -859,7 +800,7 @@ def clonepreclose(
     return srcpeer, destpeer
 
 
-def _showstats(repo, stats: Iterable[object], quietempty: bool = False) -> None:
+def showstats(repo, stats: Iterable[object], quietempty: bool = False) -> None:
     if (
         edenfs.requirement in repo.requirements
         or git.DOTGIT_REQUIREMENT in repo.requirements
@@ -911,7 +852,7 @@ def update(repo, node, quietempty: bool = False, updatecheck=None):
     Returns if any files were unresolved.
     """
     stats = updaterepo(repo, node, False, updatecheck=updatecheck)
-    _showstats(repo, stats, quietempty)
+    showstats(repo, stats, quietempty)
     if stats[3]:
         repo.ui.status(_("use '@prog@ resolve' to retry unresolved file merges\n"))
     return stats[3] > 0
@@ -929,7 +870,7 @@ def clean(repo, node, show_stats: bool = True, quietempty: bool = False):
     stats = updaterepo(repo, node, True)
     repo.localvfs.unlinkpath("graftstate", ignoremissing=True)
     if show_stats:
-        _showstats(repo, stats, quietempty)
+        showstats(repo, stats, quietempty)
     return stats[3] > 0
 
 
@@ -994,7 +935,7 @@ def merge(repo, node, force=False, remind: bool = True, labels=None):
     """Branch merge with node, resolving changes. Return true if any
     unresolved conflicts."""
     stats = mergemod.merge(repo, node, force=force, labels=labels)
-    _showstats(repo, stats)
+    showstats(repo, stats)
     if stats[3]:
         repo.ui.status(
             _(

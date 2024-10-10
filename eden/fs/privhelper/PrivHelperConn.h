@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <fmt/core.h>
 #include <folly/Range.h>
 #include <folly/io/Cursor.h>
 #include <cinttypes>
@@ -48,6 +49,7 @@ class PrivHelperConn {
     REQ_SET_USE_EDENFS = 10,
     REQ_MOUNT_NFS = 11,
     REQ_UNMOUNT_NFS = 12,
+    REQ_GET_PID = 13,
   };
 
   // This structure should never change. If fields need to be added to the
@@ -181,6 +183,9 @@ class PrivHelperConn {
       folly::io::Cursor& cursor,
       bool& useEdenFs);
 
+  static UnixSocket::Message serializeGetPidRequest(uint32_t xid);
+  static pid_t parseGetPidResponse(const UnixSocket::Message& msg);
+
   /**
    * Parse a response that is expected to be empty.
    *
@@ -220,3 +225,63 @@ class PrivHelperError : public std::exception {
 };
 
 } // namespace facebook::eden
+
+namespace fmt {
+template <>
+struct formatter<facebook::eden::PrivHelperConn::MsgType>
+    : formatter<std::string> {
+  template <typename FormatContext>
+  auto format(
+      const facebook::eden::PrivHelperConn::MsgType& msgType,
+      FormatContext& ctx) const {
+    std::string name;
+    switch (msgType) {
+      case facebook::eden::PrivHelperConn::MSG_TYPE_NONE:
+        name = "MSG_TYPE_NONE";
+        break;
+      case facebook::eden::PrivHelperConn::RESP_ERROR:
+        name = "RESP_ERROR";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_MOUNT_FUSE:
+        name = "REQ_MOUNT_FUSE";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_MOUNT_BIND:
+        name = "REQ_MOUNT_BIND";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_UNMOUNT_FUSE:
+        name = "REQ_UNMOUNT_FUSE";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_TAKEOVER_SHUTDOWN:
+        name = "REQ_TAKEOVER_SHUTDOWN";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_TAKEOVER_STARTUP:
+        name = "REQ_TAKEOVER_STARTUP";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_SET_LOG_FILE:
+        name = "REQ_SET_LOG_FILE";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_UNMOUNT_BIND:
+        name = "REQ_UNMOUNT_BIND";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_SET_DAEMON_TIMEOUT:
+        name = "REQ_SET_DAEMON_TIMEOUT";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_SET_USE_EDENFS:
+        name = "REQ_SET_USE_EDENFS";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_MOUNT_NFS:
+        name = "REQ_MOUNT_NFS";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_UNMOUNT_NFS:
+        name = "REQ_UNMOUNT_NFS";
+        break;
+      case facebook::eden::PrivHelperConn::REQ_GET_PID:
+        name = "REQ_GET_PID";
+        break;
+      default:
+        name = "Unknown PrivHelperConn::MsgType";
+    }
+    return formatter<std::string>::format(name, ctx);
+  }
+};
+} // namespace fmt

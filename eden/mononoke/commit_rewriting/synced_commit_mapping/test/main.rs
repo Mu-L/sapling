@@ -7,22 +7,76 @@
 
 //! Tests for the synced commits mapping.
 
+use std::sync::Arc;
+
 use anyhow::Error;
+use caching_ext::CacheHandlerFactory;
 use context::CoreContext;
 use fbinit::FacebookInit;
 use metaconfig_types::CommitSyncConfigVersion;
+use mononoke_macros::mononoke;
 use mononoke_types_mocks::changesetid as bonsai;
 use mononoke_types_mocks::repo::REPO_ONE;
 use mononoke_types_mocks::repo::REPO_ZERO;
+use rendezvous::RendezVousOptions;
 use sql_construct::SqlConstruct;
+use synced_commit_mapping::CachingSyncedCommitMapping;
 use synced_commit_mapping::EquivalentWorkingCopyEntry;
+use synced_commit_mapping::FetchedMappingEntry;
 use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SqlSyncedCommitMappingBuilder;
 use synced_commit_mapping::SyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitMappingEntry;
 use synced_commit_mapping::SyncedCommitSourceRepo;
 use synced_commit_mapping::WorkingCopyEquivalence;
 
-async fn add_and_get<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
+fn sql_synced_commit_mapping() -> SqlSyncedCommitMapping {
+    SqlSyncedCommitMappingBuilder::with_sqlite_in_memory()
+        .unwrap()
+        .build(RendezVousOptions::for_test())
+}
+
+fn caching_synced_commit_mapping() -> CachingSyncedCommitMapping {
+    CachingSyncedCommitMapping::new(
+        Arc::new(sql_synced_commit_mapping()),
+        CacheHandlerFactory::Mocked,
+    )
+    .unwrap()
+}
+
+#[mononoke::fbinit_test]
+async fn test_get_many_no_mappings_sql(fb: FacebookInit) {
+    let ctx = CoreContext::test_mock(fb);
+    let synced_commit_mapping = sql_synced_commit_mapping();
+    let result = synced_commit_mapping
+        .get_many(&ctx, REPO_ZERO, REPO_ONE, &[bonsai::ONES_CSID])
+        .await
+        .expect("Get failed");
+    assert!(result.contains_key(&bonsai::ONES_CSID));
+}
+
+#[mononoke::fbinit_test]
+async fn test_get_many_no_mappings_caching(fb: FacebookInit) {
+    let ctx = CoreContext::test_mock(fb);
+    let synced_commit_mapping = caching_synced_commit_mapping();
+    let result = synced_commit_mapping
+        .get_many(&ctx, REPO_ZERO, REPO_ONE, &[bonsai::ONES_CSID])
+        .await
+        .expect("Get failed");
+    assert!(result.contains_key(&bonsai::ONES_CSID));
+}
+
+#[mononoke::fbinit_test]
+async fn test_add_and_get_sql(fb: FacebookInit) {
+    test_add_and_get_impl(fb, sql_synced_commit_mapping()).await;
+}
+
+#[mononoke::fbinit_test]
+async fn test_add_and_get_caching(fb: FacebookInit) {
+    test_add_and_get_impl(fb, caching_synced_commit_mapping()).await;
+}
+
+async fn test_add_and_get_impl(fb: FacebookInit, mapping: impl SyncedCommitMapping) {
     let version_name = CommitSyncConfigVersion("TEST_VERSION_NAME".to_string());
     let ctx = CoreContext::test_mock(fb);
     let entry = SyncedCommitMappingEntry::new(
@@ -95,6 +149,13 @@ async fn add_and_get<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
         .into_iter()
         .next()
         .expect("Unexpectedly, mapping is absent");
+    let result_maybe_stale = mapping
+        .get_maybe_stale(&ctx, REPO_ZERO, bonsai::ONES_CSID, REPO_ONE)
+        .await
+        .expect("Get failed")
+        .into_iter()
+        .next()
+        .expect("Unexpectedly, mapping is absent");
     assert_eq!(
         result,
         (
@@ -103,8 +164,23 @@ async fn add_and_get<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
             Some(SyncedCommitSourceRepo::Large)
         )
     );
+    assert_eq!(
+        result_maybe_stale,
+        FetchedMappingEntry {
+            target_bcs_id: bonsai::TWOS_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
     let result = mapping
         .get(&ctx, REPO_ONE, bonsai::TWOS_CSID, REPO_ZERO)
+        .await
+        .expect("Get failed")
+        .into_iter()
+        .next()
+        .expect("Unexpectedly, mapping is absent");
+    let result_maybe_stale = mapping
+        .get_maybe_stale(&ctx, REPO_ONE, bonsai::TWOS_CSID, REPO_ZERO)
         .await
         .expect("Get failed")
         .into_iter()
@@ -114,13 +190,173 @@ async fn add_and_get<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
         result,
         (
             bonsai::ONES_CSID,
-            Some(version_name),
+            Some(version_name.clone()),
             Some(SyncedCommitSourceRepo::Large)
         )
     );
+    assert_eq!(
+        result_maybe_stale,
+        FetchedMappingEntry {
+            target_bcs_id: bonsai::ONES_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+
+    let result = mapping
+        .get_many(
+            &ctx,
+            REPO_ZERO,
+            REPO_ONE,
+            &[bonsai::ONES_CSID, bonsai::THREES_CSID],
+        )
+        .await
+        .expect("Get many failed");
+    let result_maybe_stale = mapping
+        .get_many_maybe_stale(
+            &ctx,
+            REPO_ZERO,
+            REPO_ONE,
+            &[bonsai::ONES_CSID, bonsai::THREES_CSID],
+        )
+        .await
+        .expect("Get many maybe stale failed");
+    assert_eq!(
+        result
+            .get(&bonsai::ONES_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::TWOS_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+    assert_eq!(
+        result
+            .get(&bonsai::THREES_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::FOURS_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large),
+        }
+    );
+    assert_eq!(
+        result_maybe_stale
+            .get(&bonsai::ONES_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::TWOS_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+    assert_eq!(
+        result_maybe_stale
+            .get(&bonsai::THREES_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::FOURS_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large),
+        }
+    );
+
+    let result = mapping
+        .get_many(
+            &ctx,
+            REPO_ONE,
+            REPO_ZERO,
+            &[bonsai::FOURS_CSID, bonsai::TWOS_CSID],
+        )
+        .await
+        .expect("Get many failed");
+    let result_maybe_stale = mapping
+        .get_many_maybe_stale(
+            &ctx,
+            REPO_ONE,
+            REPO_ZERO,
+            &[bonsai::FOURS_CSID, bonsai::TWOS_CSID],
+        )
+        .await
+        .expect("Get many maybe stale failed");
+    assert_eq!(
+        result
+            .get(&bonsai::TWOS_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::ONES_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+    assert_eq!(
+        result
+            .get(&bonsai::FOURS_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::THREES_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+    assert_eq!(
+        result_maybe_stale
+            .get(&bonsai::TWOS_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::ONES_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
+    assert_eq!(
+        result_maybe_stale
+            .get(&bonsai::FOURS_CSID)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("Unexpectedly, mapping is absent"),
+        &FetchedMappingEntry {
+            target_bcs_id: bonsai::THREES_CSID,
+            maybe_version_name: Some(version_name.clone()),
+            maybe_source_repo: Some(SyncedCommitSourceRepo::Large)
+        }
+    );
 }
 
-async fn missing<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
+#[mononoke::fbinit_test]
+async fn test_missing_sql(fb: FacebookInit) {
+    test_missing_impl(fb, sql_synced_commit_mapping()).await
+}
+
+#[mononoke::fbinit_test]
+async fn test_missing_caching(fb: FacebookInit) {
+    test_missing_impl(fb, caching_synced_commit_mapping()).await
+}
+
+async fn test_missing_impl(fb: FacebookInit, mapping: impl SyncedCommitMapping) {
     let ctx = CoreContext::test_mock(fb);
     let result = mapping
         .get(&ctx, REPO_ONE, bonsai::TWOS_CSID, REPO_ZERO)
@@ -129,7 +365,17 @@ async fn missing<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
     assert!(result.is_empty());
 }
 
-async fn equivalent_working_copy<M: SyncedCommitMapping>(fb: FacebookInit, mapping: M) {
+#[mononoke::fbinit_test]
+async fn test_equivalent_working_copy_sql(fb: FacebookInit) {
+    test_equivalent_working_copy_impl(fb, sql_synced_commit_mapping()).await
+}
+
+#[mononoke::fbinit_test]
+async fn test_equivalent_working_copy_caching(fb: FacebookInit) {
+    test_equivalent_working_copy_impl(fb, caching_synced_commit_mapping()).await
+}
+
+async fn test_equivalent_working_copy_impl(fb: FacebookInit, mapping: impl SyncedCommitMapping) {
     let ctx = CoreContext::test_mock(fb);
     let version_name = CommitSyncConfigVersion("TEST_VERSION_NAME".to_string());
     let result = mapping
@@ -199,24 +445,20 @@ async fn equivalent_working_copy<M: SyncedCommitMapping>(fb: FacebookInit, mappi
     );
 }
 
-#[fbinit::test]
-async fn test_add_and_get(fb: FacebookInit) {
-    add_and_get(fb, SqlSyncedCommitMapping::with_sqlite_in_memory().unwrap()).await;
+#[mononoke::fbinit_test]
+async fn test_version_for_large_repo_commit_sql(fb: FacebookInit) -> Result<(), Error> {
+    test_version_for_large_repo_commit_impl(fb, sql_synced_commit_mapping()).await
 }
 
-#[fbinit::test]
-async fn test_missing(fb: FacebookInit) {
-    missing(fb, SqlSyncedCommitMapping::with_sqlite_in_memory().unwrap()).await
+#[mononoke::fbinit_test]
+async fn test_version_for_large_repo_commit_caching(fb: FacebookInit) -> Result<(), Error> {
+    test_version_for_large_repo_commit_impl(fb, caching_synced_commit_mapping()).await
 }
 
-#[fbinit::test]
-async fn test_equivalent_working_copy(fb: FacebookInit) {
-    equivalent_working_copy(fb, SqlSyncedCommitMapping::with_sqlite_in_memory().unwrap()).await
-}
-
-#[fbinit::test]
-async fn test_version_for_large_repo_commit(fb: FacebookInit) -> Result<(), Error> {
-    let mapping = SqlSyncedCommitMapping::with_sqlite_in_memory()?;
+async fn test_version_for_large_repo_commit_impl(
+    fb: FacebookInit,
+    mapping: impl SyncedCommitMapping,
+) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     // Check that at first we don't have a version for a given large repo commit
     assert!(
@@ -286,9 +528,20 @@ async fn test_version_for_large_repo_commit(fb: FacebookInit) -> Result<(), Erro
     Ok(())
 }
 
-#[fbinit::test]
-async fn test_overwrite(fb: FacebookInit) -> Result<(), Error> {
-    let mapping = SqlSyncedCommitMapping::with_sqlite_in_memory()?;
+#[mononoke::fbinit_test]
+async fn test_overwrite_sql(fb: FacebookInit) -> Result<(), Error> {
+    test_overwrite_impl(fb, sql_synced_commit_mapping()).await
+}
+
+#[mononoke::fbinit_test]
+async fn test_overwrite_caching(fb: FacebookInit) -> Result<(), Error> {
+    test_overwrite_impl(fb, caching_synced_commit_mapping()).await
+}
+
+async fn test_overwrite_impl(
+    fb: FacebookInit,
+    mapping: impl SyncedCommitMapping,
+) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
 
     // Insert working copy equivalence, version for the large commit

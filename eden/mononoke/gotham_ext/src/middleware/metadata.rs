@@ -127,7 +127,7 @@ fn request_identities_from_headers(headers: &HeaderMap) -> Option<MononokeIdenti
     MononokeIdentity::try_from_json_encoded(&json_identities).ok()
 }
 
-fn ingress_request_identities_from_headers(headers: &HeaderMap) -> Option<MononokeIdentitySet> {
+pub fn ingress_request_identities_from_headers(headers: &HeaderMap) -> Option<MononokeIdentitySet> {
     let encoded_cert = headers.get(INGRESS_LEAF_CERT_HEADER)?;
     let cert = openssl::x509::X509::from_pem(
         &percent_decode(encoded_cert.as_bytes()).collect::<Vec<u8>>(),
@@ -212,15 +212,18 @@ impl Middleware for MetadataMiddleware {
             let client_info = client_info
                 .unwrap_or_else(|| ClientInfo::default_with_entry_point(self.entry_point.clone()));
             metadata.add_client_info(client_info);
-            metadata.update_client_untrusted(
-                metadata::security::is_client_untrusted(|h| {
-                    Ok(headers
-                        .get(h)
-                        .map(|h| h.to_str().map(|s| s.to_owned()))
-                        .transpose()?)
-                })
-                .unwrap_or_default(),
-            );
+            // For Mononoke Git, clients from VPNless environment are not considered untrusted
+            if self.entry_point != ClientEntryPoint::MononokeGitServer {
+                metadata.update_client_untrusted(
+                    metadata::security::is_client_untrusted(|h| {
+                        Ok(headers
+                            .get(h)
+                            .map(|h| h.to_str().map(|s| s.to_owned()))
+                            .transpose()?)
+                    })
+                    .unwrap_or_default(),
+                );
+            }
         }
 
         // For the IP, we can fallback to the peer IP

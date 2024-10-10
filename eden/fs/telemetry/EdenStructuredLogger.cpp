@@ -21,6 +21,11 @@ DynamicEvent EdenStructuredLogger::populateDefaultFields(const char* type) {
   }
   event.addString("edenver", sessionInfo_.appVersion);
   event.addString("logged_by", "edenfs");
+
+  if (!sessionInfo_.crossEnvSessionId.empty()) {
+    event.addString("ces_id", sessionInfo_.crossEnvSessionId);
+  }
+
   return event;
 }
 

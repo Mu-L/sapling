@@ -7,8 +7,8 @@
 
 import type {ReactNode} from 'react';
 
-import {Icon} from 'isl-components/Icon';
-import {Tooltip} from 'isl-components/Tooltip';
+import {Icon} from './Icon';
+import {Tooltip} from './Tooltip';
 import React, {useState, Component} from 'react';
 
 import './error-notice.css';
@@ -40,7 +40,12 @@ export function ErrorNotice({
           <span className="error-notice-title">{title}</span>
           <span className="error-notice-byline">{description ?? error?.message}</span>
           {isExpanded ? (
-            <div className="error-notice-details">
+            <div
+              className="error-notice-details"
+              onClick={e => {
+                // don't close the notice when clicking/text selecting the details
+                e.stopPropagation();
+              }}>
               {details}
               {error != null && (
                 <span className="error-notice-stack-trace">{error.stack ?? error.message}</span>

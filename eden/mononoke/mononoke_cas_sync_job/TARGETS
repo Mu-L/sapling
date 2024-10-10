@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "mononoke_cas_sync_job",
@@ -15,6 +14,7 @@ rust_binary(
         "fbsource//third-party/rust:anyhow",
         "fbsource//third-party/rust:async-trait",
         "fbsource//third-party/rust:futures",
+        "fbsource//third-party/rust:itertools",
         "fbsource//third-party/rust:slog",
         "fbsource//third-party/rust:thiserror",
         "fbsource//third-party/rust:tokio",
@@ -46,6 +46,6 @@ rust_binary(
         "//eden/mononoke/repo_attributes/repo_identity:repo_identity",
         "//eden/mononoke/server/context:context",
         "//eden/scm/lib/clientinfo:clientinfo",
-        "//eden/scm/lib/repo_name:repo_name",
+        "//eden/scm/lib/repo/url:repourl",
     ],
 )

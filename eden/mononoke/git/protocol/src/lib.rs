@@ -21,12 +21,15 @@ use repo_derived_data::RepoDerivedDataArc;
 use repo_derived_data::RepoDerivedDataRef;
 use repo_identity::RepoIdentityRef;
 
+pub mod bookmarks_provider;
 pub mod generator;
+pub mod mapping;
 pub mod pack_processor;
+mod store;
 pub mod types;
+pub mod utils;
 
 const HEAD_REF: &str = "HEAD";
-const TAGS_PREFIX: &str = "tags/";
 const REF_PREFIX: &str = "refs/";
 const PACKFILE_SUFFIX: &str = ".pack";
 

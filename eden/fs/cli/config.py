@@ -171,6 +171,10 @@ class InProgressCheckoutError(Exception):
         )
 
 
+class CheckoutConfigCorruptedError(Exception):
+    pass
+
+
 class CheckoutConfig(typing.NamedTuple):
     """Configuration for an EdenFS checkout. A checkout stores its config in config.toml
     it its state directory (.eden/clients/<checkout_name>/config.toml)
@@ -407,8 +411,10 @@ class EdenInstance(AbstractEdenInstance):
             return telemetry.NullTelemetryLogger()
 
         try:
+            # pyre-fixme [21]: Undefined import Could not find a module corresponding to import
             from eden.fs.cli.facebook import scuba_telemetry  # @manual
 
+            # pyre-fixme [16]: Undefined attribute
             return scuba_telemetry.ScubaTelemetryLogger()
         except (ImportError, NotImplementedError):
             pass
@@ -552,6 +558,7 @@ class EdenInstance(AbstractEdenInstance):
                 ("mount_protocol", checkout_config.mount_protocol),
                 ("case_sensitive", checkout_config.case_sensitive),
                 ("backing_repo", str(checkout.get_backing_repo_path())),
+                ("home_dir", str(self.home_dir)),
             ]
         )
 
@@ -1358,22 +1365,31 @@ class EdenCheckout:
         under self.state_dir is not properly formatted or does not exist.
         """
         config_path: Path = self._config_path()
-        config = load_toml_config(config_path)
+        try:
+            config = load_toml_config(config_path)
+        except FileNotFoundError as e:
+            raise CheckoutConfigCorruptedError(
+                f"{config_path} does not exist. {e}"
+            ) from e
+        except FileError as e:
+            raise CheckoutConfigCorruptedError(f"{e}") from e
         repo_field = config.get("repository")
         if isinstance(repo_field, dict):
             repository: typing.Mapping[str, str] = repo_field
         else:
-            raise Exception(f"{config_path} is missing [repository]")
+            raise CheckoutConfigCorruptedError(f"{config_path} is missing [repository]")
 
         def get_field(key: str) -> str:
             value = repository.get(key)
             if isinstance(value, str):
                 return value
-            raise Exception(f"{config_path} is missing {key} in " "[repository]")
+            raise CheckoutConfigCorruptedError(
+                f"{config_path} is missing {key} in " "[repository]"
+            )
 
         scm_type = get_field("type")
         if scm_type not in SUPPORTED_REPOS:
-            raise Exception(
+            raise CheckoutConfigCorruptedError(
                 f'repository "{config_path}" has unsupported type ' f'"{scm_type}"'
             )
 
@@ -1381,7 +1397,7 @@ class EdenCheckout:
         if not isinstance(mount_protocol, str):
             mount_protocol = "prjfs" if sys.platform == "win32" else "fuse"
         if mount_protocol not in SUPPORTED_MOUNT_PROTOCOLS:
-            raise Exception(
+            raise CheckoutConfigCorruptedError(
                 f'repository "{config_path}" has unsupported mount protocol '
                 f'"{mount_protocol}"'
             )
@@ -1407,10 +1423,12 @@ class EdenCheckout:
             from eden.fs.cli.redirect import RedirectionType  # noqa: F811
 
             if not isinstance(redirections_dict, dict):
-                raise Exception(f"{config_path} has an invalid [redirections] section")
+                raise CheckoutConfigCorruptedError(
+                    f"{config_path} has an invalid [redirections] section"
+                )
             for key, value in redirections_dict.items():
                 if not isinstance(value, str):
-                    raise Exception(
+                    raise CheckoutConfigCorruptedError(
                         f"{config_path} has invalid value in "
                         f"[redirections] for {key}: {value} "
                         "(string expected)"
@@ -1418,7 +1436,7 @@ class EdenCheckout:
                 try:
                     redirections[key] = RedirectionType.from_arg_str(value)
                 except ValueError as exc:
-                    raise Exception(
+                    raise CheckoutConfigCorruptedError(
                         f"{config_path} has invalid value in "
                         f"[redirections] for {key}: {value} "
                         f"{str(exc)}"
@@ -1431,10 +1449,12 @@ class EdenCheckout:
             prefetch_profiles_list = prefetch_profiles_list.get("active")
             if prefetch_profiles_list is not None:
                 if not isinstance(prefetch_profiles_list, list):
-                    raise Exception(f"{config_path} has an invalid [profiles] section")
+                    raise CheckoutConfigCorruptedError(
+                        f"{config_path} has an invalid [profiles] section"
+                    )
                 for profile in prefetch_profiles_list:
                     if not isinstance(profile, str):
-                        raise Exception(
+                        raise CheckoutConfigCorruptedError(
                             f"{config_path} has invalid value in "
                             f"[profiles] {profile} (string expected)"
                         )
@@ -1485,19 +1505,19 @@ class EdenCheckout:
                 not isinstance(inode_catalog_type, str)
                 or inode_catalog_type.lower() not in SUPPORTED_INODE_CATALOG_TYPES
             ):
-                raise Exception(
+                raise CheckoutConfigCorruptedError(
                     f'repository "{config_path}" has unsupported inode catalog (overlay) type '
                     f'"{inode_catalog_type}". Supported inode catalog (overlay) types are: '
                     f'{", ".join(sorted(SUPPORTED_INODE_CATALOG_TYPES))}.'
                 )
             inode_catalog_type = inode_catalog_type.lower()
             if sys.platform == "win32" and inode_catalog_type == "legacy":
-                raise Exception(
+                raise CheckoutConfigCorruptedError(
                     "Legacy inode catalog (overlay) type not supported on Windows. "
                     "Use Sqlite or InMemory on Windows."
                 )
             elif sys.platform != "win32" and inode_catalog_type == "inmemory":
-                raise Exception(
+                raise CheckoutConfigCorruptedError(
                     "InMemory inode catalog (overlay) type is only supported on Windows. "
                     "Use Legacy or Sqlite on Linux and MacOS."
                 )
@@ -2021,3 +2041,113 @@ def load_toml_config(path: Path) -> TomlConfigDict:
         raise FileError(
             f"toml config file {str(path)} is either missing or corrupted: {str(e)}"
         )
+
+
+def get_repo_info(
+    instance: EdenInstance,
+    repo_arg: str,
+    rev: Optional[str],
+    nfs: bool,
+    case_sensitive: bool,
+    overlay_type: Optional[str],
+    backing_store_type: Optional[str] = None,
+    re_use_case: Optional[str] = None,
+    enable_windows_symlinks: bool = False,
+) -> Tuple[util.Repo, CheckoutConfig]:
+    # Check to see if repo_arg points to an existing EdenFS mount
+    checkout_config = instance.get_checkout_config_for_path(repo_arg)
+    if checkout_config is not None:
+        if backing_store_type is not None:
+            # If the user specified a backing store type, make sure it takes
+            # priority over the existing checkout config.
+            if backing_store_type != checkout_config.scm_type:
+                checkout_config = checkout_config._replace(scm_type=backing_store_type)
+
+        repo = util.get_repo(str(checkout_config.backing_repo), backing_store_type)
+        if repo is None:
+            raise util.RepoError(
+                "EdenFS mount is configured to use repository "
+                f"{checkout_config.backing_repo} but unable to find a "
+                "repository at that location"
+            )
+        return repo, checkout_config
+
+    # Confirm that repo_arg looks like an existing repository path.
+    repo = util.get_repo(repo_arg, backing_store_type)
+    if repo is None:
+        raise util.RepoError(f"{repo_arg!r} does not look like a valid repository")
+    checkout_config = create_checkout_config(
+        repo,
+        instance,
+        nfs,
+        case_sensitive,
+        overlay_type,
+        backing_store_type,
+        re_use_case,
+        enable_windows_symlinks,
+    )
+
+    return repo, checkout_config
+
+
+def create_checkout_config(
+    repo: util.Repo,
+    instance: EdenInstance,
+    nfs: bool,
+    case_sensitive: bool,
+    overlay_type: Optional[str],
+    backing_store_type: Optional[str] = None,
+    re_use_case: Optional[str] = None,
+    enable_windows_symlinks: bool = False,
+) -> CheckoutConfig:
+    mount_protocol = util.get_protocol(nfs)
+
+    enable_sqlite_overlay = util.get_enable_sqlite_overlay(overlay_type)
+
+    if overlay_type is None:
+        # Not specified - read from EdenConfig, fallback to default.
+        overlay_type = instance.get_config_value(
+            "overlay.inode-catalog-type",
+            # SqliteOverlay is default on Windows
+            "sqlite" if sys.platform == "win32" else "legacy",
+        )
+        if overlay_type not in SUPPORTED_INODE_CATALOG_TYPES:
+            raise Exception(
+                f"Eden config has unsupported overlay (inode catalog) type "
+                f'"{overlay_type}". Supported overlay (inode catalog) types are: '
+                f'{", ".join(sorted(SUPPORTED_INODE_CATALOG_TYPES))}.'
+            )
+    overlay_type = overlay_type.lower()
+    if sys.platform == "win32" and overlay_type == "legacy":
+        raise Exception(
+            "Legacy overlay (inode catalog) type not supported on Windows. "
+            "Use Sqlite or InMemory on Windows."
+        )
+    elif sys.platform != "win32" and overlay_type == "inmemory":
+        raise Exception(
+            "InMemory overlay (inode catalog) type is only supported on Windows. "
+            "Use Legacy or Sqlite on Linux and MacOS."
+        )
+
+    # This is a valid repository path.
+    # Prepare a CheckoutConfig object for it.
+    repo_config = CheckoutConfig(
+        backing_repo=Path(repo.source),
+        scm_type=repo.type,
+        guid=str(uuid.uuid4()),
+        mount_protocol=mount_protocol,
+        case_sensitive=case_sensitive,
+        require_utf8_path=True,
+        default_revision=DEFAULT_REVISION[repo.type],
+        redirections={},
+        active_prefetch_profiles=[],
+        predictive_prefetch_profiles_active=False,
+        predictive_prefetch_num_dirs=0,
+        enable_sqlite_overlay=enable_sqlite_overlay,
+        use_write_back_cache=False,
+        re_use_case=re_use_case or "buck2-default",
+        enable_windows_symlinks=enable_windows_symlinks,
+        inode_catalog_type=overlay_type,
+    )
+
+    return repo_config

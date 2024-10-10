@@ -20,6 +20,7 @@ use mercurial_types::HgFileNodeId;
 use mercurial_types::HgNodeHash;
 use mercurial_types::HgParents;
 use mononoke_api::errors::MononokeError;
+use mononoke_api::MononokeRepo;
 use mononoke_types::fsnode::FsnodeFile;
 use mononoke_types::ContentMetadataV2;
 use mononoke_types::NonRootMPath;
@@ -39,36 +40,36 @@ use super::HgRepoContext;
 /// within the repo; as such, perhaps counterintuitively, an HgFileContext is not
 /// aware of the path to the file to which it refers.
 #[derive(Clone)]
-pub struct HgFileContext {
-    repo: HgRepoContext,
+pub struct HgFileContext<R> {
+    repo_ctx: HgRepoContext<R>,
     envelope: HgFileEnvelope,
 }
 
-impl HgFileContext {
+impl<R: MononokeRepo> HgFileContext<R> {
     /// Create a new `HgFileContext`. The file must exist in the repository.
     ///
     /// To construct an `HgFileContext` for a file that may not exist, use
     /// `new_check_exists`.
     pub async fn new(
-        repo: HgRepoContext,
+        repo_ctx: HgRepoContext<R>,
         filenode_id: HgFileNodeId,
     ) -> Result<Self, MononokeError> {
         // Fetch and store Mononoke's internal representation of the metadata of this
         // file. The actual file contents are not fetched here.
-        let ctx = repo.ctx();
-        let blobstore = repo.blob_repo().repo_blobstore();
+        let ctx = repo_ctx.ctx();
+        let blobstore = repo_ctx.repo().repo_blobstore();
         let envelope = filenode_id.load(ctx, blobstore).await?;
-        Ok(Self { repo, envelope })
+        Ok(Self { repo_ctx, envelope })
     }
 
     pub async fn new_check_exists(
-        repo: HgRepoContext,
+        repo_ctx: HgRepoContext<R>,
         filenode_id: HgFileNodeId,
     ) -> Result<Option<Self>, MononokeError> {
-        let ctx = repo.ctx();
-        let blobstore = repo.blob_repo().repo_blobstore();
+        let ctx = repo_ctx.ctx();
+        let blobstore = repo_ctx.repo().repo_blobstore();
         match filenode_id.load(ctx, blobstore).await {
-            Ok(envelope) => Ok(Some(Self { repo, envelope })),
+            Ok(envelope) => Ok(Some(Self { repo_ctx, envelope })),
             Err(LoadableError::Missing(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -86,12 +87,12 @@ impl HgFileContext {
         path: NonRootMPath,
         max_length: Option<u32>,
     ) -> impl TryStream<Ok = HgFileHistoryEntry, Error = MononokeError> {
-        let ctx = self.repo.ctx().clone();
-        let blob_repo = self.repo.blob_repo().clone();
+        let ctx = self.repo_ctx.ctx().clone();
+        let repo = self.repo_ctx.repo().clone();
         let filenode_id = self.node_id();
         get_file_history_maybe_incomplete(
             ctx,
-            blob_repo,
+            repo,
             filenode_id,
             path,
             max_length.map(|len| len as u64),
@@ -106,8 +107,8 @@ impl HgFileContext {
     pub async fn content_metadata(&self) -> Result<ContentMetadataV2, MononokeError> {
         let content_id = self.envelope.content_id();
         let fetch_key = filestore::FetchKey::Canonical(content_id);
-        let blobstore = self.repo.blob_repo().repo_blobstore();
-        filestore::get_metadata(blobstore, self.repo.ctx(), &fetch_key)
+        let blobstore = self.repo_ctx.repo().repo_blobstore();
+        filestore::get_metadata(blobstore, self.repo_ctx.ctx(), &fetch_key)
             .await?
             .ok_or_else(|| {
                 MononokeError::NotAvailable(format!(
@@ -139,7 +140,7 @@ impl HgFileContext {
 }
 
 #[async_trait]
-impl HgDataContext for HgFileContext {
+impl<R: MononokeRepo> HgDataContext<R> for HgFileContext<R> {
     type NodeId = HgFileNodeId;
 
     /// Get the filenode hash (HgFileNodeId) for this file version.
@@ -171,15 +172,15 @@ impl HgDataContext for HgFileContext {
     /// should not assume that the data returned by this function only contains
     /// file content.
     async fn content(&self) -> Result<(Bytes, Metadata), MononokeError> {
-        let ctx = self.repo.ctx();
-        let blob_repo = self.repo.blob_repo();
+        let ctx = self.repo_ctx.ctx();
+        let repo = self.repo_ctx.repo();
         let filenode_id = self.node_id();
         let lfs_params = SessionLfsParams {
-            threshold: self.repo.config().lfs.threshold,
+            threshold: self.repo_ctx.config().lfs.threshold,
         };
 
         let (_size, content_fut) =
-            create_getpack_v2_blob(ctx, blob_repo, filenode_id, lfs_params, false).await?;
+            create_getpack_v2_blob(ctx, repo, filenode_id, lfs_params, false).await?;
 
         // TODO(kulshrax): Right now this buffers the entire file content in memory. It would
         // probably be better for this method to return a stream of the file content instead.
@@ -190,14 +191,17 @@ impl HgDataContext for HgFileContext {
 }
 
 #[async_trait]
-impl HgDataId for HgFileNodeId {
-    type Context = HgFileContext;
+impl<R: MononokeRepo> HgDataId<R> for HgFileNodeId {
+    type Context = HgFileContext<R>;
 
     fn from_node_hash(hash: HgNodeHash) -> Self {
         HgFileNodeId::new(hash)
     }
 
-    async fn context(self, repo: HgRepoContext) -> Result<Option<HgFileContext>, MononokeError> {
+    async fn context(
+        self,
+        repo: HgRepoContext<R>,
+    ) -> Result<Option<HgFileContext<R>>, MononokeError> {
         HgFileContext::new_check_exists(repo, self).await
     }
 }
@@ -216,14 +220,15 @@ mod tests {
     use mercurial_types::NULL_HASH;
     use mononoke_api::repo::Repo;
     use mononoke_api::repo::RepoContext;
+    use mononoke_macros::mononoke;
 
     use super::*;
     use crate::RepoContextHgExt;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_hg_file_context(fb: FacebookInit) -> Result<(), MononokeError> {
         let ctx = CoreContext::test_mock(fb);
-        let repo = Arc::new(ManyFilesDirs::get_custom_test_repo::<Repo>(fb).await);
+        let repo = Arc::new(ManyFilesDirs::get_repo::<Repo>(fb).await);
 
         // The `ManyFilesDirs` test repo contains the following files (at tip):
         //   $ hg manifest --debug
@@ -259,10 +264,10 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_hg_file_history(fb: FacebookInit) -> Result<(), MononokeError> {
         let ctx = CoreContext::test_mock(fb);
-        let repo = Arc::new(ManyFilesDirs::get_custom_test_repo::<Repo>(fb).await);
+        let repo = Arc::new(ManyFilesDirs::get_repo::<Repo>(fb).await);
 
         // The `ManyFilesDirs` test repo contains the following files (at tip):
         //   $ hg manifest --debug

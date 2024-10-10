@@ -111,6 +111,7 @@ class EdenFSProcess(NamedTuple):
 
 
 try:
+    # pyre-fixme [21]: Undefined import Could not find a module corresponding to import
     from common.base.pid_info.py import build_info_lib  # @manual
 
     def get_build_info_from_pid(
@@ -258,7 +259,7 @@ class UnixProcUtils(ProcUtils):
 
         # Note that the command may be just "edenfs" rather than a path, but it
         # works out fine either way.
-        return os.path.basename(comm) in ("edenfs", "fake_edenfs")
+        return "eden" in os.path.basename(comm)
 
     def _get_process_command(self, pid: int) -> Optional[str]:
         try:

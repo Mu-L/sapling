@@ -1,8 +1,5 @@
 #require symlink no-eden
 
-  $ eagerepo
-  $ setconfig experimental.allowfilepeer=True
-
 == tests added in 0.7 ==
 
   $ newclientrepo test-symlinks-0.7
@@ -146,7 +143,7 @@ try cloning symlink in a subdir
 2. clone it
   $ cd ..
   $ hg clone clone clonedest
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 == symlink and git diffs ==

@@ -6,17 +6,30 @@
  */
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use minibytes::Text;
 use util::path::expand_path;
 
+use crate::Config;
 use crate::Error;
 use crate::Result;
 
+pub trait FromConfig: Sized {
+    fn try_from_str_with_config(c: &dyn Config, s: &str) -> Result<Self>;
+}
+
 pub trait FromConfigValue: Sized {
     fn try_from_str(s: &str) -> Result<Self>;
+}
+
+impl<T: FromConfigValue> FromConfig for T {
+    fn try_from_str_with_config(_c: &dyn Config, s: &str) -> Result<Self> {
+        Self::try_from_str(s)
+    }
 }
 
 impl FromConfigValue for bool {
@@ -195,6 +208,13 @@ impl FromConfigValue for Duration {
 }
 
 impl<T: FromConfigValue> FromConfigValue for Vec<T> {
+    fn try_from_str(s: &str) -> Result<Self> {
+        let items = parse_list(s);
+        items.into_iter().map(|s| T::try_from_str(&s)).collect()
+    }
+}
+
+impl<T: FromConfigValue + Eq + Hash> FromConfigValue for HashSet<T> {
     fn try_from_str(s: &str) -> Result<Self> {
         let items = parse_list(s);
         items.into_iter().map(|s| T::try_from_str(&s)).collect()

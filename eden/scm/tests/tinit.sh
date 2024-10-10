@@ -75,8 +75,7 @@ newclientrepo() {
 newremoterepo() {
   newrepo "$@"
   echo remotefilelog >> .hg/requires
-  enable treemanifest remotefilelog pushrebase remotenames
-  setconfig treemanifest.sendtrees=True treemanifest.treeonly=True
+  enable pushrebase remotenames
   if [ -n "$USE_MONONOKE" ] ; then
     setconfig paths.default=mononoke://$(mononoke_address)/server
   else
@@ -91,24 +90,20 @@ newserver() {
     mononoke
     MONONOKE_START_TIMEOUT=60 wait_for_mononoke "$TESTTMP/$reponame"
   elif [ -f "$TESTTMP/.eagerepo" ] ; then
-    # Do nothing, it will be setup at access time
-    true
+    hg init "$TESTTMP/$reponame" --config format.use-eager-repo=true
+    cd "$TESTTMP/$reponame"
   else
     mkdir "$TESTTMP/$reponame"
     cd "$TESTTMP/$reponame"
-    hg --config extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py \
-      --config experimental.narrow-heads=false \
+    hg --config experimental.narrow-heads=false \
       --config visibility.enabled=false \
       init
-    enable remotefilelog remotenames
+    enable remotenames
     setconfig \
        remotefilelog.reponame="$reponame" remotefilelog.server=True \
-       treemanifest.rustmanifest=True \
-       treemanifest.server=True treemanifest.treeonly=True \
        infinitepush.server=yes infinitepush.reponame="$reponame" \
        infinitepush.indextype=disk infinitepush.storetype=disk \
-       experimental.narrow-heads=false \
-       extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
+       experimental.narrow-heads=false
   fi
 }
 
@@ -127,29 +122,20 @@ clone() {
   fi
 
   hg clone -q --shallow "$serverurl" "$clientname" "$@" \
-    --config "extensions.remotefilelog=" \
     --config "extensions.remotenames=" \
-    --config "extensions.treemanifest=" \
     --config "remotefilelog.reponame=$servername" \
-    --config "treemanifest.treeonly=True" \
     --config "ui.ssh=$(dummysshcmd)" \
     --config "ui.remotecmd=$remotecmd"
 
   cat >> $clientname/.hg/hgrc <<EOF
 [extensions]
 remotenames=
-treemanifest=
 
 [phases]
 publish=False
 
 [remotefilelog]
 reponame=$servername
-
-[treemanifest]
-rustmanifest=True
-sendtrees=True
-treeonly=True
 
 [ui]
 ssh=$(dummysshcmd)
@@ -251,9 +237,6 @@ disable() {
   for name in "$@"
   do
     setconfig "extensions.$name=!"
-    if [[ $name == "treemanifest" ]]; then
-        setconfig treemanifest.sendtrees=False treemanifest.treeonly=False
-    fi
   done
 }
 

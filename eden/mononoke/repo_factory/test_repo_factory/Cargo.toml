@@ -9,7 +9,7 @@ license = "GPLv2+"
 
 [dependencies]
 acl_regions = { version = "0.1.0", path = "../../acl_regions" }
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 blobstore = { version = "0.1.0", path = "../../blobstore" }
 bonsai_git_mapping = { version = "0.1.0", path = "../../bonsai_git_mapping" }
 bonsai_globalrev_mapping = { version = "0.1.0", path = "../../bonsai_globalrev_mapping" }
@@ -19,18 +19,16 @@ bonsai_tag_mapping = { version = "0.1.0", path = "../../bonsai_tag_mapping" }
 bookmarks = { version = "0.1.0", path = "../../bookmarks" }
 bookmarks_cache = { version = "0.1.0", path = "../../bookmarks/bookmarks_cache" }
 cacheblob = { version = "0.1.0", path = "../../blobstore/cacheblob" }
-changesets = { version = "0.1.0", path = "../../changesets" }
-changesets_impl = { version = "0.1.0", path = "../../changesets/changesets_impl" }
 commit_cloud = { version = "0.1.0", path = "../../commit_cloud" }
 commit_graph = { version = "0.1.0", path = "../../repo_attributes/commit_graph/commit_graph" }
 context = { version = "0.1.0", path = "../../server/context" }
 dbbookmarks = { version = "0.1.0", path = "../../bookmarks/dbbookmarks" }
 ephemeral_blobstore = { version = "0.1.0", path = "../../blobstore/ephemeral_blobstore" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
-fbinit = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fbinit = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 filenodes = { version = "0.1.0", path = "../../filenodes" }
 filestore = { version = "0.1.0", path = "../../filestore" }
-git_push_redirect = { version = "0.1.0", path = "../../git_push_redirect" }
+git_source_of_truth = { version = "0.1.0", path = "../../git_source_of_truth" }
 git_symbolic_refs = { version = "0.1.0", path = "../../git_symbolic_refs" }
 hook_manager = { version = "0.1.0", path = "../../repo_attributes/hook_manager/hook_manager" }
 live_commit_sync_config = { version = "0.1.0", path = "../../commit_rewriting/live_commit_sync_config" }
@@ -61,7 +59,6 @@ repo_metadata_checkpoint = { version = "0.1.0", path = "../../repo_metadata_chec
 repo_permission_checker = { version = "0.1.0", path = "../../repo_attributes/repo_permission_checker" }
 repo_sparse_profiles = { version = "0.1.0", path = "../../repo_attributes/repo_sparse_profiles" }
 repo_stats_logger = { version = "0.1.0", path = "../../repo_stats_logger" }
-requests_table = { version = "0.1.0", path = "../../megarepo_api/requests_table" }
 scuba_ext = { version = "0.1.0", path = "../../common/scuba_ext" }
 sql = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 sql_commit_graph_storage = { version = "0.1.0", path = "../../repo_attributes/commit_graph/sql_commit_graph_storage" }

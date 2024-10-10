@@ -23,8 +23,8 @@ use mononoke_types::MPathElement;
 use mononoke_types::MPathElementPrefix;
 use mononoke_types::NonRootMPath;
 
-use crate::AsyncManifest;
 use crate::Entry;
+use crate::Manifest;
 use crate::TrieMapOps;
 
 /// Result of a multi-way comparison between a manifest tree and the merge of
@@ -86,13 +86,13 @@ pub async fn compare_manifest<'a, M, Store>(
     mf: M,
     base_mfs: Vec<Option<M>>,
 ) -> Result<
-    impl Stream<Item = Result<ManifestComparison<M::TrieMapType, Entry<M::TreeId, M::LeafId>>>> + 'a,
+    impl Stream<Item = Result<ManifestComparison<M::TrieMapType, Entry<M::TreeId, M::Leaf>>>> + 'a,
 >
 where
-    M: AsyncManifest<Store>,
+    M: Manifest<Store>,
     M::TreeId: Send + Sync + Eq + 'static,
-    M::LeafId: Send + Sync + Eq + 'static,
-    M::TrieMapType: TrieMapOps<Store, Entry<M::TreeId, M::LeafId>> + Eq,
+    M::Leaf: Send + Sync + Eq + 'static,
+    M::TrieMapType: TrieMapOps<Store, Entry<M::TreeId, M::Leaf>> + Eq,
     Store: Send + Sync + 'static,
 {
     let (mf_trie_map, base_mf_trie_maps) = future::try_join(
@@ -283,13 +283,13 @@ pub fn compare_manifest_tree<'a, M, Store>(
     blobstore: &'a Store,
     manifest_id: M::TreeId,
     base_manifest_ids: Vec<M::TreeId>,
-) -> impl Stream<Item = Result<Comparison<M::TrieMapType, Entry<M::TreeId, M::LeafId>>>> + 'a
+) -> impl Stream<Item = Result<Comparison<M::TrieMapType, Entry<M::TreeId, M::Leaf>>>> + 'a
 where
     Store: Send + Sync + 'static,
-    M: AsyncManifest<Store> + Send + Sync + 'static,
-    M::TreeId: StoreLoadable<Store, Value = M> + Send + Sync + Eq + std::fmt::Debug + 'static,
-    M::LeafId: Send + Sync + Eq + std::fmt::Debug + 'static,
-    M::TrieMapType: TrieMapOps<Store, Entry<M::TreeId, M::LeafId>> + Eq,
+    M: Manifest<Store> + Send + Sync + 'static,
+    M::TreeId: StoreLoadable<Store, Value = M> + Clone + Send + Sync + Eq + 'static,
+    M::Leaf: Send + Sync + Eq + 'static,
+    M::TrieMapType: TrieMapOps<Store, Entry<M::TreeId, M::Leaf>> + Eq,
 {
     let base_manifest_ids: Vec<_> = base_manifest_ids.into_iter().map(Some).collect();
     bounded_traversal::bounded_traversal_stream(
@@ -332,37 +332,32 @@ where
                                     index,
                                 ));
                             }
-                            ManifestComparison::Changed(elem, entry, base_entries) => match entry {
-                                Entry::Tree(tree_id) => {
+                            ManifestComparison::Changed(elem, entry, base_entries) => {
+                                if let Entry::Tree(tree_id) = &entry {
                                     let mut base_tree_ids = Vec::new();
-                                    let mut base_leaf_entries = Vec::new();
-                                    for base_entry in base_entries {
+                                    for base_entry in base_entries.iter() {
                                         match base_entry {
                                             Some(Entry::Tree(tree_id)) => {
-                                                base_tree_ids.push(Some(tree_id))
+                                                base_tree_ids.push(Some(tree_id.clone()))
                                             }
                                             Some(Entry::Leaf(_)) | None => {
                                                 base_tree_ids.push(None);
-                                                base_leaf_entries.push(base_entry);
                                             }
                                         }
                                     }
-                                    recurse.push((path.join(&elem), tree_id, base_tree_ids));
-                                    if !base_leaf_entries.is_empty() {
-                                        outs.push(Comparison::Removed(
-                                            path.join_into_non_root_mpath(&elem),
-                                            base_leaf_entries,
-                                        ));
-                                    }
-                                }
-                                Entry::Leaf(_) => {
-                                    outs.push(Comparison::Changed(
-                                        path.join_into_non_root_mpath(&elem),
-                                        entry,
-                                        base_entries,
+                                    recurse.push((
+                                        path.join(&elem),
+                                        tree_id.clone(),
+                                        base_tree_ids,
                                     ));
                                 }
-                            },
+
+                                outs.push(Comparison::Changed(
+                                    path.join_into_non_root_mpath(&elem),
+                                    entry,
+                                    base_entries,
+                                ));
+                            }
                             ManifestComparison::Removed(elem, entries) => {
                                 outs.push(Comparison::Removed(
                                     path.join_into_non_root_mpath(&elem),
@@ -417,6 +412,7 @@ mod tests {
     use futures::stream::TryStreamExt;
     use maplit::btreemap;
     use memblob::Memblob;
+    use mononoke_macros::mononoke;
     use mononoke_types::path::MPath;
     use mononoke_types::FileType;
     use mononoke_types::SortedVectorTrieMap;
@@ -425,6 +421,7 @@ mod tests {
     use super::*;
     use crate::ops::ManifestOps;
     use crate::tests::test_manifest::derive_test_manifest;
+    // use crate::tests::test_manifest::TestLeaf;
     use crate::tests::test_manifest::TestLeafId;
     use crate::tests::test_manifest::TestManifestId;
 
@@ -467,7 +464,7 @@ mod tests {
             .ok_or_else(|| anyhow!("path {} not found", path))
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_compare_manifest_single_parent(fb: FacebookInit) -> Result<()> {
         let blobstore: Arc<dyn Blobstore> = Arc::new(Memblob::new(PutBehaviour::Overwrite));
         let ctx = CoreContext::test_mock(fb);
@@ -556,7 +553,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_compare_manifest_tree(fb: FacebookInit) -> Result<()> {
         let blobstore: Arc<dyn Blobstore> = Arc::new(Memblob::new(PutBehaviour::Overwrite));
         let ctx = CoreContext::test_mock(fb);
@@ -650,8 +647,19 @@ mod tests {
                     vec![Some(get_trie_map(ctx, blobstore, mf0, "", "dir5").await?)],
                     0
                 ),
-                Comparison::Removed(
+                Comparison::Changed(
+                    NonRootMPath::new("dir2")?,
+                    get_entry(ctx, blobstore, mf1, "dir2").await?,
+                    vec![Some(get_entry(ctx, blobstore, mf0, "dir2").await?)],
+                ),
+                Comparison::Changed(
+                    NonRootMPath::new("dir1")?,
+                    get_entry(ctx, blobstore, mf1, "dir1").await?,
+                    vec![Some(get_entry(ctx, blobstore, mf0, "dir1").await?)],
+                ),
+                Comparison::Changed(
                     NonRootMPath::new("file7")?,
+                    get_entry(ctx, blobstore, mf1, "file7").await?,
                     vec![Some(get_entry(ctx, blobstore, mf0, "file7").await?)],
                 ),
                 Comparison::ManyNew(
@@ -742,6 +750,11 @@ mod tests {
                     vec![Some(get_trie_map(ctx, blobstore, mf0, "", "dir5").await?)],
                     0
                 ),
+                Comparison::Changed(
+                    NonRootMPath::new("dir1")?,
+                    get_entry(ctx, blobstore, mf2, "dir1").await?,
+                    vec![Some(get_entry(ctx, blobstore, mf0, "dir1").await?)],
+                ),
                 Comparison::ManySame(
                     MPath::new("dir1")?,
                     MPathElementPrefix::from_slice(b"file2")?,
@@ -812,6 +825,14 @@ mod tests {
                     vec![
                         Some(get_trie_map(ctx, blobstore, mf1, "", "dir5").await?),
                         Some(get_trie_map(ctx, blobstore, mf2, "", "dir5").await?)
+                    ],
+                ),
+                Comparison::Changed(
+                    NonRootMPath::new("dir2")?,
+                    get_entry(ctx, blobstore, mf3, "dir2").await?,
+                    vec![
+                        Some(get_entry(ctx, blobstore, mf1, "dir2").await?),
+                        Some(get_entry(ctx, blobstore, mf2, "dir2").await?)
                     ],
                 ),
                 Comparison::ManySame(

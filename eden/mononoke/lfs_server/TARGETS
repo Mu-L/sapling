@@ -1,8 +1,7 @@
 load("@fbcode_macros//build_defs:rust_binary.bzl", "rust_binary")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load("//eden/mononoke/facebook:lib.bzl", "tokio_dependency_test")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_binary(
     name = "lfs_server",
@@ -13,6 +12,7 @@ rust_binary(
         "//common/rust/shed/fbinit:fbinit-tokio",
         "//eden/mononoke/blobstore:chaosblob",
         "//eden/mononoke/blobstore:memblob",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
         "//eden/mononoke/mononoke_types:mononoke_types-mocks",
         "//eden/mononoke/repo_factory:test_repo_factory",
     ],
@@ -31,6 +31,7 @@ rust_binary(
         "fbsource//third-party/rust:maplit",
         "fbsource//third-party/rust:mime",
         "fbsource//third-party/rust:once_cell",
+        "fbsource//third-party/rust:openssl",
         "fbsource//third-party/rust:pin-project",
         "fbsource//third-party/rust:rand",
         "fbsource//third-party/rust:regex",

@@ -344,6 +344,7 @@ mod test {
     use commit_graph::CommitGraphWriter;
     use fbinit::FacebookInit;
     use filestore::FilestoreConfig;
+    use mononoke_macros::mononoke;
     use mononoke_types::ChangesetId;
     use mononoke_types::PrefixTrie;
     use pretty_assertions::assert_eq;
@@ -360,24 +361,16 @@ mod test {
     use crate::mapping::get_file_changes;
 
     #[facet::container]
-    struct TestRepo {
-        #[facet]
-        bonsai_hg_mapping: dyn BonsaiHgMapping,
-        #[facet]
-        bookmarks: dyn Bookmarks,
-        #[facet]
-        commit_graph: CommitGraph,
-        #[facet]
-        commit_graph_writer: dyn CommitGraphWriter,
-        #[facet]
-        repo_derived_data: RepoDerivedData,
-        #[facet]
-        repo_blobstore: RepoBlobstore,
-        #[facet]
-        filestore_config: FilestoreConfig,
-        #[facet]
-        repo_identity: RepoIdentity,
-    }
+    struct TestRepo(
+        dyn BonsaiHgMapping,
+        dyn Bookmarks,
+        CommitGraph,
+        dyn CommitGraphWriter,
+        RepoDerivedData,
+        RepoBlobstore,
+        FilestoreConfig,
+        RepoIdentity,
+    );
 
     const B_FILES: &[&str] = &[
         "dir1/subdir1/subsubdir1/file1",
@@ -484,7 +477,7 @@ mod test {
         }
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_skeleton_manifests(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let (repo, changesets) = init_repo(&ctx).await?;

@@ -11,13 +11,13 @@
 
 setup configuration
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 INFINITEPUSH_NAMESPACE_REGEX='^scratch/.+$' setup_common_config
+  $ INFINITEPUSH_NAMESPACE_REGEX='^scratch/.+$' setup_common_config
   $ cd $TESTTMP
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo "a file content" > a
   $ hg add a
   $ hg ci -ma
@@ -36,16 +36,16 @@ verify content
   
 
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 setup two repos: one will be used to push from, another will be used
 to pull these pushed commits
 
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo3
+  $ hg clone -q mono:repo repo2
+  $ hg clone -q mono:repo repo3
   $ cd repo2
-  $ hg pull ssh://user@dummy/repo-hg
-  pulling from ssh://user@dummy/repo-hg
+  $ hg pull ssh://user@dummy/repo
+  pulling from ssh://user@dummy/repo
   searching for changes
   no changes found
 
@@ -61,7 +61,7 @@ create new commits in repo2 and check that they are seen as outgoing
   $ echo "b file content" > b_dir/b
   $ hg add b_dir/b
   $ hg ci -mb
-  $ sl push -r . --to master_bookmark --create --config extensions.remotenames= --config extensions.pushrebase=
+  $ hg push -r . --to master_bookmark --create --config extensions.pushrebase=
   pushing rev bb0985934a0f to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 2 files for upload
@@ -129,7 +129,7 @@ The timestamp is not stable, so count its digits instead to ensure it is not nul
   $ echo forcepushrebase > forcepushrebase
   $ hg add -q forcepushrebase
   $ hg ci -m forcepushrebase
-  $ sl push -r . --to forcepushrebase --create --force --config extensions.remotenames= --config extensions.pushrebase=
+  $ hg push -r . --to forcepushrebase --create --force --config extensions.pushrebase=
   pushing rev 0c1e5152244c to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark forcepushrebase
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -166,8 +166,8 @@ Use normal push (non-pushrebase).  Since we are not pushing to a public bookmark
   $ echo push > push
   $ hg add -q push
   $ hg ci -m 'commit'
-  $ sl push --force
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push --force --allow-anon
+  pushing to mono:repo
   searching for changes
 
   $ cat "$TESTTMP/scribe_logs/$COMMIT_SCRIBE_CATEGORY" | jq 'select(.is_public == false)' | jq .bookmark
@@ -186,15 +186,14 @@ Use infinitepush push
   > server=False
   > branchpattern=re:^scratch/.+$
   > EOF
-  $ hgmn up -q master_bookmark
 
 Stop tracking master_bookmark
-  $ hgmn up -q master_bookmark
+  $ hg up -q 0e7ec5675652
   $ echo infinitepush > infinitepush
   $ hg add -q infinitepush
   $ hg ci -m 'infinitepush'
-  $ sl push mononoke://$(mononoke_address)/repo -r . --to "scratch/123" --create
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --to "scratch/123" --create
+  pushing to mono:repo
   searching for changes
   $ cat "$TESTTMP/scribe_logs/$COMMIT_SCRIBE_CATEGORY" | jq 'select(.is_public == false)' | jq .bookmark
   "scratch/123"
@@ -222,8 +221,8 @@ Update the scratch/123 bookmark
   $ echo new_commit > new_commit
   $ hg add -q new_commit
   $ hg ci -m 'new commit'
-  $ sl push mononoke://$(mononoke_address)/repo -r . --to "scratch/123"
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --to "scratch/123"
+  pushing to mono:repo
   searching for changes
   $ cat "$TESTTMP/scribe_logs/$BOOKMARK_SCRIBE_CATEGORY" | jq .repo_name
   "repo"
@@ -243,7 +242,7 @@ Update the scratch/123 bookmark
 
 Delete the master_bookmark
 
-  $ sl push --delete master_bookmark --config extensions.remotenames= --config extensions.pushrebase=
+  $ hg push --delete master_bookmark --config extensions.pushrebase=
   deleting remote bookmark master_bookmark
 
   $ cat "$TESTTMP/scribe_logs/$BOOKMARK_SCRIBE_CATEGORY" | jq .repo_name

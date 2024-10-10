@@ -2,6 +2,7 @@
 #require no-fsmonitor
 #debugruntest-incompatible
 
+  $ setconfig alias.ssl:doc="show a graph of your commits and associated Diff information"
 Short help:
 
   $ hg
@@ -18,6 +19,7 @@ Short help:
   
   View commits:
   
+   ssl           show a graph of your commits and associated Diff information
    show          show commit in detail
    diff          show differences between commits
   
@@ -75,6 +77,7 @@ Short help:
   
   View commits:
   
+   ssl           show a graph of your commits and associated Diff information
    show          show commit in detail
    diff          show differences between commits
   
@@ -132,6 +135,7 @@ Short help:
   
   View commits:
   
+   ssl           show a graph of your commits and associated Diff information
    show          show commit in detail
    diff          show differences between commits
   
@@ -189,6 +193,7 @@ Short help:
   
   View commits:
   
+   ssl           show a graph of your commits and associated Diff information
    show          show commit in detail
    diff          show differences between commits
   
@@ -286,6 +291,7 @@ Test extension help:
        remotefilelog
                      minimize and speed up large repositories
        sampling      (no help text available)
+       schemes       extend schemes with shortcuts to repository swarms
        treemanifest
        tweakdefaults
                      user friendly defaults
@@ -343,17 +349,14 @@ Test extension help:
        remotenames   mercurial extension for improving client/server workflows
        reset         reset the active bookmark and working copy to a desired
                      revision
-       schemes       extend schemes with shortcuts to repository swarms
        share         share a common history between several working directories
        shelve        save and restore changes to the working directory
        sigtrace      sigtrace - dump stack and memory traces on signal
-       simplecache
        smartlog      command to display a relevant subgraph
        snapshot      stores snapshots of uncommitted changes
        sparse        allow sparse checkouts of the working directory
        stablerev     provide a way to expose the "stable" commit via a revset
        traceprof     (no help text available)
-       treemanifestserver
        undo          (no help text available)
        win32mbcs     allow the use of MBCS paths with problematic encodings
 
@@ -851,6 +854,7 @@ Test that default list of commands omits extension commands
   
   View commits:
   
+   ssl           show a graph of your commits and associated Diff information
    show          show commit in detail
    diff          show differences between commits
   
@@ -1008,11 +1012,6 @@ Test repeated config section name
       "smtp.host"
           Host name of mail server, e.g. "mail.example.com".
   
-Unrelated trailing paragraphs shouldn't be included
-
-  $ hg help config.extramsg | grep '^$'
-  
-
 Test capitalized section name
 
   $ hg help scripting.HGPLAIN > /dev/null
@@ -1494,6 +1493,13 @@ Test dynamic list of merge tools only shows up once
         partially merged file. The marker will have two sections, one with the
         content from one side of the merge, and one with a diff from the base
         content to the content on the other side. (experimental)
+  
+      ":mergediffs"
+        Uses the internal non-interactive simple merge algorithm for merging
+        files. It will fail if there are any conflicts and leave markers in the
+        partially merged file. The marker will have two sections, each showing
+        the unified diff between the base and one side of the merge
+        (experimental)
   
       ":other"
         Uses the other 'p2()' version of files as the merged version.

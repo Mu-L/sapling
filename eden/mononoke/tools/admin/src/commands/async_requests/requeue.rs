@@ -6,12 +6,14 @@
  */
 
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use async_requests::types::RowId;
 use clap::Args;
+use client::AsyncRequestsQueue;
 use context::CoreContext;
-use megarepo_api::MegarepoApi;
+use mononoke_api::MononokeRepo;
 
 #[derive(Args)]
 /// Changes the request status to ready and put error as result.
@@ -25,19 +27,26 @@ pub struct AsyncRequestsRequeueArgs {
 pub async fn requeue_request(
     args: AsyncRequestsRequeueArgs,
     ctx: CoreContext,
-    megarepo: MegarepoApi,
+    queues_client: AsyncRequestsQueue,
 ) -> Result<(), Error> {
-    let repos_and_queues = megarepo.all_async_method_request_queues(&ctx).await?;
+    let queue = queues_client
+        .async_method_request_queue(&ctx)
+        .await
+        .context("obtaining async queue")?;
 
     let row_id = args.request_id;
 
-    for (_repo_ids, queue) in repos_and_queues {
-        if let Some((request_id, _entry, _params, _maybe_result)) =
-            queue.get_request_by_id(&ctx, &RowId(row_id)).await?
-        {
-            queue.requeue(&ctx, request_id).await?;
-            return Ok(());
-        }
+    if let Some((request_id, _entry, _params, _maybe_result)) = queue
+        .get_request_by_id(&ctx, &RowId(row_id))
+        .await
+        .context("retrieving the request")?
+    {
+        queue
+            .requeue(&ctx, request_id)
+            .await
+            .context("requeueing the request")?;
+        Ok(())
+    } else {
+        Err(anyhow!("Request not found."))
     }
-    Err(anyhow!("Request not found."))
 }

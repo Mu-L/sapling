@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "wireproto_handler",
@@ -9,7 +8,6 @@ rust_library(
     deps = [
         "fbsource//third-party/rust:slog",
         "//common/rust/shed/facet:facet",
-        "//eden/mononoke/blobrepo:blobrepo",
         "//eden/mononoke/blobrepo:repo_blobstore",
         "//eden/mononoke/bonsai_hg_mapping:bonsai_hg_mapping",
         "//eden/mononoke/bookmarks:bookmarks",

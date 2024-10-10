@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Error;
+use anyhow::Result;
 use async_stream::try_stream;
 use bonsai_git_mapping::BonsaiGitMappingRef;
 use bonsai_git_mapping::BonsaisOrGitShas;
@@ -21,6 +22,7 @@ use gotham::mime;
 use gotham::state::FromState;
 use gotham::state::State;
 use gotham_ext::error::HttpError;
+use gotham_ext::middleware::ScubaMiddlewareState;
 use gotham_ext::response::BytesBody;
 use gotham_ext::response::ResponseStream;
 use gotham_ext::response::ResponseTryStreamExt;
@@ -32,17 +34,19 @@ use mononoke_types::ChangesetId;
 use packetline::encode::delim_to_write;
 use packetline::encode::flush_to_write;
 use packetline::encode::write_data_channel;
+use packetline::encode::write_progress_channel;
 use packetline::encode::write_text_packetline;
 use packetline::FLUSH_LINE;
 use packfile::pack::DeltaForm;
 use packfile::pack::PackfileWriter;
-use protocol::generator::bonsai_git_mappings_by_bonsai;
 use protocol::generator::fetch_response;
 use protocol::generator::ls_refs_response;
-use protocol::generator::ref_oid_mapping;
 use protocol::generator::shallow_info as fetch_shallow_info;
+use protocol::mapping::bonsai_git_mappings_by_bonsai;
+use protocol::mapping::ref_oid_mapping;
 use protocol::types::PackfileConcurrency;
 use protocol::types::ShallowInfoResponse;
+use repo_identity::RepoIdentityRef;
 use rustc_hash::FxHashSet;
 use tokio::io::ErrorKind;
 use tokio::sync::mpsc;
@@ -92,7 +96,7 @@ async fn pack_header() -> Result<Bytes, Error> {
 }
 
 fn concurrency(context: &RepositoryRequestContext) -> PackfileConcurrency {
-    match &context.repo.inner_repo().repo_config.git_concurrency {
+    match &context.repo.repo_config.git_configs.git_concurrency {
         Some(concurrency) => PackfileConcurrency::new(
             concurrency.trees_and_blobs,
             concurrency.commits,
@@ -122,7 +126,7 @@ async fn acknowledgements(
         .with_context(|| {
             format!(
                 "Failed to fetch bonsai_git_mapping for repo {}",
-                context.repo.name
+                context.repo.repo_identity().name()
             )
         })?;
     let mut output_buffer = vec![];
@@ -153,7 +157,7 @@ async fn git_commits(
         .with_context(|| {
             format!(
                 "Failed to fetch bonsai_git_mapping for repo {}",
-                context.repo.name
+                context.repo.repo_identity().name()
             )
         })
 }
@@ -312,6 +316,9 @@ impl Iterator for FetchResponseHeaders {
 }
 
 pub async fn upload_pack(state: &mut State) -> Result<Response<Body>, HttpError> {
+    let repo_name = RepositoryParams::borrow_from(state).repo_name();
+    ScubaMiddlewareState::try_borrow_add(state, "repo", repo_name.as_str());
+    ScubaMiddlewareState::try_borrow_add(state, "method", "clone|pull");
     let body_bytes = get_body(state).await?;
     // We got a flush line packet to keep the connection alive. Just return Ok.
     if body_bytes == packetline::FLUSH_LINE {
@@ -319,7 +326,6 @@ pub async fn upload_pack(state: &mut State) -> Result<Response<Body>, HttpError>
     }
     let request_command =
         RequestCommand::parse_from_packetline(&body_bytes).map_err(HttpError::e400)?;
-    let repo_name = RepositoryParams::borrow_from(state).repo_name();
     let request_context = RepositoryRequestContext::instantiate(
         state,
         GitMethodInfo::from_command(&request_command.command, repo_name),
@@ -374,6 +380,10 @@ pub async fn fetch(
         FetchResponseHeaders::from_request(request_context.clone(), args.clone()).await?;
     let include_pack = fetch_response_headers.include_pack();
     let shallow_response = fetch_response_headers.shallow_response.take();
+
+    // Some repos might be configured to display a message to users when they
+    // run `git pull`.
+    let mb_fetch_msg = git_fetch_message(request_context).await?;
     let bytes_stream = ResponseStream::new(try_stream! {
         for header in fetch_response_headers {
             yield header;
@@ -381,6 +391,11 @@ pub async fn fetch(
         // Only include the packfile if it is requested by client
         if include_pack {
             let mut pack_reader = tokio_stream::wrappers::ReceiverStream::new(reader).ready_chunks(100_000_000);
+            if let Some(fetch_msg) = mb_fetch_msg {
+                let mut buf = Vec::with_capacity(fetch_msg.len());
+                write_progress_channel(fetch_msg.as_ref(), &mut buf).await?;
+                yield Bytes::from(buf);
+            }
             while let Some(chunks) = pack_reader.next().await {
                 for chunk in chunks {
                     let mut buf = Vec::with_capacity(chunk.len());
@@ -418,4 +433,23 @@ pub async fn fetch(
 
     let body = StreamBody::new(bytes_stream, mime::APPLICATION_OCTET_STREAM);
     Ok(body)
+}
+
+/// Checks if there are any messages that should be displayed to the user when
+/// running `git pull` on this repo.
+async fn git_fetch_message(request_context: &RepositoryRequestContext) -> Result<Option<String>> {
+    let repo = &request_context.repo;
+    let repo_name = repo.repo_identity().name();
+
+    let should_display_message = justknobs::eval(
+        "scm/mononoke:display_repo_fetch_message_on_git_server",
+        None,
+        Some(repo_name),
+    )?;
+
+    if should_display_message {
+        Ok(repo.repo_config.git_configs.fetch_message.clone())
+    } else {
+        Ok(None)
+    }
 }

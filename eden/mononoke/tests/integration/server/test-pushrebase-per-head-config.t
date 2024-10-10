@@ -9,7 +9,7 @@
 Setup
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 setup_common_config "blob_files"
+  $ setup_common_config "blob_files"
   $ cat >> repos/repo/server.toml << EOF
   > [[bookmarks]]
   > regex=".*"
@@ -37,8 +37,8 @@ Setup
 
 Prepare the server-side repo
 
-  $ newrepo repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ hg debugdrawdag <<EOF
   > B
   > |
@@ -54,11 +54,11 @@ Prepare the server-side repo
 - Import and start Mononoke (the Mononoke repo name is 'repo')
 
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
   $ start_and_wait_for_mononoke_server
 Prepare the client-side repo
 
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-repo --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client-repo --noupdate
   $ cd $TESTTMP/client-repo
   $ hg debugdrawdag <<'EOS'
   > E C D
@@ -68,9 +68,9 @@ Prepare the client-side repo
 
 Push
 
-  $ sl push -r C --to date-rewrite -q
-  $ sl push -r D --to no-date-rewrite -q
-  $ sl push -r E --to use-repo-config -q
+  $ hg push -r C --to date-rewrite -q
+  $ hg push -r D --to no-date-rewrite -q
+  $ hg push -r E --to use-repo-config -q
 
 Check result
 

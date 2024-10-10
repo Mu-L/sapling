@@ -169,6 +169,7 @@ struct DaemonInfo {
 */
 struct PrivHelperInfo {
   1: bool connected;
+  2: pid_t pid;
 }
 
 /**
@@ -256,6 +257,11 @@ union Blake3Result {
   2: EdenError error;
 }
 
+union DigestHashResult {
+  1: BinaryHash digestHash;
+  2: EdenError error;
+}
+
 /**
  * Effectively a `struct timespec`
  */
@@ -308,6 +314,8 @@ enum FileAttributes {
   SHA1_HASH = 1,
   /**
    * Returns the size of a file. Returns an error for symlinks and directories.
+   * See DIGEST_SIZE if you would like to request the size of a file/directory
+   * that's stored in a Content Addressed Store (i.e. RE CAS).
    */
   FILE_SIZE = 2,
   /**
@@ -328,10 +336,30 @@ enum FileAttributes {
   OBJECT_ID = 8,
 
   /**
-   * Returns the BLAKE3 hash of a file. Returns an error for symlinks and directories,
-   * and non-regular files.
+   * Returns the BLAKE3 hash of a file. Returns an error for
+   * symlinks, directories, and non-regular files. Note: the digest_hash can be
+   * requested for directories as an alternative to blake3_hash.
    */
   BLAKE3_HASH = 16,
+
+  /**
+   * Returns the digest size of a given file or directory. This can be used
+   * together with DIGEST_HASH to determine the key that should be used to
+   * fetch a given file/directory from Content Addressed Stores (i.e. RE CAS).
+   * For directories, the size of the augmented manifest that represents the
+   * the directory is returned. For files, this field is the same as FILE_SIZE.
+   * Returns an error for any non-directory/non-file types (symlink, exe, etc).
+   */
+  DIGEST_SIZE = 32,
+
+  /**
+   * Returns the digest hash of a given file or directory. This can be used
+   * together with DIGEST_SIZE to determine the key that should be used to
+   * fetch a given file/directory from Content Addressed Stores (i.e. RE CAS).
+   * For files, this hash is just the blake3 hash of the given file. For
+   * directories, this hash is blake3 hash of all the directory's descendents.
+   */
+  DIGEST_HASH = 64,
 /* NEXT_ATTR = 2^x */
 } (cpp2.enum_type = 'uint64_t')
 
@@ -401,6 +429,26 @@ union ObjectIdOrError {
   2: EdenError error;
 }
 
+union DigestSizeOrError {
+  // Similar to ObjectIdOrError, it's possible for `digest size` to be unset
+  // even if there is no error.
+  //
+  // Notably, no digest size will be returned if any child file or directory
+  // has been modified.
+  1: i64 digestSize;
+  2: EdenError error;
+}
+
+union DigestHashOrError {
+  // Similar to ObjectIdOrError, it's possible for `digest hash` to be unset
+  // even if there is no error.
+  //
+  // Notably, no digest hash will be returned if any child file or directory
+  // has been modified.
+  1: BinaryHash digestHash;
+  2: EdenError error;
+}
+
 /**
  * Subset of attributes for a single file returned by getAttributesFromFiles()
  *
@@ -414,6 +462,8 @@ struct FileAttributeDataV2 {
   3: optional SourceControlTypeOrError sourceControlType;
   4: optional ObjectIdOrError objectId;
   5: optional Blake3OrError blake3;
+  6: optional DigestSizeOrError digestSize;
+  7: optional DigestHashOrError digestHash;
 }
 
 /**
@@ -1683,6 +1733,22 @@ struct GetBlockedFaultsResponse {
   1: list<string> keyValues;
 }
 
+struct CheckoutProgressInfo {
+  1: i64 updatedInodes;
+  2: i64 totalInodes;
+}
+
+struct CheckoutNotInProgress {}
+
+struct CheckoutProgressInfoRequest {
+  1: PathString mountPoint;
+}
+
+union CheckoutProgressInfoResponse {
+  1: CheckoutProgressInfo checkoutProgressInfo;
+  2: CheckoutNotInProgress noProgress;
+}
+
 service EdenService extends fb303_core.BaseService {
   list<MountInfo> listMounts() throws (1: EdenError ex);
   void mount(1: MountArgument info) throws (1: EdenError ex);
@@ -1717,6 +1783,16 @@ service EdenService extends fb303_core.BaseService {
     2: ThriftRootId snapshotHash,
     3: CheckoutMode checkoutMode,
     4: CheckOutRevisionParams params,
+  ) throws (1: EdenError ex);
+
+  /**
+   * Given an Eden mount point returns progress for the checkOutRevision end
+   * point. When a checkout is not in progress it returns CheckoutNotInProgress
+   *
+   * It errors out when no valid mountPoint is provided.
+   */
+  CheckoutProgressInfoResponse getCheckoutProgressInfo(
+    1: CheckoutProgressInfoRequest params,
   ) throws (1: EdenError ex);
 
   /**
@@ -1800,6 +1876,25 @@ service EdenService extends fb303_core.BaseService {
    * these for more details.
    */
   list<Blake3Result> getBlake3(
+    1: PathString mountPoint,
+    2: list<PathString> paths,
+    3: SyncBehavior sync,
+  ) throws (1: EdenError ex);
+
+  /**
+   * For each path, returns an EdenError instead of the DIGEST_HASH if any of the
+   * following occur:
+   * - directory is materialized (directory or child is/was modified since the
+   *   last checkout operation).
+   * - path identifies a non-existent file.
+   * - path identifies something that is not an ordinary file or directory (e.g.,
+   *   symlink or socket).
+   *
+   * Note: may return stale data if synchronizeWorkingCopy isn't called, and if
+   * the SyncBehavior specify a 0 timeout. see the documentation for both of
+   * these for more details.
+   */
+  list<DigestHashResult> getDigestHash(
     1: PathString mountPoint,
     2: list<PathString> paths,
     3: SyncBehavior sync,

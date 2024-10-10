@@ -10,15 +10,18 @@ use anyhow::anyhow;
 use anyhow::Result;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkKind;
+use commit_cloud::ctx::CommitCloudContext;
 use commit_cloud::CommitCloudRef;
 use commit_cloud_helpers::make_workspace_acl_name;
 #[cfg(fbcode_build)]
 use commit_cloud_intern_utils::acl_check::infer_workspace_identity;
 use context::CoreContext;
+use futures_stats::futures03::TimedFutureExt;
 use metaconfig_types::RepoConfigRef;
 use mononoke_types::path::MPath;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
+use permission_checker::AclProvider;
 use repo_bookmark_attrs::RepoBookmarkAttrsRef;
 use repo_permission_checker::RepoPermissionCheckerRef;
 
@@ -516,60 +519,169 @@ impl AuthorizationContext {
             .permitted_or_else(|| self.permission_denied(ctx, DeniedAction::GitImportOperation))
     }
 
+    /// Check whether the caller is allowed to create a repo.
+    pub async fn check_repo_create(
+        &self,
+        ctx: &CoreContext,
+        repo_name: &str,
+        acl_provider: &dyn AclProvider,
+    ) -> AuthorizationCheckOutcome {
+        let permitted = match self {
+            AuthorizationContext::FullAccess => true,
+            AuthorizationContext::Service(_service_name) => {
+                // Services should use the normal "identity" access for this
+                // (because service-level permissions are configured on existing repos)
+                // Services are allowed to do this if they are configured to
+                // allow the method.
+                false
+            }
+            AuthorizationContext::Identity => {
+                // Here we're replicating current logic used on our Git servers. Once we get rid of them
+                // let's make this more generic.
+                let acl_name = if repo_name.starts_with("aosp/") {
+                    "repos/git/aosp"
+                } else {
+                    "repos"
+                };
+                let acl = acl_provider.repo_acl(acl_name).await;
+                if let Ok(acl) = acl {
+                    acl.check_set(ctx.metadata().identities(), &["create"])
+                        .await
+                } else {
+                    false
+                }
+            }
+            AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity => {
+                false
+            }
+        };
+        AuthorizationCheckOutcome::from_permitted(permitted)
+    }
+
+    /// Require that the caller is allowed to create given repo.
+    pub async fn require_repo_create(
+        &self,
+        ctx: &CoreContext,
+        repo_name: &str,
+        acl_provider: &dyn AclProvider,
+    ) -> Result<(), AuthorizationError> {
+        self.check_repo_create(ctx, repo_name, acl_provider)
+            .await
+            .permitted_or_else(|| self.permission_denied(ctx, DeniedAction::CreateRepo))
+    }
+
     /// Check whether the caller is allowed to operate on certain commit cloud workspace.
     pub async fn check_commitcloud_operation(
         &self,
         ctx: &CoreContext,
         repo: &impl CommitCloudRef,
-        workspace: &str,
-        reponame: &str,
+        cc_ctx: &mut CommitCloudContext,
         action: &str,
     ) -> AuthorizationCheckOutcome {
         let permitted = match self {
             AuthorizationContext::FullAccess => true,
-            AuthorizationContext::Identity => {
-                #[allow(unused_assignments)]
-                let mut owner_check = true;
-
+            AuthorizationContext::Identity | AuthorizationContext::DraftOnlyIdentity => {
                 #[cfg(fbcode_build)]
                 {
-                    owner_check = match infer_workspace_identity(
-                        ctx.fb,
-                        workspace,
-                        Some(repo.commit_cloud().config.mocked_employees.clone()),
-                    )
-                    .await
-                    {
-                        Ok(Some(owner)) => ctx.metadata().identities().contains(&owner),
-                        Err(_) | Ok(None) => false,
+                    if cc_ctx.owner.is_none() {
+                        let (stats, inferred_owner) = infer_workspace_identity(
+                            ctx.fb,
+                            &cc_ctx.workspace,
+                            repo.commit_cloud().config.mocked_employees.clone(),
+                        )
+                        .timed()
+                        .await;
+
+                        ctx.scuba().clone().add_future_stats(&stats).log_with_msg(
+                            "commit cloud: inferred owner ",
+                            format!(
+                                "inferred owner: got outcome {:?} for workspace {}",
+                                inferred_owner, cc_ctx.workspace
+                            ),
+                        );
+
+                        match inferred_owner {
+                            Ok(owner) => {
+                                if owner.is_some() {
+                                    cc_ctx.set_owner(owner)
+                                } else {
+                                    // In CI some workspaces don't allow for an owner to be identified,
+                                    // don't block the commit cloud operation in these cases
+                                    ctx.scuba().clone().log_with_msg(
+                                        "commit cloud ACL check fail",
+                                        Some("unidentified owner, granting access".to_owned()),
+                                    );
+                                    return AuthorizationCheckOutcome::from_permitted(true);
+                                }
+                            }
+                            Err(_) => {}
+                        };
+                    }
+                    match &cc_ctx.owner {
+                        Some(owner) => {
+                            if ctx.metadata().identities().contains(owner) {
+                                ctx.scuba().clone().log_with_msg(
+                                    "commit cloud ACL check success",
+                                    Some("inferred owner check".to_owned()),
+                                );
+                                return AuthorizationCheckOutcome::from_permitted(true);
+                            }
+                        }
+                        None => (),
                     };
                 }
-                owner_check
-                    || match repo
-                        .commit_cloud()
-                        .commit_cloud_acl(&make_workspace_acl_name(workspace, reponame))
-                        .await
-                    {
-                        Ok(Some(checker)) => {
-                            checker
-                                .check_set(ctx.metadata().identities(), &[action])
-                                .await
+
+                match repo
+                    .commit_cloud()
+                    .commit_cloud_acl(&make_workspace_acl_name(
+                        &cc_ctx.workspace,
+                        &cc_ctx.reponame,
+                    ))
+                    .await
+                {
+                    Ok(Some(checker)) => {
+                        if checker
+                            .check_set(ctx.metadata().identities(), &[action])
+                            .await
+                        {
+                            ctx.scuba().clone().log_with_msg(
+                                "commit cloud ACL check success",
+                                Some("ACL check".to_owned()),
+                            );
+                            return AuthorizationCheckOutcome::from_permitted(true);
                         }
-                        Err(_) | Ok(None) => false,
                     }
-                    || match repo.commit_cloud().commit_cloud_acl("allow_list").await {
-                        Ok(Some(checker)) => {
-                            checker
-                                .check_set(ctx.metadata().identities(), &[action])
-                                .await
+                    Err(_) | Ok(None) => (),
+                }
+
+                match repo.commit_cloud().commit_cloud_acl("allow_list").await {
+                    Ok(Some(checker)) => {
+                        if checker
+                            .check_set(ctx.metadata().identities(), &[action])
+                            .await
+                        {
+                            ctx.scuba().clone().log_with_msg(
+                                "commit cloud ACL check success",
+                                Some("global allow list".to_owned()),
+                            );
+                            return AuthorizationCheckOutcome::from_permitted(true);
                         }
-                        Err(_) | Ok(None) => false,
                     }
-            }
-            AuthorizationContext::Service(_service_name) => false,
-            AuthorizationContext::ReadOnlyIdentity | AuthorizationContext::DraftOnlyIdentity => {
+                    Err(_) | Ok(None) => (),
+                }
+                ctx.scuba().clone().log_with_msg(
+                    "commit cloud ACL check failed",
+                    Some(format!(
+                        "No access to workspace {} on repo {} for client with identities {:?}",
+                        cc_ctx.workspace,
+                        cc_ctx.reponame,
+                        ctx.metadata().identities()
+                    )),
+                );
                 false
             }
+            AuthorizationContext::Service(_service_name) => false,
+            AuthorizationContext::ReadOnlyIdentity => false,
         };
         AuthorizationCheckOutcome::from_permitted(permitted)
     }
@@ -579,16 +691,18 @@ impl AuthorizationContext {
         &self,
         ctx: &CoreContext,
         repo: &impl CommitCloudRef,
-        workspace: &str,
-        reponame: &str,
+        cc_ctx: &mut CommitCloudContext,
         action: &str,
     ) -> Result<(), AuthorizationError> {
-        self.check_commitcloud_operation(ctx, repo, workspace, reponame, action)
+        self.check_commitcloud_operation(ctx, repo, cc_ctx, action)
             .await
             .permitted_or_else(|| {
                 self.permission_denied(
                     ctx,
-                    DeniedAction::CommitCloudOperation(action.to_string(), workspace.to_string()),
+                    DeniedAction::CommitCloudOperation(
+                        action.to_string(),
+                        cc_ctx.workspace.clone(),
+                    ),
                 )
             })
     }

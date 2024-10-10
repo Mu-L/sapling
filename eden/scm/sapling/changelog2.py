@@ -26,7 +26,7 @@ from . import (
     vfs as vfsmod,
     visibility,
 )
-from .changelog import changelogrevision, gitcommittext, hgcommittext, readfiles
+from .changelog import changelogrevision, gitcommittext, hgcommittext
 from .i18n import _
 from .node import bin, hex, nullid, nullrev, wdirid, wdirrev
 
@@ -183,21 +183,18 @@ class changelog:
         The Rust set uses DESC order by default. Setting `reverse` to True
         will reverse the order.
         """
-        return smartset.nameset(self, nodes, reverse, repo=self._reporef())
+        return smartset.nameset(nodes, reverse=reverse, repo=self._reporef())
 
-    def tonodes(self, revs):
+    def tonodes(self, revs, preserve_order=False):
         """Convert an IdSet to Set. The reverse of torevs."""
         # translate fullreposet to dag.all() that preserves the 'full' hint.
         if isinstance(revs, smartset.fullreposet):
             return self.dag.all()
-        # 'idset' has a fast path - pass the Rust-binding 'spans' directly.
-        if isinstance(revs, smartset.idset):
-            return self.inner.tonodes(revs._spans)
         # 'nameset' has a fast path - it contains the Rust nameset that uses
         # nodes directly.
         if isinstance(revs, smartset.nameset):
             return revs._set
-        return self.inner.tonodes(revs)
+        return self.inner.tonodes(revs, preserve_order=preserve_order)
 
     def _loadvisibleheads(self, svfs):
         return visibility.visibleheads(svfs)
@@ -328,8 +325,8 @@ class changelog:
         # For performance we skip verifying the commit hash, which can trigger
         # remote lookups of the parent hashes. A real-world example is:
         # log -r " reverse(master~1000::master) & not(file(r're:.*'))"
-        text = self.revision(node, verify=False)
-        return readfiles(text)
+        c = changelogrevision(self.revision(node, verify=False))
+        return c.files
 
     def add(
         self,
@@ -467,8 +464,9 @@ class changelog:
 
     def children(self, node):
         """Return children(node)"""
-        nodes = self.dag.children([node])
-        return list(nodes)
+        children = self.dag.children([node])
+        children_except_wdir = [n for n in children if n != wdirid]
+        return children_except_wdir
 
     def descendants(self, revs):
         """Return ((revs::) - roots(revs)) in revs."""
@@ -478,7 +476,7 @@ class changelog:
             result = dag.all()
         else:
             nodes = self.tonodes(revs)
-            result = dag.descendants(nodes) - dag.roots(nodes)
+            result = dag.descendants(nodes) - dag.roots(nodes) - dag.virtualgroup()
         for rev in self.torevs(result).iterasc():
             yield rev
 

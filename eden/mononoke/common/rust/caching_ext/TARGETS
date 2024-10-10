@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "caching_ext",
@@ -12,6 +11,7 @@ rust_library(
         "fbsource//third-party/rust:abomonation_derive",
         "fbsource//third-party/rust:maplit",
         "fbsource//third-party/rust:quickcheck",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
     ],
     deps = [
         "fbsource//third-party/rust:abomonation",

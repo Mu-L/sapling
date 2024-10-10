@@ -18,6 +18,7 @@ use changeset_info::ChangesetInfo;
 use commit_transformation::CommitRewrittenToEmpty;
 use commit_transformation::EmptyCommitFromLargeRepo;
 use commit_transformation::RewriteOpts;
+use commit_transformation::StripCommitExtras;
 use context::CoreContext;
 use live_commit_sync_config::LiveCommitSyncConfig;
 use metaconfig_types::CommitSyncConfigVersion;
@@ -26,7 +27,6 @@ use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::ChangesetId;
 use mononoke_types::RepositoryId;
 use movers::Movers;
-use synced_commit_mapping::SyncedCommitMapping;
 
 use crate::commit_sync_config_utils::get_git_submodule_action_by_version;
 use crate::commit_sync_outcome::CommitSyncOutcome;
@@ -74,10 +74,10 @@ pub(crate) enum CommitSyncInMemoryResult {
 
 impl CommitSyncInMemoryResult {
     /// Write the changes to blobstores and mappings
-    pub(crate) async fn write<M: SyncedCommitMapping + Clone + 'static, R: Repo>(
+    pub(crate) async fn write<R: Repo>(
         self,
         ctx: &CoreContext,
-        syncer: &CommitSyncer<M, R>,
+        syncer: &CommitSyncer<R>,
     ) -> Result<Option<ChangesetId>, Error> {
         use CommitSyncInMemoryResult::*;
         match self {
@@ -139,6 +139,7 @@ pub(crate) struct CommitInMemorySyncer<'a, R: Repo> {
     /// Read-only version of the large repo, which performs any writes in memory.
     /// This is needed to validate submodule expansion in large repo bonsais.
     pub large_repo: InMemoryRepo,
+    pub strip_commit_extras: StripCommitExtras,
 }
 
 impl<'a, R: Repo> CommitInMemorySyncer<'a, R> {
@@ -197,6 +198,7 @@ impl<'a, R: Repo> CommitInMemorySyncer<'a, R> {
         let rewrite_opts = RewriteOpts {
             commit_rewritten_to_empty,
             empty_commit_from_large_repo,
+            strip_commit_extras: self.strip_commit_extras,
         };
         let parent_count = cs.parents().count();
         if parent_count == 0 {

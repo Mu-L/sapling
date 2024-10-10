@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Error;
 use async_trait::async_trait;
@@ -18,7 +19,7 @@ use fbinit::FacebookInit;
 use futures::TryFutureExt;
 use hook_manager::ChangesetHook;
 use hook_manager::CrossRepoPushSource;
-use hook_manager::FileChange as FileDiff;
+use hook_manager::FileChangeType;
 use hook_manager::HookExecution;
 use hook_manager::HookManager;
 use hook_manager::HookRejectionInfo;
@@ -27,6 +28,7 @@ use hook_manager::PathContent;
 use hook_manager::PushAuthoredBy;
 use maplit::hashmap;
 use metaconfig_types::HookManagerParams;
+use mononoke_macros::mononoke;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::ChangesetId;
@@ -41,6 +43,7 @@ use mononoke_types_mocks::contentid::TWOS_CTID;
 use permission_checker::InternalAclProvider;
 use regex::Regex;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_permission_checker::AlwaysAllowRepoPermissionChecker;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sorted_vector_map::sorted_vector_map;
 use tests_utils::bookmark;
@@ -114,9 +117,9 @@ impl ChangesetHook for FileChangesChangesetHook {
             let (mut added, mut changed, mut removed) = (0, 0, 0);
             for (_path, change) in file_changes.into_iter() {
                 match change {
-                    FileDiff::Added(_) => added += 1,
-                    FileDiff::Changed(_, _) => changed += 1,
-                    FileDiff::Removed => removed += 1,
+                    FileChangeType::Added(_) => added += 1,
+                    FileChangeType::Changed(_, _) => changed += 1,
+                    FileChangeType::Removed => removed += 1,
                 }
             }
             Result::<_, Error>::Ok((added, changed, removed))
@@ -166,7 +169,7 @@ impl ChangesetHook for LatestChangesChangesetHook {
     }
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_cs_find_content_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let repo: BasicTestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -255,7 +258,7 @@ async fn test_cs_find_content_hook_with_blob_store(fb: FacebookInit) -> Result<(
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_cs_file_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let repo: BasicTestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -311,7 +314,7 @@ async fn test_cs_file_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_cs_latest_changes_hook_with_blob_store(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let repo: BasicTestRepo = test_repo_factory::build_empty(ctx.fb).await?;
@@ -368,7 +371,7 @@ async fn run_changeset_hooks_with_mgr(
 
     let changeset = changeset.unwrap_or_else(default_changeset);
     let res = hook_manager
-        .run_hooks_for_bookmark(
+        .run_changesets_hooks_for_bookmark(
             &ctx,
             vec![changeset].iter(),
             &BookmarkKey::new(bookmark_name).unwrap(),
@@ -404,22 +407,15 @@ async fn setup_hook_manager(
 
 fn default_changeset() -> BonsaiChangeset {
     BonsaiChangesetMut {
-        parents: Vec::new(),
         author: "Jeremy Fitzhardinge <jsgf@fb.com>".to_string(),
         author_date: DateTime::from_timestamp(1584887580, 0).expect("Getting timestamp"),
-        committer: None,
-        committer_date: None,
         message: "This is a commit message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
         file_changes: sorted_vector_map!{
             to_mpath("dir1/subdir1/subsubdir1/file_1") => FileChange::tracked(ONES_CTID, FileType::Symlink, 15, None, GitLfs::FullContent),
             to_mpath("dir1/subdir1/subsubdir2/file_1") => FileChange::tracked(TWOS_CTID, FileType::Regular, 17, None, GitLfs::FullContent),
             to_mpath("dir1/subdir1/subsubdir2/file_2") => FileChange::tracked(THREES_CTID, FileType::Regular, 2, None, GitLfs::FullContent),
         },
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }.freeze().expect("Created changeset")
 }
 
@@ -435,6 +431,7 @@ async fn hook_manager_repo(fb: FacebookInit, repo: &BasicTestRepo) -> HookManage
             disable_acl_checker: true,
             ..Default::default()
         },
+        Arc::new(AlwaysAllowRepoPermissionChecker {}),
         MononokeScubaSampleBuilder::with_discard(),
         "zoo".to_string(),
     )

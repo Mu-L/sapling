@@ -14,54 +14,35 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::format_err;
+use anyhow::anyhow;
 use anyhow::Error;
 use configmodel::Config;
 use cpython::*;
 use cpython_ext::ExtractInner;
 use cpython_ext::ExtractInnerRef;
-use cpython_ext::PyErr;
 use cpython_ext::PyNone;
 use cpython_ext::PyPath;
 use cpython_ext::PyPathBuf;
 use cpython_ext::ResultPyErrExt;
-use parking_lot::RwLock;
 use pyconfigloader::config;
-use revisionstore::repack;
+use pythonutil::to_node;
 use revisionstore::scmstore::FileAttributes;
 use revisionstore::scmstore::FileStore;
 use revisionstore::scmstore::TreeStore;
 use revisionstore::scmstore::TreeStoreBuilder;
-use revisionstore::ContentStore;
-use revisionstore::ContentStoreBuilder;
-use revisionstore::CorruptionPolicy;
-use revisionstore::DataPack;
-use revisionstore::DataPackStore;
-use revisionstore::DataPackVersion;
 use revisionstore::Delta;
-use revisionstore::ExtStoredPolicy;
 use revisionstore::HgIdDataStore;
 use revisionstore::HgIdHistoryStore;
 use revisionstore::HgIdMutableDeltaStore;
 use revisionstore::HgIdMutableHistoryStore;
-use revisionstore::HgIdRemoteStore;
-use revisionstore::HistoryPack;
-use revisionstore::HistoryPackStore;
-use revisionstore::HistoryPackVersion;
+use revisionstore::HistoryStore;
 use revisionstore::IndexedLogHgIdDataStore;
 use revisionstore::IndexedLogHgIdDataStoreConfig;
 use revisionstore::IndexedLogHgIdHistoryStore;
-use revisionstore::LegacyStore;
 use revisionstore::LocalStore;
 use revisionstore::Metadata;
 use revisionstore::MetadataStore;
 use revisionstore::MetadataStoreBuilder;
-use revisionstore::MutableDataPack;
-use revisionstore::MutableHistoryPack;
-use revisionstore::RemoteDataStore;
-use revisionstore::RemoteHistoryStore;
-use revisionstore::RepackKind;
-use revisionstore::RepackLocation;
 use revisionstore::SaplingRemoteApiFileStore;
 use revisionstore::SaplingRemoteApiTreeStore;
 use revisionstore::StoreKey;
@@ -75,12 +56,10 @@ use crate::datastorepyext::ContentDataStorePyExt;
 use crate::datastorepyext::HgIdDataStorePyExt;
 use crate::datastorepyext::HgIdMutableDeltaStorePyExt;
 use crate::datastorepyext::IterableHgIdDataStorePyExt;
-use crate::datastorepyext::RemoteDataStorePyExt;
 use crate::historystorepyext::HgIdHistoryStorePyExt;
 use crate::historystorepyext::HgIdMutableHistoryStorePyExt;
 use crate::historystorepyext::IterableHgIdHistoryStorePyExt;
 use crate::historystorepyext::RemoteHistoryStorePyExt;
-use crate::pythonutil::from_key;
 use crate::pythonutil::from_key_to_tuple;
 use crate::pythonutil::from_tuple_to_key;
 
@@ -88,46 +67,22 @@ mod datastorepyext;
 mod historystorepyext;
 mod impl_into;
 mod pythondatastore;
-mod pythonfilescmstore;
 mod pythonutil;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub use crate::pythondatastore::PythonHgIdDataStore;
-use crate::pythonfilescmstore::PythonFileScmStore;
-pub use crate::pythonutil::as_legacystore;
 
 pub fn init_module(py: Python, package: &str) -> PyResult<PyModule> {
     let name = [package, "revisionstore"].join(".");
     let m = PyModule::new(py, &name)?;
-    m.add_class::<datapack>(py)?;
-    m.add_class::<datapackstore>(py)?;
-    m.add_class::<historypack>(py)?;
-    m.add_class::<historypackstore>(py)?;
     m.add_class::<indexedlogdatastore>(py)?;
     m.add_class::<indexedloghistorystore>(py)?;
     m.add_class::<mutabledeltastore>(py)?;
     m.add_class::<mutablehistorystore>(py)?;
-    m.add_class::<pyremotestore>(py)?;
-    m.add_class::<contentstore>(py)?;
     m.add_class::<metadatastore>(py)?;
     m.add_class::<filescmstore>(py)?;
     m.add_class::<treescmstore>(py)?;
-    m.add_class::<pyfilescmstore>(py)?;
-    m.add(
-        py,
-        "repack",
-        py_fn!(
-            py,
-            repack_py(
-                packpath: &PyPath,
-                stores: Option<(PyObject, metadatastore)>,
-                full: bool,
-                shared: bool,
-                config: config
-            )
-        ),
-    )?;
     m.add(
         py,
         "repair",
@@ -146,44 +101,6 @@ pub fn init_module(py: Python, package: &str) -> PyResult<PyModule> {
     Ok(m)
 }
 
-fn repack_py(
-    py: Python,
-    packpath: &PyPath,
-    stores: Option<(PyObject, metadatastore)>,
-    full: bool,
-    shared: bool,
-    config: config,
-) -> PyResult<PyNone> {
-    let stores = if let Some((content, metadata)) = stores {
-        Some((as_legacystore(py, content)?, metadata.extract_inner(py)))
-    } else {
-        None
-    };
-
-    let kind = if full {
-        RepackKind::Full
-    } else {
-        RepackKind::Incremental
-    };
-
-    let location = if shared {
-        RepackLocation::Shared
-    } else {
-        RepackLocation::Local
-    };
-
-    repack(
-        packpath.to_path_buf(),
-        stores,
-        kind,
-        location,
-        &config.get_cfg(py),
-    )
-    .map_pyerr(py)?;
-
-    Ok(PyNone)
-}
-
 fn repair(
     py: Python,
     shared_path: &PyPath,
@@ -193,7 +110,7 @@ fn repair(
 ) -> PyResult<String> {
     let config = config.get_cfg(py);
     py.allow_threads::<Result<String>, _>(|| {
-        let mut message = ContentStore::repair(
+        let mut message = revisionstore::repair(
             shared_path.as_path(),
             local_path.map(|p| p.as_path()),
             suffix.map(|p| p.as_path()),
@@ -213,171 +130,6 @@ fn repair(
     .map_pyerr(py)
 }
 
-py_class!(class datapack |py| {
-    data store: Box<DataPack>;
-
-    def __new__(
-        _cls,
-        path: &PyPath
-    ) -> PyResult<datapack> {
-        datapack::create_instance(
-            py,
-            Box::new(DataPack::new(path, ExtStoredPolicy::Ignore).map_pyerr(py)?),
-        )
-    }
-
-    def path(&self) -> PyResult<PyPathBuf> {
-        self.store(py).base_path().try_into().map_pyerr(py)
-    }
-
-    def packpath(&self) -> PyResult<PyPathBuf> {
-        self.store(py).pack_path().try_into().map_pyerr(py)
-    }
-
-    def indexpath(&self) -> PyResult<PyPathBuf> {
-        self.store(py).index_path().try_into().map_pyerr(py)
-    }
-
-    def get(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyBytes> {
-        let store = self.store(py);
-        store.get_py(py, &name, node)
-    }
-
-    def getdelta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyObject> {
-        let store = self.store(py);
-        store.get_delta_py(py, &name, node)
-    }
-
-    def getdeltachain(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.get_delta_chain_py(py, &name, node)
-    }
-
-    def getmeta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyDict> {
-        let store = self.store(py);
-        store.get_meta_py(py, &name, node)
-    }
-
-    def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.get_missing_py(py, &mut keys.iter(py)?)
-    }
-
-    def iterentries(&self) -> PyResult<Vec<PyTuple>> {
-        let store = self.store(py);
-        store.iter_py(py)
-    }
-});
-
-py_class!(class datapackstore |py| {
-    data store: Box<DataPackStore>;
-    data path: PathBuf;
-
-    def __new__(_cls, path: &PyPath, deletecorruptpacks: bool = false, maxbytes: Option<u64> = None) -> PyResult<datapackstore> {
-        let corruption_policy = if deletecorruptpacks {
-            CorruptionPolicy::REMOVE
-        } else {
-            CorruptionPolicy::IGNORE
-        };
-
-        datapackstore::create_instance(py, Box::new(DataPackStore::new(path, corruption_policy, maxbytes, ExtStoredPolicy::Ignore)), path.to_path_buf())
-    }
-
-    def get(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyBytes> {
-        self.store(py).get_py(py, &name, node)
-    }
-
-    def getmeta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyDict> {
-        self.store(py).get_meta_py(py, &name, node)
-    }
-
-    def getdelta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyObject> {
-        self.store(py).get_delta_py(py, &name, node)
-    }
-
-    def getdeltachain(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyList> {
-        self.store(py).get_delta_chain_py(py, &name, node)
-    }
-
-    def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
-        self.store(py).get_missing_py(py, &mut keys.iter(py)?)
-    }
-
-    def markforrefresh(&self) -> PyResult<PyObject> {
-        self.store(py).force_rescan();
-        Ok(Python::None(py))
-    }
-});
-
-py_class!(class historypack |py| {
-    data store: Box<HistoryPack>;
-
-    def __new__(
-        _cls,
-        path: &PyPath
-    ) -> PyResult<historypack> {
-        historypack::create_instance(
-            py,
-            Box::new(HistoryPack::new(path.as_path()).map_pyerr(py)?),
-        )
-    }
-
-    def path(&self) -> PyResult<PyPathBuf> {
-        self.store(py).base_path().try_into().map_pyerr(py)
-    }
-
-    def packpath(&self) -> PyResult<PyPathBuf> {
-        self.store(py).pack_path().try_into().map_pyerr(py)
-    }
-
-    def indexpath(&self) -> PyResult<PyPathBuf> {
-        self.store(py).index_path().try_into().map_pyerr(py)
-    }
-
-    def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.get_missing_py(py, &mut keys.iter(py)?)
-    }
-
-    def getnodeinfo(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyTuple> {
-        let store = self.store(py);
-        store.get_node_info_py(py, &name, node)
-    }
-
-    def iterentries(&self) -> PyResult<Vec<PyTuple>> {
-        let store = self.store(py);
-        store.iter_py(py)
-    }
-});
-
-py_class!(class historypackstore |py| {
-    data store: Box<HistoryPackStore>;
-    data path: PathBuf;
-
-    def __new__(_cls, path: PyPathBuf, deletecorruptpacks: bool = false, maxbytes: Option<u64> = None) -> PyResult<historypackstore> {
-        let corruption_policy = if deletecorruptpacks {
-            CorruptionPolicy::REMOVE
-        } else {
-            CorruptionPolicy::IGNORE
-        };
-
-        historypackstore::create_instance(py, Box::new(HistoryPackStore::new(path.as_path(), corruption_policy, maxbytes)), path.to_path_buf())
-    }
-
-    def getnodeinfo(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyTuple> {
-        self.store(py).get_node_info_py(py, &name, node)
-    }
-
-    def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
-        self.store(py).get_missing_py(py, &mut keys.iter(py)?)
-    }
-
-    def markforrefresh(&self) -> PyResult<PyObject> {
-        self.store(py).force_rescan();
-        Ok(Python::None(py))
-    }
-});
-
 py_class!(class indexedlogdatastore |py| {
     data store: Box<IndexedLogHgIdDataStore>;
 
@@ -388,7 +140,6 @@ py_class!(class indexedlogdatastore |py| {
             Box::new(IndexedLogHgIdDataStore::new(
                 &BTreeMap::<&str, &str>::new(),
                 path.as_path(),
-                ExtStoredPolicy::Ignore,
                 &config,
                 StoreType::Permanent,
             ).map_pyerr(py)?),
@@ -461,38 +212,26 @@ py_class!(class indexedloghistorystore |py| {
 });
 
 fn make_mutabledeltastore(
-    packfilepath: Option<PyPathBuf>,
-    indexedlogpath: Option<PyPathBuf>,
+    indexedlogpath: PyPathBuf,
 ) -> Result<Arc<dyn HgIdMutableDeltaStore + Send>> {
-    let store: Arc<dyn HgIdMutableDeltaStore + Send> = if let Some(packfilepath) = packfilepath {
-        Arc::new(MutableDataPack::new(
-            packfilepath.as_path(),
-            DataPackVersion::One,
-        ))
-    } else if let Some(indexedlogpath) = indexedlogpath {
-        let config = IndexedLogHgIdDataStoreConfig {
-            max_log_count: None,
-            max_bytes_per_log: None,
-            max_bytes: None,
-        };
-        Arc::new(IndexedLogHgIdDataStore::new(
-            &BTreeMap::<&str, &str>::new(),
-            indexedlogpath.as_path(),
-            ExtStoredPolicy::Ignore,
-            &config,
-            StoreType::Permanent,
-        )?)
-    } else {
-        return Err(format_err!("Foo"));
+    let config = IndexedLogHgIdDataStoreConfig {
+        max_log_count: None,
+        max_bytes_per_log: None,
+        max_bytes: None,
     };
-    Ok(store)
+    Ok(Arc::new(IndexedLogHgIdDataStore::new(
+        &BTreeMap::<&str, &str>::new(),
+        indexedlogpath.as_path(),
+        &config,
+        StoreType::Permanent,
+    )?))
 }
 
 py_class!(pub class mutabledeltastore |py| {
     data store: Arc<dyn HgIdMutableDeltaStore>;
 
-    def __new__(_cls, packfilepath: Option<PyPathBuf> = None, indexedlogpath: Option<PyPathBuf> = None) -> PyResult<mutabledeltastore> {
-        let store = make_mutabledeltastore(packfilepath, indexedlogpath).map_pyerr(py)?;
+    def __new__(_cls, indexedlogpath: PyPathBuf) -> PyResult<mutabledeltastore> {
+        let store = make_mutabledeltastore(indexedlogpath).map_pyerr(py)?;
         mutabledeltastore::create_instance(py, store)
     }
 
@@ -584,25 +323,20 @@ impl HgIdMutableDeltaStore for mutabledeltastore {
 }
 
 fn make_mutablehistorystore(
-    packfilepath: Option<PyPathBuf>,
+    indexedlogpath: PyPathBuf,
 ) -> Result<Arc<dyn HgIdMutableHistoryStore + Send>> {
-    let store: Arc<dyn HgIdMutableHistoryStore + Send> = if let Some(packfilepath) = packfilepath {
-        Arc::new(MutableHistoryPack::new(
-            packfilepath.as_path(),
-            HistoryPackVersion::One,
-        ))
-    } else {
-        return Err(format_err!("No packfile path passed in"));
-    };
-
-    Ok(store)
+    Ok(Arc::new(IndexedLogHgIdHistoryStore::new(
+        indexedlogpath.as_path(),
+        &BTreeMap::<&str, &str>::new(),
+        StoreType::Permanent,
+    )?))
 }
 
 py_class!(pub class mutablehistorystore |py| {
     data store: Arc<dyn HgIdMutableHistoryStore>;
 
-    def __new__(_cls, packfilepath: Option<PyPathBuf>) -> PyResult<mutablehistorystore> {
-        let store = make_mutablehistorystore(packfilepath).map_pyerr(py)?;
+    def __new__(_cls, indexedlogpath: PyPathBuf) -> PyResult<mutablehistorystore> {
+        let store = make_mutablehistorystore(indexedlogpath).map_pyerr(py)?;
         mutablehistorystore::create_instance(py, store)
     }
 
@@ -676,176 +410,6 @@ impl HgIdMutableHistoryStore for mutablehistorystore {
     }
 }
 
-struct PyHgIdRemoteStoreInner {
-    py_store: PyObject,
-    datastore: Option<mutabledeltastore>,
-    historystore: Option<mutablehistorystore>,
-}
-
-pub struct PyHgIdRemoteStore {
-    inner: RwLock<PyHgIdRemoteStoreInner>,
-}
-
-impl PyHgIdRemoteStore {
-    fn prefetch(&self, keys: &[StoreKey]) -> Result<()> {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
-        let keys = keys
-            .iter()
-            .filter_map(|key| match key {
-                StoreKey::HgId(key) => Some(from_key(py, key)),
-                StoreKey::Content(_, _) => None,
-            })
-            .collect::<Vec<_>>();
-
-        if !keys.is_empty() {
-            let inner = self.inner.read();
-            inner
-                .py_store
-                .call_method(
-                    py,
-                    "prefetch",
-                    (
-                        inner.datastore.clone_ref(py),
-                        inner.historystore.clone_ref(py),
-                        keys,
-                    ),
-                    None,
-                )
-                .map_err(PyErr::from)?;
-        }
-        Ok(())
-    }
-}
-
-struct PyRemoteDataStore(Arc<PyHgIdRemoteStore>);
-struct PyRemoteHistoryStore(Arc<PyHgIdRemoteStore>);
-
-impl HgIdRemoteStore for PyHgIdRemoteStore {
-    fn datastore(
-        self: Arc<Self>,
-        store: Arc<dyn HgIdMutableDeltaStore>,
-    ) -> Arc<dyn RemoteDataStore> {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
-        self.inner.write().datastore = Some(mutabledeltastore::create_instance(py, store).unwrap());
-
-        Arc::new(PyRemoteDataStore(self))
-    }
-
-    fn historystore(
-        self: Arc<Self>,
-        store: Arc<dyn HgIdMutableHistoryStore>,
-    ) -> Arc<dyn RemoteHistoryStore> {
-        let gil = Python::acquire_gil();
-        let py = gil.python();
-
-        self.inner.write().historystore =
-            Some(mutablehistorystore::create_instance(py, store).unwrap());
-
-        Arc::new(PyRemoteHistoryStore(self))
-    }
-}
-
-impl RemoteDataStore for PyRemoteDataStore {
-    fn prefetch(&self, keys: &[StoreKey]) -> Result<Vec<StoreKey>> {
-        self.0.prefetch(keys)?;
-        self.get_missing(keys)
-    }
-
-    fn upload(&self, keys: &[StoreKey]) -> Result<Vec<StoreKey>> {
-        Ok(keys.to_vec())
-    }
-}
-
-impl HgIdDataStore for PyRemoteDataStore {
-    fn get(&self, key: StoreKey) -> Result<StoreResult<Vec<u8>>> {
-        self.prefetch(&[key.clone()])?;
-        self.0.inner.read().datastore.as_ref().unwrap().get(key)
-    }
-
-    fn get_meta(&self, key: StoreKey) -> Result<StoreResult<Metadata>> {
-        match self.prefetch(&[key.clone()]) {
-            Ok(_) => self
-                .0
-                .inner
-                .read()
-                .datastore
-                .as_ref()
-                .unwrap()
-                .get_meta(key),
-            Err(_) => Ok(StoreResult::NotFound(key)),
-        }
-    }
-
-    fn refresh(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl LocalStore for PyRemoteDataStore {
-    fn get_missing(&self, keys: &[StoreKey]) -> Result<Vec<StoreKey>> {
-        Ok(keys.to_vec())
-    }
-}
-
-impl RemoteHistoryStore for PyRemoteHistoryStore {
-    fn prefetch(&self, keys: &[StoreKey]) -> Result<()> {
-        self.0.prefetch(keys)
-    }
-}
-
-impl HgIdHistoryStore for PyRemoteHistoryStore {
-    fn get_node_info(&self, key: &Key) -> Result<Option<NodeInfo>> {
-        match self.prefetch(&[StoreKey::hgid(key.clone())]) {
-            Ok(()) => self
-                .0
-                .inner
-                .read()
-                .historystore
-                .as_ref()
-                .unwrap()
-                .get_node_info(key),
-            Err(_) => Ok(None),
-        }
-    }
-
-    fn refresh(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl LocalStore for PyRemoteHistoryStore {
-    fn get_missing(&self, keys: &[StoreKey]) -> Result<Vec<StoreKey>> {
-        self.0
-            .inner
-            .read()
-            .historystore
-            .as_ref()
-            .unwrap()
-            .get_missing(keys)
-    }
-}
-
-py_class!(pub class pyremotestore |py| {
-    data remote: Arc<PyHgIdRemoteStore>;
-
-    def __new__(_cls, py_store: PyObject) -> PyResult<pyremotestore> {
-        let store = Arc::new(PyHgIdRemoteStore { inner: RwLock::new(PyHgIdRemoteStoreInner { py_store, datastore: None, historystore: None }) });
-        pyremotestore::create_instance(py, store)
-    }
-});
-
-impl ExtractInnerRef for pyremotestore {
-    type Inner = Arc<PyHgIdRemoteStore>;
-
-    fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
-        self.remote(py)
-    }
-}
-
 // Python wrapper around an SaplingRemoteAPI-backed remote store for files.
 //
 // This type exists for the sole purpose of allowing an `SaplingRemoteApiFileStore`
@@ -892,128 +456,15 @@ impl ExtractInnerRef for edenapitreestore {
     }
 }
 
-py_class!(pub class contentstore |py| {
-    data store: Arc<ContentStore>;
-
-    def __new__(_cls,
-        path: Option<PyPathBuf>,
-        config: config,
-        remote: pyremotestore,
-        edenapi: Option<edenapifilestore> = None,
-        suffix: Option<String> = None,
-    ) -> PyResult<contentstore> {
-        let remotestore = remote.extract_inner(py);
-        let config = config.get_cfg(py);
-
-        let mut builder = ContentStoreBuilder::new(&config);
-
-        builder = if let Some(edenapi) = edenapi {
-            builder.remotestore(edenapi.extract_inner(py))
-        } else {
-            builder.remotestore(remotestore)
-        };
-
-        builder = if let Some(path) = path {
-            builder.local_path(path.as_path())
-        } else {
-            builder.no_local_store()
-        };
-
-        builder = if let Some(suffix) = suffix {
-            builder.suffix(suffix)
-        } else {
-            builder
-        };
-
-        let contentstore = builder.build().map_pyerr(py)?;
-        contentstore::create_instance(py, Arc::new(contentstore))
-    }
-
-    def get(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyBytes> {
-        let store = self.store(py);
-        store.get_py(py, &name, node)
-    }
-
-    def getdelta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyObject> {
-        let store = self.store(py);
-        store.get_delta_py(py, &name, node)
-    }
-
-    def getdeltachain(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.get_delta_chain_py(py, &name, node)
-    }
-
-    def getmeta(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyDict> {
-        let store = self.store(py);
-        store.get_meta_py(py, &name, node)
-    }
-
-    def getmissing(&self, keys: &PyObject) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.get_missing_py(py, &mut keys.iter(py)?)
-    }
-
-    def add(&self, name: PyPathBuf, node: &PyBytes, deltabasenode: &PyBytes, delta: &PyBytes, metadata: Option<PyDict> = None) -> PyResult<PyObject> {
-        let store = self.store(py);
-        store.add_py(py, &name, node, deltabasenode, delta, metadata)
-    }
-
-    def flush(&self) -> PyResult<Option<Vec<PyPathBuf>>> {
-        let store = self.store(py);
-        store.flush_py(py)
-    }
-
-    def prefetch(&self, keys: PyList) -> PyResult<PyObject> {
-        let store = self.store(py);
-        store.prefetch_py(py, keys)
-    }
-
-    def markforrefresh(&self) -> PyResult<PyNone> {
-        let store = self.store(py);
-        store.refresh_py(py)
-    }
-
-    def upload(&self, keys: PyList) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.upload_py(py, keys)
-    }
-
-    def blob(&self, name: &PyPath, node: &PyBytes) -> PyResult<PyBytes> {
-        let store = self.store(py);
-        store.blob_py(py, name, node)
-    }
-
-    def metadata(&self, name: &PyPath, node: &PyBytes) -> PyResult<PyDict> {
-        let store = self.store(py);
-        store.metadata_py(py, name, node)
-    }
-
-    def getsharedmutable(&self) -> PyResult<mutabledeltastore> {
-        let store = self.store(py);
-        mutabledeltastore::create_instance(py, store.get_shared_mutable())
-    }
-});
-
-impl ExtractInnerRef for contentstore {
-    type Inner = Arc<ContentStore>;
-
-    fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
-        self.store(py)
-    }
-}
-
 py_class!(class metadatastore |py| {
-    data store: Arc<MetadataStore>;
+    data store: Arc<dyn HistoryStore>;
 
     def __new__(_cls,
         path: Option<PyPathBuf>,
         config: config,
-        remote: pyremotestore,
-        edenapi: Option<edenapifilestore> = None,
+        edenapi: Option<edenapifilestore>,
         suffix: Option<String> = None
     ) -> PyResult<metadatastore> {
-        let remotestore = remote.extract_inner(py);
         let config = config.get_cfg(py);
 
         let mut builder = MetadataStoreBuilder::new(&config);
@@ -1021,7 +472,7 @@ py_class!(class metadatastore |py| {
         builder = if let Some(edenapi) = edenapi {
             builder.remotestore(edenapi.extract_inner(py))
         } else {
-            builder.remotestore(remotestore)
+            builder
         };
 
         builder = if let Some(path) = path {
@@ -1072,27 +523,14 @@ py_class!(class metadatastore |py| {
         store.refresh_py(py)
     }
 
-    def getsharedmutable(&self) -> PyResult<mutablehistorystore> {
+    def getsharedmutable(&self) -> PyResult<Self> {
         let store = self.store(py);
-        mutablehistorystore::create_instance(py, store.get_shared_mutable())
+        Self::create_instance(py, store.with_shared_only())
     }
 });
 
-impl ExtractInnerRef for metadatastore {
-    type Inner = Arc<MetadataStore>;
-
-    fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
-        self.store(py)
-    }
-}
-
 py_class!(pub class filescmstore |py| {
     data store: Arc<FileStore>;
-    data contentstore: Arc<ContentStore>;
-
-    def get_contentstore(&self) -> PyResult<contentstore> {
-        contentstore::create_instance(py, self.contentstore(py).clone())
-    }
 
     def fetch_content_blake3(&self, keys: PyList) -> PyResult<PyList> {
         let keys = keys
@@ -1176,9 +614,27 @@ py_class!(pub class filescmstore |py| {
         store.refresh_py(py)
     }
 
-    def upload(&self, keys: PyList) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.upload_py(py, keys)
+    def upload_lfs(&self, keys: PyList) -> PyResult<PyList> {
+        let keys = keys
+            .iter(py)
+            .map(|tuple| Ok(StoreKey::from(from_tuple_to_key(py, &tuple)?)))
+            .collect::<PyResult<Vec<StoreKey>>>()?;
+        let not_uploaded = self.store(py).upload_lfs(&keys).map_pyerr(py)?;
+
+        let results = PyList::new(py, &[]);
+        for key in not_uploaded {
+            match key {
+                StoreKey::HgId(key) => {
+                    let key_tuple = from_key_to_tuple(py, &key);
+                    results.append(py, key_tuple.into_object());
+                }
+                StoreKey::Content(_, _) => {
+                    return Err(anyhow!("Unsupported key: {:?}", key)).map_pyerr(py);
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     def blob(&self, name: &PyPath, node: &PyBytes) -> PyResult<PyBytes> {
@@ -1206,7 +662,7 @@ py_class!(pub class filescmstore |py| {
 
     def getsharedmutable(&self) -> PyResult<Self> {
         let store = self.store(py);
-        Self::create_instance(py, Arc::new(store.with_shared_only()), self.contentstore(py).clone())
+        Self::create_instance(py, Arc::new(store.with_shared_only()))
     }
 });
 
@@ -1225,33 +681,24 @@ impl ExtractInnerRef for filescmstore {
 fn make_treescmstore<'a>(
     path: Option<&'a Path>,
     config: &'a dyn Config,
-    remote: Arc<PyHgIdRemoteStore>,
     edenapi_treestore: Option<Arc<SaplingRemoteApiTreeStore>>,
     filestore: Option<Arc<FileStore>>,
     suffix: Option<String>,
-) -> Result<(Arc<TreeStore>, Arc<ContentStore>)> {
-    let mut builder = ContentStoreBuilder::new(&config);
+) -> Result<Arc<TreeStore>> {
     let mut treestore_builder = TreeStoreBuilder::new(&config);
 
-    builder = if let Some(path) = path {
+    if let Some(path) = path {
         treestore_builder = treestore_builder.local_path(path);
-        builder.local_path(path)
-    } else {
-        builder.no_local_store()
-    };
+    }
 
     if let Some(ref suffix) = suffix {
-        builder = builder.suffix(suffix);
         treestore_builder = treestore_builder.suffix(suffix);
     }
 
     // Extract SaplingRemoteApiAdapter for scmstore construction later on
-    builder = if let Some(edenapi) = edenapi_treestore {
+    if let Some(edenapi) = edenapi_treestore {
         treestore_builder = treestore_builder.edenapi(edenapi.clone());
-        builder.remotestore(edenapi)
-    } else {
-        builder.remotestore(remote)
-    };
+    }
 
     if let Some(filestore) = filestore {
         treestore_builder = treestore_builder.filestore(filestore);
@@ -1262,49 +709,23 @@ fn make_treescmstore<'a>(
 
     if let Some(indexedlog_local) = indexedlog_local {
         treestore_builder = treestore_builder.indexedlog_local(indexedlog_local.clone());
-        builder = builder.shared_indexedlog_local(indexedlog_local);
     }
 
     if let Some(ref cache) = indexedlog_cache {
         treestore_builder = treestore_builder.indexedlog_cache(cache.clone());
-        builder = builder.shared_indexedlog_shared(cache.clone());
     }
 
-    let contentstore = Arc::new(builder.build()?);
-
-    treestore_builder = treestore_builder.contentstore(contentstore.clone());
-
-    let treestore = Arc::new(treestore_builder.build()?);
-
-    Ok((treestore, contentstore))
-}
-
-py_class!(pub class pyfilescmstore |py| {
-    data inner: Arc<PythonFileScmStore>;
-
-    def __new__(_cls,
-        py_store: PyObject,
-    ) -> PyResult<pyfilescmstore> {
-        pyfilescmstore::create_instance(py, Arc::new(PythonFileScmStore::new(py_store)))
-    }
-});
-
-impl ExtractInnerRef for pyfilescmstore {
-    type Inner = Arc<PythonFileScmStore>;
-
-    fn extract_inner_ref<'a>(&'a self, py: Python<'a>) -> &'a Self::Inner {
-        self.inner(py)
-    }
+    Ok(Arc::new(treestore_builder.build()?))
 }
 
 py_class!(pub class treescmstore |py| {
     data store: Arc<TreeStore>;
-    data contentstore: Arc<ContentStore>;
+    // Caching wrapper around store.
+    data caching_store: Option<Arc<dyn storemodel::TreeStore>>;
 
     def __new__(_cls,
         path: Option<PyPathBuf>,
         config: config,
-        remote: pyremotestore,
         edenapi: Option<edenapitreestore> = None,
         filestore: Option<filescmstore> = None,
         suffix: Option<String> = None,
@@ -1312,20 +733,26 @@ py_class!(pub class treescmstore |py| {
         // Extract Rust Values
         let path = path.as_ref().map(|v| v.as_path());
         let config = config.get_cfg(py);
-        let remote = remote.extract_inner(py);
         let edenapi = edenapi.map(|v| v.extract_inner(py));
         let filestore = filestore.map(|v| v.extract_inner(py));
 
-        let (treestore, contentstore) = make_treescmstore(path, &config, remote, edenapi, filestore, suffix).map_pyerr(py)?;
+        let treestore = make_treescmstore(path, &config, edenapi, filestore, suffix).map_pyerr(py)?;
 
-        Self::create_instance(py, treestore, contentstore)
-    }
-
-    def get_contentstore(&self) -> PyResult<contentstore> {
-        contentstore::create_instance(py, self.contentstore(py).clone())
+        Self::create_instance(py, treestore, None)
     }
 
     def get(&self, name: PyPathBuf, node: &PyBytes) -> PyResult<PyBytes> {
+        if let Some(caching_store) = &self.caching_store(py) {
+            let repo_path = name.to_repo_path().map_pyerr(py)?;
+            let node = to_node(py, node);
+            return py.allow_threads(|| caching_store.get_content(
+                repo_path,
+                node,
+                FetchMode::AllowRemote,
+            )).map_pyerr(py)
+              .map(|bytes| PyBytes::new(py, &bytes[..]));
+        }
+
         let store = self.store(py);
         store.get_py(py, &name, node)
     }
@@ -1361,18 +788,29 @@ py_class!(pub class treescmstore |py| {
     }
 
     def prefetch(&self, keys: PyList) -> PyResult<PyObject> {
+        if let Some(caching_store) = &self.caching_store(py) {
+            let keys =  keys
+                .iter(py)
+                .map(|tuple| from_tuple_to_key(py, &tuple))
+                .collect::<PyResult<Vec<Key>>>()?;
+            py.allow_threads(|| caching_store.prefetch(keys)).map_pyerr(py)?;
+            return Ok(Python::None(py));
+        }
+
         let store = self.store(py);
-        store.prefetch_py(py, keys)
+
+        let keys = keys
+            .iter(py)
+            .map(|tuple| from_tuple_to_key(py, &tuple))
+            .collect::<PyResult<Vec<Key>>>()?;
+        py.allow_threads(|| TreeStore::prefetch(store, keys)).map_pyerr(py)?;
+
+        Ok(Python::None(py))
     }
 
     def markforrefresh(&self) -> PyResult<PyNone> {
         let store = self.store(py);
         HgIdDataStorePyExt::refresh_py(store, py)
-    }
-
-    def upload(&self, keys: PyList) -> PyResult<PyList> {
-        let store = self.store(py);
-        store.upload_py(py, keys)
     }
 
     def blob(&self, name: &PyPath, node: &PyBytes) -> PyResult<PyBytes> {
@@ -1385,9 +823,14 @@ py_class!(pub class treescmstore |py| {
         store.metadata_py(py, name, node)
     }
 
-    def getsharedmutable(&self) -> PyResult<mutabledeltastore> {
+    def getsharedmutable(&self) -> PyResult<Self> {
         let store = self.store(py);
-        mutabledeltastore::create_instance(py, store.get_shared_mutable())
+        Self::create_instance(py, Arc::new(TreeStore::with_shared_only(store)), None)
+    }
+
+    def metadatastore(&self) -> PyResult<metadatastore> {
+        let store = self.store(py);
+        metadatastore::create_instance(py, store.clone())
     }
 });
 

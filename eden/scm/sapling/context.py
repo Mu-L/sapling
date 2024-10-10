@@ -35,7 +35,6 @@ from . import (
     pathutil,
     phases,
     progress,
-    pycompat,
     revlog,
     scmutil,
     util,
@@ -55,6 +54,7 @@ from .node import (
     wdirrev,
 )
 from .pycompat import encodeutf8, isint, range
+from .utils.subtreeutil import SUBTREE_BRANCH_KEY
 
 filectx_or_bytes = Union["basefilectx", bytes]
 
@@ -177,7 +177,7 @@ class basectx:
         if mf1.hasgrafts():
             dmf1, dmf2 = bindings.manifest.treemanifest.applydiffgrafts(mf1, mf2)
         d = dmf1.diff(dmf2, matcher=match)
-        for fn, value in pycompat.iteritems(d):
+        for fn, value in d.items():
             if listclean:
                 cleanset.discard(fn)
             if fn in deletedset:
@@ -427,7 +427,9 @@ class changectx(basectx):
             if changeid == "null":
                 self._node = nullid
                 return
-            if changeid == "tip":
+
+            # Be backwards compatible for resolving the "default" branch.
+            if changeid == "tip" or changeid == "default":
                 self._node = repo.changelog.tip()
                 return
             try:
@@ -582,9 +584,16 @@ class changectx(basectx):
 
     def files(self):
         files = self._changeset.files
-        # git does not provide "files" in commit message - run diff to get it
-        if not files and git.isgitformat(self._repo):
-            files = sorted(self.manifest().diff(self.p1().manifest()).keys())
+        if not files:
+            # The following cases does not provide "files" in commit message,
+            # run diff to get it:
+            # - git repo
+            # - O(1) subtree copy
+            if (
+                git.isgitformat(self._repo)
+                or SUBTREE_BRANCH_KEY in self._changeset.extra
+            ):
+                files = sorted(self.manifest().diff(self.p1().manifest()).keys())
         return files
 
     def description(self):
@@ -592,12 +601,6 @@ class changectx(basectx):
 
     def shortdescription(self):
         return self.description().splitlines()[0]
-
-    def branch(self):
-        return encoding.tolocal(self._changeset.extra.get("branch"))
-
-    def closesbranch(self):
-        return "close" in self._changeset.extra
 
     def extra(self):
         """Return a dict of extra information."""
@@ -861,9 +864,6 @@ class basefilectx:
 
     def description(self):
         return self._changectx.description()
-
-    def branch(self):
-        return self._changectx.branch()
 
     def extra(self):
         return self._changectx.extra()
@@ -1515,18 +1515,6 @@ class committablectx(basectx):
         if extra:
             self._extra = extra.copy()
 
-        if repo.ui.configbool("experimental", "no-branch", True):
-            self._extra["branch"] = "default"
-        else:
-            if "branch" not in self._extra:
-                try:
-                    branch = encoding.fromlocal(self._repo.dirstate.branch())
-                except UnicodeDecodeError:
-                    raise error.Abort(_("branch name not in UTF-8!"))
-                self._extra["branch"] = branch
-            if self._extra["branch"] == "":
-                self._extra["branch"] = "default"
-
     def __bytes__(self):
         return encodeutf8(str(self))
 
@@ -1737,12 +1725,6 @@ class committablectx(basectx):
     def deleted(self):
         return self._status.deleted
 
-    def branch(self):
-        return encoding.tolocal(self._extra["branch"])
-
-    def closesbranch(self):
-        return "close" in self._extra
-
     def extra(self):
         return self._extra
 
@@ -1837,7 +1819,7 @@ class committablectx(basectx):
         # from immediately doing so for subsequent changing files
         self._repo.dirstate.write(self._repo.currenttransaction())
 
-    def dirty(self, missing=False, merge=True, branch=True):
+    def dirty(self, missing=False, merge=True):
         return False
 
     def loginfo(self):
@@ -1895,12 +1877,11 @@ class workingctx(committablectx):
         """get a file context from the working directory"""
         return workingfilectx(self._repo, path, workingctx=self, filelog=filelog)
 
-    def dirty(self, missing=False, merge=True, branch=True):
+    def dirty(self, missing=False, merge=True):
         "check whether a working directory is modified"
         # check current working dir
         return (
             (merge and self.p2())
-            or (branch and self.branch() != self.p1().branch())
             or self.modified()
             or self.added()
             or self.removed()
@@ -2553,7 +2534,6 @@ class overlayworkingctx(committablectx):
     def tomemctx(
         self,
         text,
-        branch=None,
         extra=None,
         date=None,
         parents=None,
@@ -2607,7 +2587,6 @@ class overlayworkingctx(committablectx):
             date=date,
             extra=extra,
             user=user,
-            branch=branch,
             editor=editor,
             loginfo=loginfo,
             mutinfo=mutinfo,
@@ -2895,7 +2874,6 @@ class memctx(committablectx):
         user=None,
         date=None,
         extra=None,
-        branch=None,
         editor=None,
         loginfo=None,
         mutinfo=None,
@@ -2911,8 +2889,6 @@ class memctx(committablectx):
             parents = [repo[nullid]]
         self._parents = parents
         self._filesset = set(files)
-        if branch is not None:
-            self._extra["branch"] = encoding.fromlocal(branch)
 
         if isinstance(filectxfn, patch.filestore):
             filectxfn = memfilefrompatch(filectxfn)
@@ -2937,7 +2913,6 @@ class memctx(committablectx):
         op,
         parents=None,
     ):
-
         extra = ctx.extra().copy()
         extra[op + "_source"] = ctx.hex()
         mutinfo = mutation.record(ctx.repo(), extra, [ctx.node()], op)
@@ -3394,7 +3369,6 @@ class metadataonlyctx(committablectx):
 
 
 class subtreecopyctx(committablectx):
-
     def __new__(cls, repo, to_mctx, *args, **kwargs):
         return super(subtreecopyctx, cls).__new__(cls, repo)
 
@@ -3452,7 +3426,9 @@ class subtreecopyctx(committablectx):
         return mn, self.files()
 
     def filectx(self, path, filelog=None):
-        raise NotImplementedError()
+        # todo: handle the case when the `path` is file one of `self._to_paths`
+        # currently, this is only used to read dirsync configs
+        return self._to_ctx.filectx(path, filelog=filelog)
 
     def files(self):
         return []

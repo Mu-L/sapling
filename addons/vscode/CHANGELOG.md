@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.1.59
+
+### Sep 26 2024
+
+- Automatically check VS Code diagnostics when submitting for review, and warn if there are error signals
+- Performance improvement to fetching commits from sl, reducing timeout errors
+
+## 0.1.58
+
+### Sep 16 2024
+
+- Fix focus preservation sometimes causing keystrokes in VS Code cmd-p menu to click buttons in ISL
+- Reduce excessive padding on the split modal
+
+## 0.1.57
+
+### Sep 9 2024
+
+- Unsaved edited commit messages are persisted across restarts
+- Deemphasize commits that only change files outside your cwd. Useful for large repos where you want to focus on changes in a specific subfolder.
+- Show the Uncommit button on commits in the middle of the stack, and warn about how it won't hide the original.
+- Add opt-r shortcut for quickly rebasing selected commit onto the current stack base
+- Scroll dropdown menus that would have gone off screen, like the settings dropdown
+- Allow collapsing the list of queued commands, and truncate extremely long lists
+
+## 0.1.56
+
+### Aug 26 2024
+
+- Horiztonally grow the quick commit title input as you type
+- Improve reliability of process exit messages, which could sometimes cause incorrect state
+- Fix VS Code extension host restarts disconnecting ISL. ISL now restarts on extension host restart
+- Add quick button to mount additional workspace folders from the ISL cwd dropdown
+- Ensure files are sorted the same in the comparison view as in the changed files list
+- Add VS Code config option to open files / diffs / comparisons beside the ISL window instead of re-using the same view column
+- Add file status name to the tooltip when hovering on a file
+- Remote "Beta" label on chunk selection UI
+
+## 0.1.55
+
+### Aug 13 2024
+
+- Improve error messages from `sl` to show the actual issue in the error UI
+- Allow selecting text from error messages without closing the error message
+- Truncate long lists of bookmarks
+- Fix focus getting lost when tabbing back and forth to ISL in VS Code
+- Make it possible to open the Comparison View in its own separate panel
+- Use configured VS Code font size and ligatures in the comparison view
+- Fix errors when trying to discard many files with some unchecked
+
 ## 0.1.54
 
 ### Jul 25 2024

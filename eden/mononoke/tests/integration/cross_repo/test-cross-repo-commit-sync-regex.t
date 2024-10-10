@@ -20,9 +20,9 @@
 
 -- setup hg client repos
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/fbs-hg-srv fbs-hg-cnt --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/ovr-hg-srv ovr-hg-cnt --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/meg-hg-srv meg-hg-cnt --noupdate
+  $ hg clone -q mono:fbs-mon fbs-hg-cnt --noupdate
+  $ hg clone -q mono:ovr-mon ovr-hg-cnt --noupdate
+  $ hg clone -q mono:meg-mon meg-hg-cnt --noupdate
 
 -- start mononoke
   $ start_and_wait_for_mononoke_server
@@ -32,20 +32,20 @@
 
 -- push to a bookmark that won't be synced
   $ cd "$TESTTMP"/ovr-hg-cnt
-  $ REPONAME=ovr-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ createfile arvr/somefile
   $ hg -q ci -m "ovrsource commit 2"
-  $ REPONAME=ovr-mon hgmn push -r . --to somebookmark -q --create
+  $ hg push -r . --to somebookmark -q --create
 
 -- now push to master
-  $ REPONAME=ovr-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ createfile arvr/newfile
   $ hg -q ci -m "ovrsource commit 3"
-  $ REPONAME=ovr-mon hgmn push -r . --to master_bookmark -q
-  $ REPONAME=ovr-mon hgmn up somebookmark -q
+  $ hg push -r . --to master_bookmark -q
+  $ hg up somebookmark -q
   $ createfile arvr/somefile2
   $ hg -q ci -m "ovrsource commit 4"
-  $ REPONAME=ovr-mon hgmn push -r . --to somebookmark -q --create
+  $ hg push -r . --to somebookmark -q --create
 
   $ mononoke_x_repo_sync 2 0 tail --bookmark-regex "master_bookmark" --catch-up-once |& grep -E '(processing|skipping)'
   * skipping log entry #2 for somebookmark (glob)

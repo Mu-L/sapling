@@ -14,6 +14,7 @@ from sapling import (
     cmdutil,
     commands,
     error,
+    hintutil,
     phases,
     registrar,
     revsetlang,
@@ -174,6 +175,10 @@ def _moverelative(ui, repo, args, opts, reverse=False):
         raise error.Abort(_("argument must be an integer"))
     if n <= 0:
         return
+
+    prev_steps_threshold = ui.configint("experimental", "prev.steps-threshold", 1000)
+    if reverse and n >= prev_steps_threshold:
+        hintutil.triggershow(ui, "prev-steps-threshold", n)
 
     if ui.configbool("amend", "alwaysnewest") and not ui.interactive():
         opts["newest"] = True

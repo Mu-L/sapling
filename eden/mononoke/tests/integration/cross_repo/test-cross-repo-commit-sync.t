@@ -21,19 +21,19 @@
 
 -- setup hg client repos
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/fbs-hg-srv fbs-hg-cnt --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/ovr-hg-srv ovr-hg-cnt --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/meg-hg-srv meg-hg-cnt --noupdate
+  $ hg clone -q mono:fbs-mon fbs-hg-cnt --noupdate
+  $ hg clone -q mono:ovr-mon ovr-hg-cnt --noupdate
+  $ hg clone -q mono:meg-mon meg-hg-cnt --noupdate
 
 -- start mononoke
   $ start_and_wait_for_mononoke_server
 -- create an older version of fbsource_master, with a single simple change
   $ cd "$TESTTMP"/fbs-hg-cnt
-  $ REPONAME=fbs-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ createfile fbcode/fbcodefile2_fbsource
   $ createfile arvr/arvrfile2_fbsource
   $ hg -q ci -m "fbsource commit 2"
-  $ REPONAME=fbs-mon hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 -- create newer version fbsource_master_newer with more complex changes and more commits
   $ createfile fbcode/fbcodefile3_fbsource
@@ -50,18 +50,18 @@
   $ hg -q ci -m "fbsource commit 8 (with removal of a moved path)"
   $ hg -q rm fbcode/arvrfile_copy_fbsource
   $ hg -q ci -m "fbsource commit 9 (with removal of a preserved path)"
-  $ REPONAME=fbs-mon hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 -- and a few more commits to master
   $ createfile fbcode/fbcodefile4_fbsource
   $ hg -q ci -m "fbsource commit 10"
-  $ REPONAME=fbs-mon hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 -- Make a commit to non-master bookmark
-  $ REPONAME=fbs-mon hgmn up -q 2
+  $ hg up -q 2
   $ createfile fbcode/non_master_file
   $ hg -q ci -m 'non-master commit'
-  $ REPONAME=fbs-mon hgmn push -r . --to somebook --create -q
+  $ hg push -r . --to somebook --create -q
 
 -- create unrelated bookmark in ovrsource that we'll intentionally skip
   $ cd "$TESTTMP/ovr-hg-cnt"
@@ -70,17 +70,17 @@
   $ hg up -q forgotten_bookmark
   $ createfile unrelated_file
   $ hg -q ci -m "unrelated ovrsource commit"
-  $ REPONAME=ovr-mon hgmn push -r . --to forgotten_bookmark --create -q
+  $ hg push -r . --to forgotten_bookmark --create -q
   $ export FORGOTTEN=$(hg whereami)
 
 -- push from ovrsource
   $ hg up -q master_bookmark
-  $ REPONAME=ovr-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ createfile arvr/arvrfile2_ovrsource
   $ createfile fbcode/fbcodefile2_ovrsource
   $ createfile Research/researchfile2_ovrsource
   $ hg -q ci -m "ovrsource commit 2"
-  $ REPONAME=ovr-mon hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 -- sync fbsource
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "INSERT INTO mutable_counters (repo_id, name, value) VALUES (0, 'xreposync_from_1', 1)";
@@ -89,22 +89,22 @@
   * processing log entry * (glob)
   * processing log entry * (glob)
   * processing log entry * (glob)
-  $ REPOIDLARGE=0 REPOIDSMALL=1 verify_wc master_bookmark
-  $ REPOIDLARGE=0 REPOIDSMALL=1 verify_wc fbsource/somebook
+  $ REPOIDLARGE=0 REPOIDSMALL=1 verify_wc $(mononoke_newadmin bookmarks --repo-id 0 get master_bookmark)
+  $ REPOIDLARGE=0 REPOIDSMALL=1 verify_wc $(mononoke_newadmin bookmarks --repo-id 0 get fbsource/somebook)
 
 -- sync ovrsource
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "INSERT INTO mutable_counters (repo_id, name, value) VALUES (0, 'xreposync_from_2', 2)"
   $ mononoke_x_repo_sync 2 0 tail --catch-up-once |& grep processing
   * processing log entry * (glob)
-  $ REPOIDLARGE=0 REPOIDSMALL=2 verify_wc master_bookmark
+  $ REPOIDLARGE=0 REPOIDSMALL=2 verify_wc $(mononoke_newadmin bookmarks --repo-id 0 get master_bookmark)
 
 -- one more push from fbsource to make sure resuming works
 -- it also tests rewrite dates mode
   $ cd "$TESTTMP/fbs-hg-cnt"
-  $ REPONAME=fbs-mon hgmn up master_bookmark -q
+  $ hg up master_bookmark -q
   $ createfile fbcode/resume
   $ hg -q ci -m "fbsource commit resume"
-  $ REPONAME=fbs-mon hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
   $ mononoke_x_repo_sync 1 0  --pushrebase-rewrite-dates tail --catch-up-once |& grep processing
   * processing log entry * (glob)
   $ flush_mononoke_bookmarks
@@ -112,8 +112,8 @@
   $ flush_mononoke_bookmarks
 
   $ cd "$TESTTMP/meg-hg-cnt"
-  $ REPONAME=meg-mon hgmn pull -q
-  $ REPONAME=meg-mon hgmn up master_bookmark -q
+  $ hg pull -q
+  $ hg up master_bookmark -q
   $ hg log -r ':' -T '{remotenames} {node} {date|shortdate} {desc}\n' | sort
    094d073f382b989af68f25267225b2e44ccf43c3 1970-01-01 fbsource commit 8 (with removal of a moved path)
    3b1e6b17c7fed77f139c75a5a241268d41d584f8 1970-01-01 fbsource commit 4 (with copy of preserved path into preserved path)

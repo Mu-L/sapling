@@ -23,8 +23,8 @@ Setup repositories
 
 -- init hg fbsource server repo
   $ cd $TESTTMP
-  $ hginit_treemanifest fbs-hg-srv
-  $ cd fbs-hg-srv
+  $ hginit_treemanifest repo
+  $ cd repo
 -- create an initial commits
   $ createfile fbcode/file_with_correct_history
   $ hg -q ci -m "master commit 1"
@@ -59,11 +59,11 @@ Setup repositories
 
 -- blobimport hg server repos into Mononoke repos
   $ cd "$TESTTMP"
-  $ REPOID="$FBS_REPOID" blobimport "fbs-hg-srv/.hg" "repo"
+  $ REPOID="$FBS_REPOID" blobimport "repo/.hg" "repo"
 
 -- setup hg client repos
   $ cd "$TESTTMP"
-  $ hgclone_treemanifest ssh://user@dummy/fbs-hg-srv fbs-hg-cnt --noupdate
+  $ hg clone -q mono:repo fbs-hg-cnt --noupdate
 
 Start mononoke server
   $ start_and_wait_for_mononoke_server
@@ -80,9 +80,9 @@ Start mononoke server
   $ REPOID=$FBS_REPOID  megarepo_tool merge cee330c0c3ab8ee70923d9b750e8fb56579e3be4db9fb41a54b63578c975bc8a f72c4b95a6f2e49b28c830406a0921e00621615b174cefee9f9e31c57346ac5a author "history fixup"  --mark-public --commit-date-rfc3339 "$COMMIT_DATE" --bookmark master 2> /dev/null
 
   $ cd "$TESTTMP"/fbs-hg-cnt
-  $ REPONAME=repo hgmn pull -q
+  $ hg pull -q
 
-  $ hgmn update -q master
+  $ hg update -q master
 
   $ ls *
   file_with_incorrect_history2
@@ -114,7 +114,7 @@ Start mononoke server
   │
   o  [MEGAREPO DELETE] history fixup (0) [public;c2a5523610c4]
   │
-  o  small repo commit 3 [public;ea8595b036ed]
+  o  small repo commit 3 [public;ea8595b036ed] default/correct_history_branch
   │
   o  small repo commit 2 [corrected history] [public;6c017a8ba0a6]
   │

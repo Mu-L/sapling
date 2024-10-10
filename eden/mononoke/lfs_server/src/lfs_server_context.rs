@@ -46,7 +46,11 @@ use lfs_protocol::RequestBatch;
 use lfs_protocol::RequestObject;
 use lfs_protocol::ResponseBatch;
 use metaconfig_types::RepoConfigRef;
+use mononoke_app::args::TLSArgs;
 use mononoke_types::ContentId;
+use openssl::ssl::SslConnector;
+use openssl::ssl::SslFiletype;
+use openssl::ssl::SslMethod;
 use repo_authorization::AuthorizationContext;
 use repo_permission_checker::RepoPermissionCheckerRef;
 use slog::Logger;
@@ -89,10 +93,23 @@ impl LfsServerContext {
         max_upload_size: Option<u64>,
         will_exit: Arc<AtomicBool>,
         config_handle: ConfigHandle<ServerConfig>,
+        tls_args: &Option<TLSArgs>,
     ) -> Result<Self, Error> {
-        let connector = HttpsConnector::new()
-            .map_err(Error::from)
-            .context(ErrorKind::HttpClientInitializationFailed)?;
+        let connector = match tls_args {
+            Some(tls_args) => {
+                let mut ssl_connector = SslConnector::builder(SslMethod::tls_client())?;
+                ssl_connector.set_ca_file(&tls_args.tls_ca)?;
+                ssl_connector.set_certificate_file(&tls_args.tls_certificate, SslFiletype::PEM)?;
+                ssl_connector.set_private_key_file(&tls_args.tls_private_key, SslFiletype::PEM)?;
+                let mut http_connector = HttpConnector::new();
+                http_connector.enforce_http(false);
+                HttpsConnector::with_connector(http_connector, ssl_connector)
+            }
+            None => HttpsConnector::new(),
+        }
+        .map_err(Error::from)
+        .context(ErrorKind::HttpClientInitializationFailed)?;
+
         let client = Client::builder().build(connector);
         let server_hostname =
             Arc::new(get_hostname().unwrap_or_else(|_| "UNKNOWN_HOSTNAME".to_string()));
@@ -374,11 +391,13 @@ impl RepositoryRequestContext {
         &self,
         batch: &RequestBatch,
     ) -> Result<Option<ResponseBatch>, ErrorKind> {
-        let uri = match self.uri_builder.upstream_batch_uri()? {
-            Some(uri) => uri,
-            None => {
-                return Ok(None);
-            }
+        // If upstream is disabled, we won't send an upstream request
+        if !self.repo.repo_config().lfs.use_upstream_lfs_server {
+            return Ok(None);
+        }
+        // If we don't have an upstream, we can't send an upstream request
+        let Some(uri) = self.uri_builder.upstream_batch_uri()? else {
+            return Ok(None);
         };
 
         let body: Bytes = serde_json::to_vec(&batch)
@@ -542,6 +561,7 @@ mod test {
 
     use fbinit::FacebookInit;
     use lfs_protocol::Sha256 as LfsSha256;
+    use mononoke_macros::mononoke;
     use mononoke_types::hash::Sha256;
     use mononoke_types::ContentId;
     use repo_permission_checker::AlwaysAllowRepoPermissionChecker;
@@ -666,7 +686,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_upload_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -680,7 +700,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_upload_uri_slash() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/"],
@@ -694,7 +714,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_upload_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/bar"],
@@ -708,7 +728,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_slash_upload_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/bar/"],
@@ -723,7 +743,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_download_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -737,7 +757,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_download_uri_slash() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/"],
@@ -751,7 +771,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_download_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/bar"],
@@ -765,7 +785,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_slash_download_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/bar/"],
@@ -779,7 +799,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_consistent_download_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -801,7 +821,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_upstream_batch_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -815,7 +835,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_basic_upstream_batch_uri_slash() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com/"],
@@ -829,7 +849,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_upstream_batch_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -843,7 +863,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_prefix_slash_upstream_batch_uri() -> Result<(), Error> {
         let b = uri_builder(
             vec!["http://foo.com"],
@@ -857,7 +877,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_acl_check_no_certificates(fb: FacebookInit) -> Result<(), Error> {
         let aclchecker = AlwaysAllowRepoPermissionChecker::new();
         let repo: Repo = test_repo_factory::TestRepoFactory::new(fb)?
@@ -872,7 +892,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_acl_check_action(fb: FacebookInit) -> Result<(), Error> {
         let mut aclchecker = MockRepoPermissionChecker::new();
         aclchecker
@@ -896,7 +916,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_host_maybe_port_to_host() -> Result<(), Error> {
         assert_eq!(host_maybe_port_to_host("example.com")?, "example.com");
         assert_eq!(host_maybe_port_to_host("example.com:90")?, "example.com");

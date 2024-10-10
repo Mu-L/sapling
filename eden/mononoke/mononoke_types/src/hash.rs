@@ -34,8 +34,6 @@ use gix_hash::ObjectId;
 use quickcheck::empty_shrinker;
 use quickcheck::Arbitrary;
 use quickcheck::Gen;
-use serde_derive::Deserialize;
-use serde_derive::Serialize;
 use sql::mysql;
 
 use crate::errors::MononokeTypeError;
@@ -43,6 +41,10 @@ use crate::thrift;
 
 // There is no NULL_HASH for Blake2 hashes. Any places that need a null hash should use an
 // Option type, or perhaps a list as desired.
+
+// Hash types deliberately do not derive serde `Serialize` or `Deserialize`,
+// as the default implementation uses a list of integers.  If you need to
+// serialize or deserialize these hashes, implement the traits directly.
 
 /// Raw BLAKE2b hash.
 ///
@@ -66,8 +68,6 @@ pub const BLAKE2_HASH_LENGTH_HEX: usize = BLAKE2_HASH_LENGTH_BYTES * 2;
     Ord,
     PartialOrd,
     Hash,
-    Serialize,
-    Deserialize,
     mysql::OptTryFromRowField
 )]
 pub struct Blake2([u8; BLAKE2_HASH_LENGTH_BYTES]);
@@ -230,18 +230,7 @@ impl Debug for Blake2 {
     }
 }
 
-#[derive(
-    Abomonation,
-    Clone,
-    Copy,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    Hash,
-    Serialize,
-    Deserialize
-)]
+#[derive(Abomonation, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Blake2Prefix(Blake2, Blake2);
 
 impl Blake2Prefix {
@@ -345,18 +334,7 @@ impl Debug for Blake2Prefix {
 
 macro_rules! impl_hash {
     ($type:ident, $size:literal, $error:ident) => {
-        #[derive(
-            Abomonation,
-            Clone,
-            Copy,
-            Eq,
-            PartialEq,
-            Ord,
-            PartialOrd,
-            Hash,
-            Serialize,
-            Deserialize
-        )]
+        #[derive(Abomonation, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
         pub struct $type([u8; $size]);
 
         impl $type {
@@ -546,17 +524,7 @@ impl From<EdenapiBlake3> for Blake3 {
 /// where <type> is the object type (blob, tree, etc), and NNNN is the blob size as a decimal
 /// string. Given that we know what the prefix is, we never explicitly store it so the objects
 /// can be shared with non-Git uses.
-#[derive(
-    Clone,
-    Copy,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    Hash,
-    Serialize,
-    Deserialize
-)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RichGitSha1 {
     sha1: GitSha1,
     ty: &'static str,
@@ -697,6 +665,7 @@ impl std::fmt::Display for MononokeDigest {
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
     use quickcheck::quickcheck;
     use quickcheck::TestResult;
 
@@ -747,14 +716,14 @@ mod test {
                                     0xfa, 0xab, 0x45, 0xcd,
                                     0xf1, 0x2f, 0xe3, 0xa8]);
 
-    #[test]
+    #[mononoke::test]
     fn test_nil() {
         let context = Context::new(b"");
         let nil = context.finish();
         assert_eq!(nil, NILHASH);
     }
 
-    #[test]
+    #[mononoke::test]
     fn snapshot_hash() {
         let context = Context::new(b"abc");
         assert_eq!(
@@ -764,7 +733,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_ok() {
         assert_eq!(
             NULL,
@@ -783,7 +752,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_and_display_prefix_ok() {
         // max length
         assert_eq!(
@@ -815,7 +784,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_thrift() {
         let null_thrift = thrift::id::Blake2(vec![0; BLAKE2_HASH_LENGTH_BYTES].into());
         assert_eq!(NULL, Blake2::from_thrift(null_thrift.clone()).unwrap());
@@ -826,7 +795,7 @@ mod test {
         assert_eq!(NILHASH.into_thrift(), nil_thrift);
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_git_sha1_thrift() {
         let null_thrift = thrift::id::GitSha1(vec![0; 20].into());
         assert_eq!(
@@ -836,7 +805,7 @@ mod test {
         assert_eq!(GitSha1([0; 20]).into_thrift(), null_thrift);
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_display() {
         assert_eq!(
             format!("{}", NULL),
@@ -848,7 +817,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_bad() {
         Blake2::from_str("").expect_err("unexpected OK - zero len");
         Blake2::from_str("0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a")
@@ -861,7 +830,7 @@ mod test {
             .expect_err("unexpected OK - badchar middle");
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_blake3_bad() {
         Blake3::from_str("").expect_err("unexpected OK - zero len");
         Blake3::from_str("0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a")
@@ -874,7 +843,7 @@ mod test {
             .expect_err("unexpected OK - badchar middle");
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_thrift_bad() {
         Blake2::from_thrift(thrift::id::Blake2(vec![].into()))
             .expect_err("unexpected OK - zero len");
@@ -884,7 +853,7 @@ mod test {
             .expect_err("unexpected Ok - too long");
     }
 
-    #[test]
+    #[mononoke::test]
     fn parse_blake3_thrift_bad() {
         Blake3::from_thrift(thrift::id::Blake3(vec![].into()))
             .expect_err("unexpected OK - zero len");
@@ -897,7 +866,7 @@ mod test {
     quickcheck_hash!(Blake2, 32);
     quickcheck_hash!(Blake3, 32);
 
-    #[test]
+    #[mononoke::test]
     fn test_parse_sha1() {
         let sha1: Sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709".parse().unwrap();
 
@@ -911,7 +880,7 @@ mod test {
         )
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_parse_sha256() {
         let sha256: Sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .parse()
@@ -928,7 +897,7 @@ mod test {
         )
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_parse_blake3() {
         let blake3: Blake3 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .parse()

@@ -17,9 +17,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ hg debugdrawdag <<EOF
   > C
   > |
@@ -33,9 +32,9 @@ create master bookmark
 
 blobimport normally, so sql is populated
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 blobimport, check blobstore puts are blocked
   $ rm -rf "$TESTTMP/blobstore/blobs/"*content*
-  $ blobimport repo-hg/.hg repo --with-readonly-storage=true | grep 'root cause:'
+  $ blobimport repo/.hg repo --with-readonly-storage=true | grep 'root cause:'
   * root cause: ReadOnlyPut("*") (glob)

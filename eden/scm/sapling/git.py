@@ -492,9 +492,11 @@ class RefName:
     - refs/tags/v1.0           # tag "v1.0"
     - refs/remotes/origin/foo  # branch "foo" in "origin" (note: no "heads/")
 
-    Note that tags are special. Git writes remote tags to "refs/tags/" and do
-    not keep tags under "refs/remotes". But here we put tags in "refs/remotes"
-    so they can be used like other remote names.
+    Note that tags are special. Git writes remote tags to "refs/tags/<tagname>"
+    and do not keep tags under "refs/remotes". But the tags are more like remote
+    names (immutable, different remotes might have different tags). So we put
+    tags in "refs/remotetags/<remote>/<tagname>" and sync them in metalog as
+    "<remote>/tags/<tagname>".
     """
 
     name: str
@@ -502,11 +504,19 @@ class RefName:
 
     def __str__(self):
         components = ["refs"]
+        name = self.name
         if self.remote:
-            components += ["remotes", self.remote]
-        elif all(not self.name.startswith(p) for p in ("visibleheads/", "tags/")):
+            if self.name.startswith("tags/"):
+                components += ["remotetags", self.remote]
+                name = name[len("tags/") :]
+            else:
+                components += ["remotes", self.remote]
+        elif all(
+            not self.name.startswith(p)
+            for p in ("visibleheads/", "remotetags/", "tags/")
+        ):
             components.append("heads")
-        components.append(self.name)
+        components.append(name)
         return "/".join(components)
 
     def withremote(self, remote):
@@ -668,9 +678,16 @@ def _writerefs(repo, refnodes):
         callgit(repo, ["update-ref", str(ref), hex(node)])
 
 
-def _syncfromgit(repo):
-    repo.invalidate(clearfilecache=True)
-    repo.changelog  # trigger updating metalog
+def _syncfromgit(repo, refnames=None):
+    """If refnames is set, sync just the given references.
+    Otherwise, invalidate everything and reload changelog+metalog.
+    """
+    if refnames is not None:
+        metalog = repo.metalog()
+        repo.changelog.inner.import_external_references(metalog, refnames)
+    else:
+        repo.invalidate(clearfilecache=True)
+        repo.changelog  # trigger updating metalog
 
 
 def urlremote(ui, source):
@@ -714,8 +731,11 @@ def pullrefspecs(repo, url, refspecs):
     if _supportwritefetchhead(repo):
         args.append("--no-write-fetch-head")
     args += [url] + refspecs
-    ret = rungit(repo, args)
-    _syncfromgit(repo)
+    with repo.lock(), repo.transaction("pull"):
+        ret = rungit(repo, args)
+        if ret == 0:
+            refnames = [s.split(":", 1)[1] for s in refspecs if ":" in s]
+            _syncfromgit(repo, refnames)
     return ret
 
 
@@ -735,11 +755,11 @@ def push(repo, dest, pushnode, to, force=False):
     url, remote = urlremote(repo.ui, dest)
     refname = RefName(name=to)
     refspec = "%s:%s" % (fromspec, refname)
-    ret = rungit(repo, ["push", url, refspec])
-    # update remotenames
-    if ret == 0:
-        name = refname.withremote(remote).remotename
-        with repo.lock(), repo.transaction("push"):
+    with repo.lock(), repo.transaction("push"):
+        ret = rungit(repo, ["push", url, refspec])
+        # update remotenames
+        if ret == 0:
+            name = refname.withremote(remote).remotename
             metalog = repo.metalog()
             namenodes = bookmod.decoderemotenames(metalog["remotenames"])
             if pushnode is None:
@@ -1076,7 +1096,7 @@ class Submodule:
         ):
             # dotgit repo, .git/sl not yet initialized.
             # read git HEAD directly.
-            git = bindings.gitcompat.RunGit(self.parentrepo.ui._rcfg, dotgit_path)
+            git = bindings.gitcompat.BareGit(dotgit_path, self.parentrepo.ui._rcfg)
 
             return git.resolve_head()
         else:

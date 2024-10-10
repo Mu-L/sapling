@@ -3,7 +3,6 @@
 #require no-eden
 
 
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
   $ . "$TESTDIR/infinitepush/library.sh"
@@ -17,12 +16,9 @@
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase=
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
   > [remotefilelog]
   > server=True
   > shallowtrees=True
-  > [treemanifest]
-  > server=True
   > EOF
   $ echo x > x
   $ hg commit -qAm 'add x'

@@ -16,9 +16,12 @@ use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Error;
 use async_trait::async_trait;
+use blobstore_factory::MetadataSqlFactory;
 use bookmarks::BookmarkKey;
 use bookmarks::Freshness;
 use cached_config::ConfigStore;
+use clientinfo::ClientEntryPoint;
+use clientinfo::ClientInfo;
 use cmdlib::args;
 use cmdlib::args::MononokeMatches;
 use cmdlib::helpers;
@@ -31,23 +34,23 @@ use cross_repo_sync::CommitSyncOutcome;
 use cross_repo_sync::CommitSyncer;
 use cross_repo_sync::Repo as CrossRepo;
 use cross_repo_sync::Syncers;
+use environment::MononokeEnvironment;
 use executor_lib::RepoShardedProcess;
 use executor_lib::RepoShardedProcessExecutor;
 use executor_lib::ShardedProcessExecutor;
 use fbinit::FacebookInit;
 use futures::future;
 use futures::TryStreamExt;
-use live_commit_sync_config::CONFIGERATOR_PUSHREDIRECT_ENABLE;
+use metadata::Metadata;
 use mononoke_types::ChangesetId;
-use pushredirect_enable::MononokePushRedirectEnable;
+use pushredirect::PushRedirectionConfig;
+use pushredirect::SqlPushRedirectionConfigBuilder;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sharding_ext::RepoShard;
 use slog::error;
 use slog::info;
 use slog::Logger;
 use stats::prelude::*;
-use synced_commit_mapping::SqlSyncedCommitMapping;
-use synced_commit_mapping::SyncedCommitMapping;
 use tokio::runtime::Runtime;
 
 define_stats! {
@@ -93,6 +96,7 @@ impl BookmarkValidateProcess {
 impl RepoShardedProcess for BookmarkValidateProcess {
     async fn setup(&self, repo: &RepoShard) -> anyhow::Result<Arc<dyn RepoShardedProcessExecutor>> {
         let logger = self.matches.logger();
+        let env = self.matches.environment();
         // For bookmark validator, two repos (i.e. source and target) are required as input
         let source_repo_name = repo.repo_name.clone();
         let target_repo_name = match repo.target_repo_name.clone() {
@@ -141,6 +145,7 @@ impl RepoShardedProcess for BookmarkValidateProcess {
         let executor = BookmarkValidateProcessExecutor::new(
             syncers,
             ctx,
+            env.clone(),
             config_store,
             source_repo_name,
             target_repo_name,
@@ -153,8 +158,9 @@ impl RepoShardedProcess for BookmarkValidateProcess {
 /// Struct representing the execution of the Bookmark Validate
 /// BP over the context of a provided repos.
 pub struct BookmarkValidateProcessExecutor {
-    syncers: Syncers<SqlSyncedCommitMapping, Repo>,
+    syncers: Syncers<Repo>,
     ctx: CoreContext,
+    env: Arc<MononokeEnvironment>,
     config_store: ConfigStore,
     cancellation_requested: Arc<AtomicBool>,
     source_repo_name: String,
@@ -163,8 +169,9 @@ pub struct BookmarkValidateProcessExecutor {
 
 impl BookmarkValidateProcessExecutor {
     fn new(
-        syncers: Syncers<SqlSyncedCommitMapping, Repo>,
+        syncers: Syncers<Repo>,
         ctx: CoreContext,
+        env: Arc<MononokeEnvironment>,
         config_store: ConfigStore,
         source_repo_name: String,
         target_repo_name: String,
@@ -172,6 +179,7 @@ impl BookmarkValidateProcessExecutor {
         Self {
             syncers,
             ctx,
+            env,
             config_store,
             source_repo_name,
             target_repo_name,
@@ -191,6 +199,7 @@ impl RepoShardedProcessExecutor for BookmarkValidateProcessExecutor {
         );
         loop_forever(
             self.ctx.clone(),
+            &self.env,
             self.syncers.clone(),
             &self.config_store,
             Arc::clone(&self.cancellation_requested),
@@ -226,12 +235,14 @@ impl RepoShardedProcessExecutor for BookmarkValidateProcessExecutor {
 #[fbinit::main]
 fn main(fb: FacebookInit) -> Result<(), Error> {
     let process = BookmarkValidateProcess::new(fb)?;
+    let logger = process.matches.logger().clone();
+    let matches = process.matches.clone();
+    let env = matches.environment();
+
     match process.matches.value_of("sharded-service-name") {
         Some(service_name) => {
             // The service name needs to be 'static to satisfy SM contract
             static SM_SERVICE_NAME: OnceLock<String> = OnceLock::new();
-            let logger = process.matches.logger().clone();
-            let matches = Arc::clone(&process.matches);
             let mut executor = ShardedProcessExecutor::new(
                 process.fb,
                 process.matches.runtime().clone(),
@@ -252,8 +263,6 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
             )
         }
         None => {
-            let logger = process.matches.logger().clone();
-            let matches = process.matches.clone();
             let runtime = matches.runtime();
             let ctx = create_core_context(fb, logger.clone());
             let config_store = matches.config_store();
@@ -266,7 +275,13 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
                 return Err(format_err!("Source repo must be a large repo!"));
             }
             helpers::block_execute(
-                loop_forever(ctx, syncers, config_store, Arc::new(AtomicBool::new(false))),
+                loop_forever(
+                    ctx,
+                    env,
+                    syncers,
+                    config_store,
+                    Arc::new(AtomicBool::new(false)),
+                ),
                 fb,
                 APP_NAME,
                 &logger,
@@ -278,32 +293,45 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
 }
 
 fn create_core_context(fb: FacebookInit, logger: Logger) -> CoreContext {
-    let session_container = SessionContainer::new_with_defaults(fb);
+    let mut metadata = Metadata::default();
+    metadata.add_client_info(ClientInfo::default_with_entry_point(
+        ClientEntryPoint::MegarepoBookmarksValidator,
+    ));
+
+    let session_container = SessionContainer::builder(fb)
+        .metadata(Arc::new(metadata))
+        .build();
     let scuba_sample = MononokeScubaSampleBuilder::with_discard();
+
     session_container.new_context(logger, scuba_sample)
 }
 
-async fn loop_forever<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
+async fn loop_forever<R: CrossRepo>(
     ctx: CoreContext,
-    syncers: Syncers<M, R>,
-    config_store: &ConfigStore,
+    env: &Arc<MononokeEnvironment>,
+    syncers: Syncers<R>,
+    _config_store: &ConfigStore,
     cancellation_requested: Arc<AtomicBool>,
 ) -> Result<(), Error> {
-    let large_repo_name = syncers
-        .large_to_small
-        .get_large_repo()
-        .repo_identity()
-        .name();
-    let small_repo_name = syncers
-        .large_to_small
-        .get_small_repo()
-        .repo_identity()
-        .name();
+    let large_repo = syncers.large_to_small.get_large_repo();
+    let small_repo = syncers.large_to_small.get_small_repo();
+    let large_repo_name = large_repo.repo_identity().name();
+    let small_repo_name = small_repo.repo_identity().name();
 
     let small_repo_id = syncers.small_to_large.get_small_repo().repo_identity().id();
 
-    let config_handle =
-        config_store.get_config_handle(CONFIGERATOR_PUSHREDIRECT_ENABLE.to_string())?;
+    let small_repo_config = small_repo.repo_config();
+    let sql_factory: MetadataSqlFactory = MetadataSqlFactory::new(
+        ctx.fb,
+        small_repo_config.storage_config.metadata.clone(),
+        env.mysql_options.clone(),
+        blobstore_factory::ReadOnlyStorage(env.readonly_storage.0),
+    )
+    .await?;
+    let builder = sql_factory
+        .open::<SqlPushRedirectionConfigBuilder>()
+        .await?;
+    let push_redirection_config = builder.build(small_repo.sql_query_config_arc());
 
     loop {
         // Before initiating every iteration, check if cancellation has been requested.
@@ -314,13 +342,10 @@ async fn loop_forever<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
             );
             return Ok(());
         }
-        let config: Arc<MononokePushRedirectEnable> = config_handle.get();
 
-        let enabled = config
-            .per_repo
-            .get(&(small_repo_id.id() as i64))
-            // We only care about public pushes because draft pushes are not in the bookmark
-            // update log at all.
+        let enabled = push_redirection_config
+            .get(&ctx, small_repo_id)
+            .await?
             .map_or(false, |enables| enables.public_push);
 
         if enabled {
@@ -374,9 +399,9 @@ impl From<Error> for ValidationError {
     }
 }
 
-async fn validate<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
+async fn validate<R: CrossRepo>(
     ctx: &CoreContext,
-    syncers: &Syncers<M, R>,
+    syncers: &Syncers<R>,
     large_repo_name: &str,
     small_repo_name: &str,
 ) -> Result<(), ValidationError> {
@@ -436,9 +461,9 @@ async fn validate<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
 }
 
 // Check that commit equivalent to maybe_small_cs_id was in large_bookmark log recently
-async fn check_large_bookmark_history<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
+async fn check_large_bookmark_history<R: CrossRepo>(
     ctx: &CoreContext,
-    syncers: &Syncers<M, R>,
+    syncers: &Syncers<R>,
     large_bookmark: &BookmarkKey,
     maybe_large_cs_id: &Option<ChangesetId>,
     maybe_small_cs_id: &Option<ChangesetId>,
@@ -530,9 +555,9 @@ async fn check_large_bookmark_history<M: SyncedCommitMapping + Clone + 'static, 
     }
 }
 
-async fn remap<M: SyncedCommitMapping + Clone + 'static, R: CrossRepo>(
+async fn remap<R: CrossRepo>(
     ctx: &CoreContext,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
     source_cs_id: &ChangesetId,
 ) -> Result<Option<ChangesetId>, Error> {
     let maybe_commit_sync_outcome = commit_syncer
@@ -554,6 +579,8 @@ mod tests {
     use cross_repo_sync::CandidateSelectionHint;
     use cross_repo_sync::CommitSyncContext;
     use cross_repo_sync_test_utils::init_small_large_repo;
+    use cross_repo_sync_test_utils::TestRepo;
+    use mononoke_macros::mononoke;
     use mononoke_types::DateTime;
     use tests_utils::bookmark;
     use tests_utils::resolve_cs_id;
@@ -561,10 +588,10 @@ mod tests {
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_simple_check_large_bookmark_history(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = &syncers.small_to_large;
         let large_repo = small_to_large.get_large_repo();
         let small_repo = small_to_large.get_small_repo();
@@ -636,10 +663,10 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_another_repo_check_large_bookmark_history(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = &syncers.small_to_large;
 
         let small_repo = small_to_large.get_small_repo();
@@ -708,12 +735,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_recently_created_check_large_bookmark_history(
         fb: FacebookInit,
     ) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = &syncers.small_to_large;
         let large_repo = small_to_large.get_large_repo();
 
@@ -761,12 +788,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_deleted_added_back_created_check_large_bookmark_history(
         fb: FacebookInit,
     ) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = &syncers.small_to_large;
         let large_repo = small_to_large.get_large_repo();
 
@@ -792,12 +819,12 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_check_large_bookmark_history_after_bookmark_moved(
         fb: FacebookInit,
     ) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
-        let (syncers, _, _, _) = init_small_large_repo(&ctx).await?;
+        let (syncers, _, _, _) = init_small_large_repo::<TestRepo>(&ctx).await?;
         let small_to_large = &syncers.small_to_large;
         let small_repo = small_to_large.get_small_repo();
         let large_repo = small_to_large.get_large_repo();

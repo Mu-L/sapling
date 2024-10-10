@@ -238,7 +238,7 @@ class phasecache:
                     revs = smartset.addset(revs, self.draftrevs(repo))
 
             if revs is None:
-                revs = smartset.idset(bindings.dag.spans([]), repo=repo)
+                revs = repo.changelog.torevset([])
 
             # XXX: 'secret' is treated as an ampty set.
             if subset is not None:
@@ -707,7 +707,7 @@ def analyzeremotephases(repo, subset, roots):
     # build list from dictionary
     draftroots = []
     nodemap = repo.changelog.nodemap  # to filter unknown nodes
-    for nhex, phase in pycompat.iteritems(roots):
+    for nhex, phase in roots.items():
         if nhex == "publishing":  # ignore data related to publish option
             continue
         node = bin(nhex)

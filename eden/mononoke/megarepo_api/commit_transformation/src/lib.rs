@@ -15,12 +15,12 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Error;
 use anyhow::Result;
-use blobrepo::save_bonsai_changesets;
 use blobrepo_utils::convert_diff_result_into_file_change_for_diamond_merge;
 use blobsync::copy_content;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bookmarks::BookmarksRef;
 use borrowed::borrowed;
+use changesets_creation::save_changesets;
 use commit_graph::CommitGraphRef;
 use commit_graph::CommitGraphWriterRef;
 use context::CoreContext;
@@ -288,10 +288,26 @@ pub enum EmptyCommitFromLargeRepo {
     Discard,
 }
 
+/// Whether Hg or Git extras should be stripped from the commit when rewriting
+/// it, to avoid creating many to one mappings between repos.
+/// This will depend on the default commit scheme of the source and target repos.
+///
+/// For example: if the source repo is Hg and the target repo is Git, two
+/// commits that differ only by hg extra would be mapped to the same git commit.
+/// In this case, hg extras have to be stripped when syncing from Hg to Git.
+#[derive(PartialEq, Debug, Copy, Clone, Default)]
+pub enum StripCommitExtras {
+    #[default]
+    None,
+    Hg,
+    Git,
+}
+
 #[derive(PartialEq, Debug, Copy, Clone, Default)]
 pub struct RewriteOpts {
     pub commit_rewritten_to_empty: CommitRewrittenToEmpty,
     pub empty_commit_from_large_repo: EmptyCommitFromLargeRepo,
+    pub strip_commit_extras: StripCommitExtras,
 }
 
 /// Create a version of `cs` with `Mover` applied to all changes
@@ -301,6 +317,7 @@ pub struct RewriteOpts {
 ///              not be present in the rewrite target
 /// - `Ok(Some(rewritten))` for a successful rewrite, which should be
 ///                         present in the rewrite target
+///
 /// The notion that the commit "should not be present in the rewrite
 /// target" means that the commit is not a merge and all of its changes
 /// were rewritten into nothingness by the `Mover`.
@@ -594,7 +611,9 @@ pub fn rewrite_commit_with_implicit_deletes<'a>(
                         })
                         .transpose()?;
 
-                    Ok(FileChange::Change(change.with_new_copy_from(new_copy_from)))
+                    Ok(FileChange::Change(
+                        change.with_new_copy_from(new_copy_from).without_git_lfs(),
+                    ))
                 }
 
                 // Rewrite both path and changes
@@ -704,6 +723,23 @@ pub fn rewrite_commit_with_implicit_deletes<'a>(
         cs.parents = new_parents
     }
 
+    let enable_commit_extra_stripping =
+        justknobs::eval("scm/mononoke:strip_commit_extras_in_xrepo_sync", None, None)?;
+
+    if enable_commit_extra_stripping {
+        match rewrite_opts.strip_commit_extras {
+            StripCommitExtras::Hg => {
+                // Set to an empty map to strip the hg extras
+                cs.hg_extra = Default::default();
+            }
+            StripCommitExtras::Git => {
+                // Set to an empty map to strip the git extras
+                cs.git_extra_headers = None;
+            }
+            StripCommitExtras::None => {}
+        };
+    }
+
     Ok(Some(cs))
 }
 
@@ -793,12 +829,12 @@ pub async fn upload_commits<'a>(
             copy_file_contents(ctx, sm_repo.as_ref(), target_repo, content_ids, |_| {}).await
         })
         .buffer_unordered(10)
-        .try_collect()
+        .try_collect::<()>()
         .await?;
 
     // Then copy from source repo
     copy_file_contents(ctx, source_repo, target_repo, files_to_sync, |_| {}).await?;
-    save_bonsai_changesets(rewritten_list.clone(), ctx.clone(), target_repo).await?;
+    save_changesets(ctx, target_repo, rewritten_list.clone()).await?;
     Ok(())
 }
 
@@ -843,22 +879,43 @@ mod test {
     use std::collections::HashSet;
 
     use anyhow::bail;
-    use blobrepo::save_bonsai_changesets;
     use blobstore::Loadable;
+    use bonsai_hg_mapping::BonsaiHgMapping;
+    use bookmarks::Bookmarks;
+    use commit_graph::CommitGraph;
+    use commit_graph::CommitGraphWriter;
     use fbinit::FacebookInit;
+    use filestore::FilestoreConfig;
     use maplit::btreemap;
     use maplit::hashmap;
     use maplit::hashset;
+    use mononoke_macros::mononoke;
     use mononoke_types::ContentId;
     use mononoke_types::FileType;
     use mononoke_types::GitLfs;
+    use repo_blobstore::RepoBlobstore;
+    use repo_derived_data::RepoDerivedData;
+    use repo_identity::RepoIdentity;
     use test_repo_factory::TestRepoFactory;
     use tests_utils::list_working_copy_utf8;
     use tests_utils::CreateCommitContext;
 
     use super::*;
 
-    #[test]
+    #[facet::container]
+    #[derive(Clone)]
+    pub struct Repo(
+        RepoIdentity,
+        RepoBlobstore,
+        dyn Bookmarks,
+        dyn BonsaiHgMapping,
+        RepoDerivedData,
+        CommitGraph,
+        dyn CommitGraphWriter,
+        FilestoreConfig,
+    );
+
+    #[mononoke::test]
     fn test_multi_mover_simple() -> Result<(), Error> {
         let mapping_rules = SourceMappingRules {
             default_prefix: "".to_string(),
@@ -872,7 +929,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_multi_mover_prefixed() -> Result<(), Error> {
         let mapping_rules = SourceMappingRules {
             default_prefix: "prefix".to_string(),
@@ -886,7 +943,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_multi_mover_prefixed_with_exceptions() -> Result<(), Error> {
         let mapping_rules = SourceMappingRules {
             default_prefix: "prefix".to_string(),
@@ -914,7 +971,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_multi_mover_longest_prefix_first() -> Result<(), Error> {
         let mapping_rules = SourceMappingRules {
             default_prefix: "prefix".to_string(),
@@ -971,7 +1028,7 @@ mod test {
         assert_eq!(expected, minimized);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_minimize_file_change_set(_fb: FacebookInit) {
         verify_minimized(
             vec![("a", Some(())), ("a", None)],
@@ -993,9 +1050,9 @@ mod test {
         );
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_marks_lossy_conversions(fb: FacebookInit) -> Result<(), Error> {
-        let repo: blobrepo::BlobRepo = TestRepoFactory::new(fb)?.build().await?;
+        let repo: Repo = TestRepoFactory::new(fb)?.build().await?;
         let ctx = CoreContext::test_mock(fb);
         let mapping_rules = SourceMappingRules {
             default_prefix: "".to_string(), // Rewrite to root
@@ -1125,11 +1182,11 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_marks_lossy_conversions_with_implicit_deletes(
         fb: FacebookInit,
     ) -> Result<(), Error> {
-        let repo: blobrepo::BlobRepo = TestRepoFactory::new(fb)?.build().await?;
+        let repo: Repo = TestRepoFactory::new(fb)?.build().await?;
         let ctx = CoreContext::test_mock(fb);
         // This commit is not lossy because all paths will be mapped somewhere.
         let first = CreateCommitContext::new_root(&ctx, &repo)
@@ -1216,9 +1273,9 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit(fb: FacebookInit) -> Result<(), Error> {
-        let repo: blobrepo::BlobRepo = TestRepoFactory::new(fb)?.build().await?;
+        let repo: Repo = TestRepoFactory::new(fb)?.build().await?;
         let ctx = CoreContext::test_mock(fb);
         let first = CreateCommitContext::new_root(&ctx, &repo)
             .add_file("path", "path")
@@ -1370,7 +1427,7 @@ mod test {
         file_change_filters: Vec<FileChangeFilter<'_>>,
         mut expected_affected_paths: HashMap<&str, HashSet<NonRootMPath>>,
     ) -> Result<(), Error> {
-        let repo: blobrepo::BlobRepo = TestRepoFactory::new(fb)?.build().await?;
+        let repo: Repo = TestRepoFactory::new(fb)?.build().await?;
 
         let ctx = CoreContext::test_mock(fb);
         // This commit is not lossy because all paths will be mapped somewhere.
@@ -1403,7 +1460,7 @@ mod test {
 
         async fn verify_affected_paths(
             ctx: &CoreContext,
-            repo: &blobrepo::BlobRepo,
+            repo: &Repo,
             rewritten_bcs_id: &ChangesetId,
             expected_affected_paths: HashSet<NonRootMPath>,
         ) -> Result<()> {
@@ -1463,7 +1520,7 @@ mod test {
 
     /// Tests applying a file change filter before getting the implicit deletes
     /// and calling the multi mover.
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_with_file_changes_filter_on_both_based_on_path(
         fb: FacebookInit,
     ) -> Result<(), Error> {
@@ -1506,7 +1563,7 @@ mod test {
 
     /// Tests applying a file change filter before getting the implicit deletes
     /// and calling the multi mover.
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_with_file_changes_filter_on_both_based_on_file_type(
         fb: FacebookInit,
     ) -> Result<(), Error> {
@@ -1555,7 +1612,7 @@ mod test {
 
     /// Tests applying a file change filter only before getting the
     /// implicit deletes.
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_with_file_changes_filter_implicit_deletes_only(
         fb: FacebookInit,
     ) -> Result<(), Error> {
@@ -1615,7 +1672,7 @@ mod test {
     /// This test uses the file type as the filter condition, to showcase
     /// a more realistic scenario where we only want to apply the filter to
     /// the multi mover.
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_rewrite_commit_with_file_changes_filter_multi_mover_only(
         fb: FacebookInit,
     ) -> Result<(), Error> {
@@ -1663,7 +1720,7 @@ mod test {
 
     async fn test_rewrite_commit_cs_id<'a>(
         ctx: &'a CoreContext,
-        repo: &'a impl Repo,
+        repo: &'a Repo,
         bcs_id: ChangesetId,
         parents: HashMap<ChangesetId, ChangesetId>,
         multi_mover: MultiMover<'a>,
@@ -1683,7 +1740,7 @@ mod test {
 
     async fn test_rewrite_commit_cs_id_with_file_change_filters<'a>(
         ctx: &'a CoreContext,
-        repo: &'a impl Repo,
+        repo: &'a Repo,
         bcs_id: ChangesetId,
         parents: HashMap<ChangesetId, ChangesetId>,
         multi_mover: MultiMover<'a>,
@@ -1708,14 +1765,14 @@ mod test {
             maybe_rewritten.ok_or_else(|| anyhow!("can't rewrite commit {}", bcs_id))?;
         let rewritten = rewritten.freeze()?;
 
-        save_bonsai_changesets(vec![rewritten.clone()], ctx.clone(), repo).await?;
+        save_changesets(ctx, repo, vec![rewritten.clone()]).await?;
 
         Ok(rewritten.get_changeset_id())
     }
 
     async fn assert_changeset_is_marked_lossy<'a>(
         ctx: &'a CoreContext,
-        repo: &'a impl Repo,
+        repo: &'a Repo,
         bcs_id: ChangesetId,
     ) -> Result<(), Error> {
         let bcs = bcs_id.load(ctx, &repo.repo_blobstore()).await?;
@@ -1730,7 +1787,7 @@ mod test {
 
     async fn assert_changeset_is_not_marked_lossy<'a>(
         ctx: &'a CoreContext,
-        repo: &'a impl Repo,
+        repo: &'a Repo,
         bcs_id: ChangesetId,
     ) -> Result<(), Error> {
         let bcs = bcs_id.load(ctx, &repo.repo_blobstore()).await?;
@@ -1743,7 +1800,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_directory_multi_mover() -> Result<(), Error> {
         let mapping_rules = SourceMappingRules {
             default_prefix: "prefix".to_string(),
@@ -1756,6 +1813,54 @@ mod test {
         );
 
         assert_eq!(multi_mover(&MPath::ROOT)?, vec![MPath::new("prefix")?]);
+        Ok(())
+    }
+
+    #[mononoke::fbinit_test]
+    async fn test_rewrite_lfs_file(fb: FacebookInit) -> Result<(), Error> {
+        let repo: Repo = TestRepoFactory::new(fb)?.build().await?;
+        let ctx = CoreContext::test_mock(fb);
+        let mapping_rules = SourceMappingRules {
+            default_prefix: "small".to_string(),
+            ..Default::default()
+        };
+        let multi_mover = create_source_to_target_multi_mover(mapping_rules)?;
+        // Add an LFS file to the repo
+        let first = CreateCommitContext::new_root(&ctx, &repo)
+            .add_file("foo.php", "foo content")
+            .add_file_with_type_and_lfs(
+                "large.avi",
+                "large file content",
+                FileType::Regular,
+                GitLfs::canonical_pointer(),
+            )
+            .commit()
+            .await?;
+
+        let first_rewritten_bcs_id = test_rewrite_commit_cs_id(
+            &ctx,
+            &repo,
+            first,
+            HashMap::new(),
+            multi_mover.clone(),
+            None,
+        )
+        .await?;
+
+        let first_rewritten_bcs = first_rewritten_bcs_id
+            .load(&ctx, &repo.repo_blobstore())
+            .await?;
+        let changes: Vec<_> = first_rewritten_bcs
+            .file_changes()
+            .map(|(path, change)| (path.to_string(), change.git_lfs().unwrap()))
+            .collect();
+        assert_eq!(
+            changes,
+            vec![
+                ("small/foo.php".to_string(), GitLfs::full_content()),
+                ("small/large.avi".to_string(), GitLfs::full_content())
+            ],
+        );
         Ok(())
     }
 }

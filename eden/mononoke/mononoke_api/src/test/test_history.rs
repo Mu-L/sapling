@@ -17,9 +17,11 @@ use context::CoreContext;
 use fbinit::FacebookInit;
 use futures::stream::TryStreamExt;
 use maplit::hashset;
+use mononoke_macros::mononoke;
 use mononoke_types::DateTime;
 use tests_utils::CreateCommitContext;
 
+use crate::repo::Repo;
 use crate::ChangesetHistoryOptions;
 use crate::ChangesetId;
 use crate::ChangesetLinearHistoryOptions;
@@ -57,8 +59,10 @@ use crate::RepoContext;
 //   o "a1"
 //
 // Commits e1, e2 and e3 are empty (contain no file changes).
-async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, HashMap<&'static str, ChangesetId>)> {
-    let repo = test_repo_factory::build_empty(ctx.fb).await?;
+async fn init_repo(
+    ctx: &CoreContext,
+) -> Result<(RepoContext<Repo>, HashMap<&'static str, ChangesetId>)> {
+    let repo: Repo = test_repo_factory::build_empty(ctx.fb).await?;
     let mut changesets = HashMap::new();
 
     changesets.insert(
@@ -197,7 +201,7 @@ async fn init_repo(ctx: &CoreContext) -> Result<(RepoContext, HashMap<&'static s
     Ok((repo_ctx, changesets))
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_path_history(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
@@ -382,7 +386,7 @@ async fn assert_history(
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_history(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;
@@ -591,7 +595,7 @@ async fn commit_history(fb: FacebookInit) -> Result<()> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_linear_history(fb: FacebookInit) -> Result<()> {
     let ctx = CoreContext::test_mock(fb);
     let (repo, changesets) = init_repo(&ctx).await?;

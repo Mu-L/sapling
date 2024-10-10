@@ -19,7 +19,6 @@ use anyhow::Result;
 use blobstore::Loadable;
 use bookmark_renaming::BookmarkRenamer;
 use bookmarks::BookmarkKey;
-use cacheblob::InProcessLease;
 use cacheblob::LeaseOps;
 use commit_transformation::upload_commits;
 use context::CoreContext;
@@ -46,6 +45,7 @@ use pushrebase_hooks::get_pushrebase_hooks;
 use repo_blobstore::RepoBlobstoreRef;
 use scuba_ext::MononokeScubaSampleBuilder;
 use slog::debug;
+use synced_commit_mapping::ArcSyncedCommitMapping;
 use synced_commit_mapping::EquivalentWorkingCopyEntry;
 use synced_commit_mapping::SyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitSourceRepo;
@@ -91,18 +91,14 @@ use crate::types::SubmoduleDeps;
 use crate::types::Target;
 
 #[derive(Clone)]
-pub struct CommitSyncer<M, R> {
-    // TODO: Finish refactor and remove pub
-    pub mapping: M,
+pub struct CommitSyncer<R> {
     pub repos: CommitSyncRepos<R>,
     pub live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
     pub scuba_sample: MononokeScubaSampleBuilder,
-    pub x_repo_sync_lease: Arc<dyn LeaseOps>,
 }
 
-impl<M, R> fmt::Debug for CommitSyncer<M, R>
+impl<R> fmt::Debug for CommitSyncer<R>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -112,9 +108,8 @@ where
     }
 }
 
-impl<M, R> CommitSyncer<M, R>
+impl<R> CommitSyncer<R>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: Repo,
 {
     // ------------------------------------------------------------------------
@@ -122,41 +117,8 @@ where
 
     pub fn new(
         ctx: &CoreContext,
-        mapping: M,
         repos: CommitSyncRepos<R>,
         live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-        lease: Arc<dyn LeaseOps>,
-    ) -> Self {
-        Self::new_with_live_commit_sync_config_impl(
-            ctx,
-            mapping,
-            repos,
-            live_commit_sync_config,
-            lease,
-        )
-    }
-
-    pub fn new_with_live_commit_sync_config(
-        ctx: &CoreContext,
-        mapping: M,
-        repos: CommitSyncRepos<R>,
-        live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-    ) -> Self {
-        Self::new_with_live_commit_sync_config_impl(
-            ctx,
-            mapping,
-            repos,
-            live_commit_sync_config,
-            Arc::new(InProcessLease::new()),
-        )
-    }
-
-    fn new_with_live_commit_sync_config_impl(
-        ctx: &CoreContext,
-        mapping: M,
-        repos: CommitSyncRepos<R>,
-        live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
-        x_repo_sync_lease: Arc<dyn LeaseOps>,
     ) -> Self {
         let scuba_sample = reporting::get_scuba_sample(
             ctx,
@@ -165,23 +127,19 @@ where
         );
 
         Self {
-            mapping,
             repos,
             live_commit_sync_config,
             scuba_sample,
-            x_repo_sync_lease,
         }
     }
 
     // Builds the syncer that can be used for opposite sync direction.
     // Note: doesn't support large-to-small as input right now
-    pub fn reverse(&self) -> Result<CommitSyncer<M, R>, Error> {
+    pub fn reverse(&self) -> Result<CommitSyncer<R>, Error> {
         Ok(Self {
-            mapping: self.mapping.clone(),
             repos: self.repos.reverse()?,
             live_commit_sync_config: self.live_commit_sync_config.clone(),
             scuba_sample: self.scuba_sample.clone(),
-            x_repo_sync_lease: self.x_repo_sync_lease.clone(),
         })
     }
 
@@ -413,8 +371,16 @@ where
         }
     }
 
-    pub fn get_mapping(&self) -> &M {
-        &self.mapping
+    pub fn get_mapping(&self) -> &ArcSyncedCommitMapping {
+        self.repos.get_mapping()
+    }
+
+    pub fn get_x_repo_sync_lease(&self) -> &Arc<dyn LeaseOps> {
+        self.repos.get_x_repo_sync_lease()
+    }
+
+    pub fn get_live_commit_sync_config(&self) -> &Arc<dyn LiveCommitSyncConfig> {
+        &self.live_commit_sync_config
     }
 
     pub async fn get_movers_by_version(
@@ -453,7 +419,7 @@ where
             Source(self.repos.get_source_repo().repo_identity().id()),
             Target(self.repos.get_target_repo().repo_identity().id()),
             Source(source_cs_id),
-            &self.mapping,
+            self.get_mapping(),
             self.repos.get_direction(),
             Arc::clone(&self.live_commit_sync_config),
         )
@@ -466,12 +432,12 @@ where
         ctx: &'a CoreContext,
         source_cs_id: ChangesetId,
     ) -> Result<Option<CommitSyncOutcome>, Error> {
-        get_commit_sync_outcome::<M>(
+        get_commit_sync_outcome(
             ctx,
             Source(self.repos.get_source_repo().repo_identity().id()),
             Target(self.repos.get_target_repo().repo_identity().id()),
             Source(source_cs_id),
-            &self.mapping,
+            self.get_mapping(),
             self.repos.get_direction(),
             Arc::clone(&self.live_commit_sync_config),
         )
@@ -490,7 +456,7 @@ where
             Source(self.repos.get_source_repo().repo_identity().id()),
             Target(self.repos.get_target_repo().repo_identity().id()),
             source_cs_id,
-            &self.mapping,
+            self.get_mapping(),
             hint,
             self.repos.get_direction(),
             Arc::clone(&self.live_commit_sync_config),
@@ -565,7 +531,7 @@ where
             Source(self.repos.get_source_repo().repo_identity().id()),
             Target(self.repos.get_target_repo().repo_identity().id()),
             source_cs_id,
-            &self.mapping,
+            self.get_mapping(),
             self.repos.get_direction(),
             Arc::clone(&self.live_commit_sync_config),
         )
@@ -631,7 +597,7 @@ where
             return Err(ErrorKind::XRepoSyncDisabled.into());
         }
 
-        let CommitSyncer { repos, mapping, .. } = self.clone();
+        let repos = self.repos.clone();
         let (source_repo, target_repo, source_is_large) = match repos {
             CommitSyncRepos::LargeToSmall {
                 large_repo,
@@ -684,7 +650,7 @@ where
             }
         };
 
-        mapping
+        self.get_mapping()
             .insert_equivalent_working_copy(ctx, wc_entry)
             .await
             .map(|_| ())
@@ -780,7 +746,7 @@ where
             if xrepo_disable_commit_sync_lease || disable_lease {
                 sync().await?;
             } else {
-                run_with_lease(ctx, &self.x_repo_sync_lease, lease_key, checker, sync).await?;
+                run_with_lease(ctx, self.get_x_repo_sync_lease(), lease_key, checker, sync).await?;
             }
         }
 
@@ -840,6 +806,7 @@ where
             .collect::<Vec<_>>();
         let large_repo = self.get_large_repo();
         let large_in_memory_repo = InMemoryRepo::from_repo(large_repo, fallback_repos)?;
+        let strip_commit_extras = self.repos.get_strip_commit_extras()?;
 
         CommitInMemorySyncer {
             ctx,
@@ -850,6 +817,7 @@ where
             small_to_large: matches!(self.repos, CommitSyncRepos::SmallToLarge { .. }),
             submodule_deps,
             large_repo: large_in_memory_repo,
+            strip_commit_extras,
         }
         .unsafe_sync_commit_in_memory(ctx, cs, commit_sync_context, expected_version)
         .await?

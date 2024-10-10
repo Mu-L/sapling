@@ -113,7 +113,7 @@ export class ImportStackOperation extends Operation {
         // "Default". Might be replaced by existingInfo.
         bookmarks: [],
         remoteBookmarks: [],
-        filesSample: [],
+        filePathsSample: [],
         phase: 'draft',
         // Note: using `existingInfo` here might be not accurate.
         ...(existingInfo || {}),

@@ -14,9 +14,8 @@ Setup repo config
 
 Setup repo
 
-  $ hginit_treemanifest repo-orig
-  $ cd repo-orig
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo s > smallfile
   $ hg commit -Aqm "add small file"
   $ hg bookmark master_bookmark -r tip
@@ -24,19 +23,17 @@ Setup repo
 
 Blobimport the hg repo to Mononoke
 
-  $ blobimport repo-orig/.hg repo
+  $ blobimport repo/.hg repo
   $ mononoke --scuba-dataset "file://$TESTTMP/log.json"
   $ wait_for_mononoke
 
 
 Create a new client repository. Enable SaplingRemoteAPI there.
 
-  $ hgclone_treemanifest ssh://user@dummy/repo-orig repo-clone --noupdate --config extensions.remotenames=
+  $ hg clone -q mono:repo repo-clone --noupdate
   $ cd repo-clone
-  $ setup_hg_client
-  $ setup_hg_edenapi
-  $ hgmn pull -q -B master_bookmark
-  $ hgmn up -q master_bookmark
+  $ hg pull -q -B master_bookmark
+  $ hg up -q master_bookmark
   $ cat smallfile
   s
 

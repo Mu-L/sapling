@@ -1,4 +1,3 @@
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 load("//eden/scm:targets.bzl", "rust_python_library")
 
 oncall("sapling")
@@ -38,9 +37,10 @@ rust_python_library(
         "//eden/scm/lib/edenapi/types:edenapi_types",
         "//eden/scm/lib/minibytes:minibytes",
         "//eden/scm/lib/progress/model:progress-model",
+        "//eden/scm/lib/repo/url:repourl",
         "//eden/scm/lib/revisionstore:revisionstore",
-        "//eden/scm/lib/storemodel/hgstore:hgstore",
         "//eden/scm/lib/types:types",
+        "//eden/scm/lib/util/format-util:format-util",
         "//eden/scm/saplingnative/bindings/modules/pyconfigloader:pyconfigloader",
         "//eden/scm/saplingnative/bindings/modules/pyrevisionstore:pyrevisionstore",
     ],

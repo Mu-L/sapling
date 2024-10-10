@@ -8,15 +8,13 @@ Push treeonly commits from a treeonly shallow repo to a treeonly server
   $ setconfig remotefilelog.reponame=x remotefilelog.cachepath=$TESTTMP/cache
   $ configure dummyssh
 
-  $ newrepo server --config extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  $ setconfig treemanifest.server=True extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
+  $ newrepo server
   $ enable pushrebase
 
   $ newrepo client
   $ setconfig paths.default=ssh://user@dummy/server
   $ echo remotefilelog >> .hg/requires
-  $ enable treemanifest remotefilelog pushrebase remotenames
-  $ setconfig treemanifest.sendtrees=True treemanifest.treeonly=True
+  $ enable pushrebase remotenames
   $ drawdag <<'EOS'
   > B
   > |
@@ -33,7 +31,6 @@ Push treeonly commits from a treeonly shallow repo to a treeonly server
 
 Make server treeonly and push trees to it
   $ switchrepo server
-  $ setconfig treemanifest.treeonly=True
 
   $ switchrepo client
   $ hg up $A

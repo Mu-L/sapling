@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::fs::read_to_string;
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -23,12 +24,18 @@ use dag::Dag;
 use dag::Group;
 use dag::Vertex;
 use dag::VertexListWithOptions;
+use format_util::commit_text_to_root_tree_id;
+use format_util::git_sha1_deserialize;
+use format_util::git_sha1_serialize;
+use format_util::hg_sha1_deserialize;
+use format_util::hg_sha1_serialize;
+use format_util::split_hg_file_metadata;
 use futures::lock::Mutex;
 use futures::lock::MutexGuard;
-use hgstore::split_hg_file_metadata;
 use manifest_tree::FileType;
 use manifest_tree::Flag;
 use manifest_tree::TreeEntry;
+use manifest_tree::TreeManifest;
 use metalog::CommitOptions;
 use metalog::MetaLog;
 use minibytes::Bytes;
@@ -36,8 +43,10 @@ use mutationstore::MutationStore;
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::RawRwLock;
 use parking_lot::RwLock;
+use repourl::RepoUrl;
 use sha1::Digest;
 use sha1::Sha1;
+use storemodel::types::hgid::NULL_ID;
 use storemodel::types::AugmentedDirectoryNode;
 use storemodel::types::AugmentedFileNode;
 use storemodel::types::AugmentedTree;
@@ -48,7 +57,9 @@ use storemodel::types::HgId;
 use storemodel::types::Parents;
 use storemodel::types::RepoPathBuf;
 use storemodel::FileAuxData;
+use storemodel::ReadRootTreeIds;
 use storemodel::SerializationFormat;
+use tracing::instrument;
 use zstore::Id20;
 use zstore::Zstore;
 
@@ -97,30 +108,33 @@ pub struct EagerRepo {
 /// File, tree, commit contents.
 ///
 /// SHA1 is verifiable. For HG this means `sorted([p1, p2])` and filelog rename
-/// metadata is included in values.
+/// metadata is included in values. For Git this means `type size` is part of
+/// the prefix of the stored blobs.
 ///
 /// This is meant to be mainly a content store. We currently "abuse" it to
-/// answer filelog history. The filelog (filenode) and linknodes are
-/// considered tech-debt and we hope to replace them with fastlog APIs which
-/// serve sub-graph with `(commit, path)` as graph nodes.
+/// answer filelog history when ght HG format is used. The filelog (filenode)
+/// and linknodes are considered tech-debt and we hope to replace them with
+/// fastlog APIs which serve sub-graph with `(commit, path)` as graph nodes.
 ///
-/// We don't use `(p1, p2)` for commit parents because it loses the parent
-/// order. The DAG storage is used to answer commit parents instead.
+/// Unlike file history, we don't use `(p1, p2)` for commit parents because it
+/// loses the parent order, which is important for commits. The callsite should
+/// use a dedicated DAG implementation to answer commit parents questions.
 ///
-/// Currently backed by [`zstore::Zstore`]. For simplicity, we don't use the
-/// zstore delta-compress features, and don't store different types separately.
+/// Currently backed by [`zstore::Zstore`], a pure content key-value store.
 #[derive(Clone)]
 pub struct EagerRepoStore {
     pub(crate) inner: Arc<RwLock<Zstore>>,
+    pub(crate) format: SerializationFormat,
 }
 
 impl EagerRepoStore {
     /// Open an [`EagerRepoStore`] at the given directory.
     /// Create an empty store on demand.
-    pub fn open(dir: &Path) -> Result<Self> {
+    pub fn open(dir: &Path, format: SerializationFormat) -> Result<Self> {
         let inner = Zstore::open(dir)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(inner)),
+            format,
         })
     }
 
@@ -133,6 +147,7 @@ impl EagerRepoStore {
 
     /// Insert SHA1 blob to zstore.
     /// In hg's case, the `data` is `min(p1, p2) + max(p1, p2) + text`.
+    /// In git's case, the `data` should include the type and size header.
     pub fn add_sha1_blob(&self, data: &[u8], bases: &[Id20]) -> Result<Id20> {
         let mut inner = self.inner.write();
         Ok(inner.insert(data, bases)?)
@@ -146,7 +161,7 @@ impl EagerRepoStore {
         Ok(())
     }
 
-    /// Read SHA1 blob from zstore.
+    /// Read SHA1 blob from zstore, including the prefixes.
     pub fn get_sha1_blob(&self, id: Id20) -> Result<Option<Bytes>> {
         let inner = self.inner.read();
         Ok(inner.get(id)?)
@@ -154,15 +169,19 @@ impl EagerRepoStore {
 
     /// Read the blob with its p1, p2 prefix removed.
     pub fn get_content(&self, id: Id20) -> Result<Option<Bytes>> {
-        // Prefix in bytes of the hg SHA1s in the eagerepo data.
-        const HG_SHA1_PREFIX: usize = Id20::len() * 2;
         // Special null case.
         if id.is_null() {
             return Ok(Some(Bytes::default()));
         }
         match self.get_sha1_blob(id)? {
             None => Ok(None),
-            Some(data) => Ok(Some(data.slice(HG_SHA1_PREFIX..))),
+            Some(data) => {
+                let content = match self.format {
+                    SerializationFormat::Hg => hg_sha1_deserialize(&*data)?.0,
+                    SerializationFormat::Git => git_sha1_deserialize(&*data)?.0,
+                };
+                Ok(Some(data.slice_to_bytes(content)))
+            }
         }
     }
 
@@ -231,7 +250,7 @@ impl EagerRepoStore {
         };
         // Check subfiles or subtrees.
         if matches!(flag, Flag::Directory) {
-            let entry = TreeEntry(content, SerializationFormat::Hg);
+            let entry = TreeEntry(content, self.format);
             for element in entry.elements() {
                 let element = element?;
                 let name = element.component.into_string();
@@ -285,12 +304,17 @@ impl PathInfo {
 impl EagerRepo {
     /// Open an [`EagerRepo`] at the given directory. Create an empty repo on demand.
     pub fn open(dir: &Path) -> Result<Self> {
+        // Auto-detect Git format from path. "*-git" or "*.git" use the Git format.
+        let format = match dir.file_name().and_then(|s| s.to_str()) {
+            Some(s) if s.ends_with(".git") || s.ends_with("-git") => SerializationFormat::Git,
+            _ => SerializationFormat::Hg,
+        };
         let ident = identity::sniff_dir(dir)?.unwrap_or_else(identity::default);
         // Attempt to match directory layout of a real client repo.
         let hg_dir = dir.join(ident.dot_dir());
         let store_dir = hg_dir.join("store");
         let dag = Dag::open(store_dir.join("segments").join("v1"))?;
-        let store = EagerRepoStore::open(&store_dir.join("hgcommits").join("v1"))?;
+        let store = EagerRepoStore::open(&store_dir.join("hgcommits").join("v1"), format)?;
         let metalog = MetaLog::open(store_dir.join("metalog"), None)?;
         let mut_store = MutationStore::open(store_dir.join("mutation"))?;
 
@@ -311,16 +335,17 @@ impl EagerRepo {
 
         // Write "requires" files.
         write_requires(&hg_dir, &["store", "treestate", "windowssymlinks"])?;
-        write_requires(
-            &store_dir,
-            &[
-                "narrowheads",
-                "visibleheads",
-                "segmentedchangelog",
-                "eagerepo",
-                "invalidatelinkrev",
-            ],
-        )?;
+        let mut store_requires = vec![
+            "narrowheads",
+            "visibleheads",
+            "segmentedchangelog",
+            "eagerepo",
+            "invalidatelinkrev",
+        ];
+        if matches!(format, SerializationFormat::Git) {
+            store_requires.push("git");
+        }
+        write_requires(&store_dir, &store_requires)?;
         Ok(repo)
     }
 
@@ -330,55 +355,48 @@ impl EagerRepo {
     /// - `eager:dir_path`, `eager://dir_path`
     /// - `test:name`, `test://name`: same as `eager:$TESTTMP/name`
     /// - `/path/to/dir` where the path is a EagerRepo.
-    pub fn url_to_dir(value: &str) -> Option<PathBuf> {
-        if let Some(path) = value.strip_prefix("eager:") {
-            let path: PathBuf = if cfg!(windows) {
-                // Remove '//' prefix from Windows file path. This makes it
-                // possible to use paths like 'eager://C:\foo\bar'.
-                let path = path.trim_start_matches('/');
-                // Replace '/' with '\' on Windows so one can write code like
-                // eager://$TESTTMP/foo/bar in test. This is important if
-                // $TESTTMP is a UNC path, since / won't work with a UNC path.
-                let path = path.replace('/', "\\");
-                Path::new(&path).to_path_buf()
-            } else {
-                Path::new(path).to_path_buf()
-            };
-            tracing::trace!("url_to_dir {} => {}", value, path.display());
-            return Some(path);
+    #[instrument(level = "trace", ret)]
+    pub fn url_to_dir(url: &RepoUrl) -> Option<PathBuf> {
+        if url.scheme() == "eager" {
+            return Some(url.path().to_string().into());
         }
 
-        if let Some(path) = value.strip_prefix("test:") {
+        if url.scheme() == "test" {
+            let path = url.path();
             let path = path.trim_start_matches('/');
-            if let Ok(tmp) = std::env::var("TESTTMP") {
-                let tmp: &Path = Path::new(&tmp);
+            if let Some(tmp) = testtmp() {
                 let path = tmp.join(path);
-                tracing::trace!("url_to_dir {} => {}", value, path.display());
                 return Some(path);
             }
         }
 
-        if let Some(path) = value.strip_prefix("ssh://user@dummy/") {
+        if let Some(path) = url.resolved_str().strip_prefix("ssh://user@dummy/") {
             // Allow instantiating EagerRepo for dummyssh servers. This is so we can get a
             // working SaplingRemoteApi for server repos in legacy tests.
-            if let Ok(tmp) = std::env::var("TESTTMP") {
+            if let Some(tmp) = testtmp() {
                 let path = Path::new(&tmp).join(path);
                 if let Ok(Some(ident)) = identity::sniff_dir(&path) {
                     let mut store_path = path.clone();
                     store_path.push(ident.dot_dir());
                     store_path.push("store");
-                    if has_eagercompat_requirement(&store_path) {
-                        tracing::trace!("url_to_dir {} => {}", value, path.display());
+                    if has_eagercompat_requirement(&store_path) || is_eager_repo(&path) {
                         return Some(path);
+                    } else {
+                        tracing::trace!("no eagercompat requirement for dummy URL");
                     }
+                } else {
+                    tracing::trace!("no identity for dummy URL");
                 }
             }
         }
 
-        let path = Path::new(value);
-        if is_eager_repo(path) {
-            tracing::trace!("url_to_dir {} => {}", value, path.display());
-            return Some(path.to_path_buf());
+        if url.scheme() == "file" {
+            let path = PathBuf::from(url.path());
+            if is_eager_repo(&path) {
+                return Some(path.to_path_buf());
+            } else {
+                tracing::trace!("file URL isn't an eagerepo (no eagerepo requirement)");
+            }
         }
 
         None
@@ -435,23 +453,34 @@ impl EagerRepo {
             .add_arbitrary_blob(digest_id(digest), &pointer.serialize())
     }
 
+    pub(crate) fn format(&self) -> SerializationFormat {
+        self.store.format
+    }
+
     /// Extract parents out of a SHA1 manifest blob, returns the remaining data.
-    fn extract_parents_from_tree_data(data: Bytes) -> Result<(Parents, Bytes)> {
+    /// The callsite needs to ensure the store format is hg.
+    fn extract_parents_from_tree_data_hg(data: Bytes) -> Result<(Parents, Bytes)> {
         let p2 = HgId::from_slice(&data[..HG_LEN]).map_err(anyhow::Error::from)?;
         let p1 = HgId::from_slice(&data[HG_LEN..HG_PARENTS_LEN]).map_err(anyhow::Error::from)?;
         Ok((Parents::new(p1, p2), data.slice(HG_PARENTS_LEN..)))
     }
 
     /// Parse a file blob into raw data and copy_from metadata.
-    fn parse_file_blob(data: Bytes) -> (Bytes, Bytes) {
+    /// The callsite needs to ensure the store format is hg.
+    fn parse_file_blob_hg(data: Bytes) -> (Bytes, Bytes) {
         // drop the p1/p2 info
         let data = data.slice(HG_PARENTS_LEN..);
-        let (raw_data, copy_from) = hgstore::split_hg_file_metadata(&data);
+        let (raw_data, copy_from) = format_util::split_hg_file_metadata(&data);
         (raw_data, copy_from)
     }
 
     /// Calculate augmented trees recursively
     pub fn derive_augmented_tree_recursively(&self, id: Id20) -> Result<Option<Bytes>> {
+        if !matches!(self.format(), SerializationFormat::Hg) {
+            return Err(crate::Error::Other(anyhow!(
+                "Augmented tree is only supported for Hg format"
+            )));
+        }
         match self.store.get_augmented_blob(id)? {
             Some(t) => Ok(Some(t)),
             None => {
@@ -461,7 +490,7 @@ impl EagerRepo {
                     return Ok(None);
                 }
                 let sapling_manifest = sapling_manifest.unwrap();
-                let (parents, data) = Self::extract_parents_from_tree_data(sapling_manifest)?;
+                let (parents, data) = Self::extract_parents_from_tree_data_hg(sapling_manifest)?;
                 let tree_entry = manifest_tree::TreeEntry(data, SerializationFormat::Hg);
                 let mut entries: Vec<(RepoPathBuf, AugmentedTreeEntry)> = Vec::new();
                 for child in tree_entry.elements() {
@@ -488,7 +517,7 @@ impl EagerRepo {
                             if bytes.is_none() {
                                 return Ok(None); // Can't calculate because file is missing.
                             }
-                            let (raw_data, copy_from) = Self::parse_file_blob(bytes.unwrap());
+                            let (raw_data, copy_from) = Self::parse_file_blob_hg(bytes.unwrap());
                             let aux_data = FileAuxData::from_content(&raw_data);
 
                             // Store a mapping from CasDigest to hg id so we can query augmented data by CasDigest.
@@ -551,15 +580,23 @@ impl EagerRepo {
 
     /// Insert a commit. Return the commit hash.
     pub async fn add_commit(&self, parents: &[Id20], raw_text: &[u8]) -> Result<Id20> {
+        let id: Id20 = {
+            let data = match self.format() {
+                SerializationFormat::Git => git_sha1_serialize(raw_text, "commit"),
+                SerializationFormat::Hg => {
+                    let p1 = parents.first().cloned();
+                    let p2 = parents.get(1).cloned();
+                    hg_sha1_serialize(raw_text, &p1.unwrap_or(NULL_ID), &p2.unwrap_or(NULL_ID))
+                }
+            };
+            self.add_sha1_blob(&data)?
+        };
+
+        let vertex: Vertex = { Vertex::copy_from(id.as_ref()) };
         let parents: Vec<Vertex> = parents
             .iter()
             .map(|v| Vertex::copy_from(v.as_ref()))
             .collect();
-        let id: Id20 = {
-            let data = hg_sha1_text(&parents, raw_text);
-            self.add_sha1_blob(&data)?
-        };
-        let vertex: Vertex = { Vertex::copy_from(id.as_ref()) };
 
         // Check paths referred by the commit are present.
         //
@@ -568,20 +605,18 @@ impl EagerRepo {
         // the root tree without recursion. But that requires
         // new APIs to insert trees, and insert trees in a
         // certain order.
-        if let Some(hex_tree_id) = raw_text.get(0..Id20::hex_len()) {
-            if let Ok(tree_id) = Id20::from_hex(hex_tree_id) {
-                let mut missing = Vec::new();
-                let path = PathInfo::root();
-                self.store
-                    .find_missing_references(tree_id, Flag::Directory, path, &mut missing)?;
-                if !missing.is_empty() {
-                    let paths = missing.into_iter().map(|p| p.to_string()).collect();
-                    return Err(crate::Error::CommitMissingPaths(
-                        vertex,
-                        Vertex::copy_from(tree_id.as_ref()),
-                        paths,
-                    ));
-                }
+        if let Ok(tree_id) = commit_text_to_root_tree_id(raw_text, self.format()) {
+            let mut missing = Vec::new();
+            let path = PathInfo::root();
+            self.store
+                .find_missing_references(tree_id, Flag::Directory, path, &mut missing)?;
+            if !missing.is_empty() {
+                let paths = missing.into_iter().map(|p| p.to_string()).collect();
+                return Err(crate::Error::CommitMissingPaths(
+                    vertex,
+                    Vertex::copy_from(tree_id.as_ref()),
+                    paths,
+                ));
             }
         }
 
@@ -650,6 +685,16 @@ impl EagerRepo {
         Ok(())
     }
 
+    /// Get the tree manifest of a commit.
+    pub async fn commit_to_manifest(&self, commit_id: HgId) -> Result<TreeManifest> {
+        let commit_to_root_tree = self.store.read_root_tree_ids(vec![commit_id]).await?;
+        if commit_to_root_tree.is_empty() {
+            return Err(anyhow!("commit {} cannot be found", commit_id.to_hex()).into());
+        }
+        let (_, tree_id) = commit_to_root_tree[0];
+        Ok(TreeManifest::durable(Arc::new(self.store.clone()), tree_id))
+    }
+
     /// Obtain a reference to the commit graph.
     pub async fn dag(&self) -> MutexGuard<'_, Dag> {
         self.dag.lock().await
@@ -664,6 +709,18 @@ impl EagerRepo {
     pub fn store(&self) -> EagerRepoStore {
         self.store.clone()
     }
+}
+
+fn testtmp() -> Option<PathBuf> {
+    std::env::var("TESTTMP").ok().map(|tmp| {
+        let mut tmp = PathBuf::from(tmp);
+        // Look for ".testtmp" bread crumb. If we are running from EdenFS, our $TESTTMP
+        // env var might not be up to date.
+        if let Ok(bread_crumb) = read_to_string(tmp.join(".testtmp")) {
+            tmp = PathBuf::from(bread_crumb);
+        }
+        tmp
+    })
 }
 
 // Hash something else in to differentiate augmented and non-augmented keys.
@@ -730,14 +787,9 @@ pub fn is_eager_repo(path: &Path) -> bool {
         let store_requirement_path = path.join(ident.dot_dir()).join("store").join("requires");
         if let Ok(s) = std::fs::read_to_string(store_requirement_path) {
             if s.lines().any(|s| s == "eagerepo") {
-                tracing::trace!("url_to_dir {} => {}", path.display(), path.display());
                 return true;
             }
         }
-        tracing::trace!(
-            "url_to_dir {}: missing 'eagerepo' requirement",
-            path.display()
-        );
     }
 
     false
@@ -746,27 +798,6 @@ pub fn is_eager_repo(path: &Path) -> bool {
 fn has_eagercompat_requirement(store_path: &Path) -> bool {
     std::fs::read_to_string(store_path.join("requires"))
         .is_ok_and(|r| r.split('\n').any(|r| r == "eagercompat"))
-}
-
-/// Convert parents and raw_text to HG SHA1 text format.
-fn hg_sha1_text(parents: &[Vertex], raw_text: &[u8]) -> Vec<u8> {
-    fn null_id() -> Vertex {
-        Vertex::copy_from(Id20::null_id().as_ref())
-    }
-    let mut result = Vec::with_capacity(raw_text.len() + Id20::len() * 2);
-    let (p1, p2) = (
-        parents.first().cloned().unwrap_or_else(null_id),
-        parents.get(1).cloned().unwrap_or_else(null_id),
-    );
-    if p1 < p2 {
-        result.extend_from_slice(p1.as_ref());
-        result.extend_from_slice(p2.as_ref());
-    } else {
-        result.extend_from_slice(p2.as_ref());
-        result.extend_from_slice(p1.as_ref());
-    }
-    result.extend_from_slice(raw_text);
-    result
 }
 
 /// Write "requires" in the given directory, if it does not exist already.
@@ -952,7 +983,11 @@ mod tests {
         )
         .to_bytes();
         let subtree_id = repo
-            .add_sha1_blob(&hg_sha1_text(&[], &subtree_content))
+            .add_sha1_blob(&hg_sha1_serialize(
+                &subtree_content,
+                Id20::null_id(),
+                Id20::null_id(),
+            ))
             .unwrap();
         let root_tree_content = TreeEntry::from_elements(
             vec![
@@ -963,7 +998,11 @@ mod tests {
         )
         .to_bytes();
         let root_tree_id = repo
-            .add_sha1_blob(&hg_sha1_text(&[], &root_tree_content))
+            .add_sha1_blob(&hg_sha1_serialize(
+                &root_tree_content,
+                Id20::null_id(),
+                Id20::null_id(),
+            ))
             .unwrap();
         let err = repo
             .add_commit(&[], root_tree_id.to_hex().as_bytes())

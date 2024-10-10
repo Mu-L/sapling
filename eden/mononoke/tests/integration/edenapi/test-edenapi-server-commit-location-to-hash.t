@@ -12,9 +12,8 @@ Set up local hgrc and Mononoke config.
   $ cd $TESTTMP
 
 Initialize test repo.
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 Populate test repo
   $ echo "my commit message" > test.txt
@@ -54,7 +53,7 @@ Populate test repo
 
 Blobimport test repo.
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 Start up SaplingRemoteAPI server.
   $ setup_mononoke_config
@@ -69,7 +68,7 @@ Prepare request.
   > EOF
 
 Check files in response.
-  $ sl debugapi -e commitlocationtohash -f req --sort
+  $ hg debugapi mono:repo -e commitlocationtohash -f req --sort
   [{"count": 2,
     "hgids": [bin("c7dcf24fab3a8ab956273fa40d5cc44bc26ec655"),
               bin("e83645968c8f2954b97a3c79ce5a6b90a464c54d")],

@@ -5,6 +5,8 @@
  * GNU General Public License version 2.
  */
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io;
@@ -173,7 +175,11 @@ pub fn run_command(args: Vec<String>, io: &IO) -> i32 {
                 dispatch_command(io, dispatcher, cwd, Arc::downgrade(&in_scope), start_time)
             }
             Err(err) => {
-                errors::print_error(&err, io, &args[1..]);
+                errors::print_error(
+                    &err,
+                    io,
+                    global_opts.as_ref().map_or(true, |opts| opts.traceback),
+                );
                 255
             }
         }
@@ -294,7 +300,7 @@ fn dispatch_command(
                     already_ran_pre_hooks,
                 )
             } else {
-                errors::print_error(&err, io, &dispatcher.args()[1..]);
+                errors::print_error(&err, io, dispatcher.global_opts().traceback);
                 errors::upload_traceback(&err, start_time.epoch_ms());
                 255
             }
@@ -303,7 +309,7 @@ fn dispatch_command(
 
     if !fell_back {
         if let Err(err) = io.wait_pager().context("error flushing command output") {
-            errors::print_error(&err, io, &dispatcher.args()[1..]);
+            errors::print_error(&err, io, dispatcher.global_opts().traceback);
             return 255;
         }
     }
@@ -334,8 +340,12 @@ fn dispatch_command(
         }
     }
 
-    let _ = log_perftrace(io, config, start_time);
-    let _ = print_metrics(io, config);
+    if let Err(err) = log_perftrace(io, config, start_time) {
+        tracing::error!(?err, "error logging perftrace");
+    }
+    if let Err(err) = log_metrics(io, config) {
+        tracing::error!(?err, "error printing metrics");
+    }
 
     exit_code
 }
@@ -785,11 +795,6 @@ fn log_end(
         }
         blackbox::sync();
     });
-
-    let counters = hg_metrics::summarize();
-    if !counters.is_empty() {
-        sampling::append_sample_map("metrics", &counters);
-    }
 }
 
 #[derive(Copy, Clone)]
@@ -829,7 +834,7 @@ fn log_repo_path_and_exe_version(repo: Option<&Repo>) {
         let opt_path_default: std::result::Result<Option<String>, _> =
             config.get_or_default("paths", "default");
         if let Ok(Some(path_default)) = opt_path_default {
-            if let Some(repo_name) = configloader::hg::repo_name_from_url(config, &path_default) {
+            if let Some(repo_name) = repourl::repo_name_from_url(config, &path_default) {
                 tracing::info!(
                     target: "command_info",
                     version = version::VERSION,
@@ -872,24 +877,99 @@ fn log_perftrace(io: &IO, config: &dyn Config, start_time: StartTime) -> Result<
     Ok(())
 }
 
-fn print_metrics(io: &IO, config: &dyn Config) -> Result<()> {
-    let prefixes: Vec<Text> = config.must_get::<Vec<Text>>("devel", "print-metrics")?;
-    if prefixes.is_empty() {
+fn log_metrics(io: &IO, config: &dyn Config) -> Result<()> {
+    let mut metrics = hg_metrics::summarize();
+
+    // Mix in counters from the "metrics" crate.
+    metrics.extend(
+        ::metrics::Registry::global()
+            .counters()
+            .into_iter()
+            .filter_map(|(n, c)| {
+                if c.is_gauge() {
+                    None
+                } else {
+                    Some((n.to_string(), c.value() as u64))
+                }
+            }),
+    );
+
+    if metrics.is_empty() {
         return Ok(());
     }
 
-    let metrics = hg_metrics::summarize();
+    // Log counters to "sampling" file.
+    sampling::append_sample_map("metrics", &metrics);
+
+    // Empty value means print everything.
+    let prefixes: Option<Vec<Text>> = config.get_opt("devel", "print-metrics")?;
+    let skip_prefixes: Vec<Text> = config.get_or_default("devel", "skip-metrics")?;
+
+    let mut nested_counters = NestedCounters::Map(BTreeMap::new());
+
     let mut keys = metrics.keys().collect::<Vec<_>>();
     keys.sort();
     for key in keys {
-        for prefix in prefixes.iter() {
-            if key.starts_with(prefix.as_ref()) {
-                writeln!(io.error(), "{key}: {}", metrics.get(key).unwrap())?;
-            }
+        let value = *metrics.get(key).unwrap();
+
+        nested_counters.insert(key, value);
+
+        if skip_prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix.as_ref()))
+        {
+            continue;
+        }
+
+        if prefixes.as_ref().is_some_and(|prefixes| {
+            prefixes.is_empty()
+                || prefixes
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix.as_ref()))
+        }) {
+            writeln!(io.error(), "{key}: {}", value)?;
         }
     }
 
+    blackbox::log(&blackbox::event::Event::LegacyLog {
+        service: "metrics".to_string(),
+        msg: serde_json::to_string(&HashMap::from([("metrics", nested_counters)]))?,
+        opts: Default::default(),
+    });
+
     Ok(())
+}
+
+// Type for transforming {foo.bar.baz: 123} into {foo: {bar: {baz: 123}}}.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum NestedCounters<'a> {
+    Value(u64),
+    Map(BTreeMap<&'a str, NestedCounters<'a>>),
+}
+
+impl<'a> NestedCounters<'a> {
+    fn insert(&mut self, key: &'a str, value: u64) {
+        // collision between a value and map will drop value and use map
+        // e.g. {"foo" => 123, "foo.bar" => 456} becomes {"foo" => {"bar" => 456}}
+
+        match self {
+            Self::Value(_) => {
+                *self = Self::Map(BTreeMap::new());
+                self.insert(key, value)
+            }
+            Self::Map(map) => {
+                if let Some(idx) = key.find(['.', '_', '/']) {
+                    let (name, rest) = (&key[..idx], &key[idx + 1..]);
+                    map.entry(name)
+                        .or_insert_with(|| Self::Map(BTreeMap::new()))
+                        .insert(rest, value);
+                } else if !map.contains_key(key) {
+                    map.insert(key, Self::Value(value));
+                }
+            }
+        }
+    }
 }
 
 // TODO: Replace this with the 'exitcode' crate once it's available.

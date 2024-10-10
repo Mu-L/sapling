@@ -188,6 +188,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
     };
 
     let app = MononokeAppBuilder::new(fb)
+        .with_entry_point(ClientEntryPoint::LfsServer)
         .with_app_extension(Fb303AppExtension {})
         .with_app_extension(RepoFilterAppExtension {})
         .with_cachelib_settings(cachelib_settings)
@@ -209,6 +210,7 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
 
     let tls_acceptor = args
         .tls_params
+        .clone()
         .map(|tls_params| {
             secure_utils::SslConfig::new(
                 tls_params.tls_ca,
@@ -300,10 +302,11 @@ fn main(fb: FacebookInit) -> Result<(), Error> {
                 max_upload_size,
                 will_exit,
                 config_handle.clone(),
+                &args.tls_params,
             )?;
             let enforce_authentication = ctx.get_config().enforce_authentication();
 
-            let router = build_router(fb, ctx, git_blob_upload_allowed);
+            let router = build_router(fb, ctx, scuba_logger.clone(), git_blob_upload_allowed);
 
             let capture_session_data = tls_session_data_log.is_some();
 

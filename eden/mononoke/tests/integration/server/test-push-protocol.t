@@ -14,8 +14,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo "a file content" > a
   $ hg add a
   $ hg ci -ma
@@ -34,16 +34,16 @@ verify content
   
 
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 setup two repos: one will be used to push from, another will be used
 to pull these pushed commits
 
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo3
+  $ hg clone -q mono:repo repo2
+  $ hg clone -q mono:repo repo3
   $ cd repo2
-  $ hg pull ssh://user@dummy/repo-hg
-  pulling from ssh://user@dummy/repo-hg
+  $ hg pull ssh://user@dummy/repo
+  pulling from ssh://user@dummy/repo
   searching for changes
   no changes found
 
@@ -174,6 +174,8 @@ move master bookmarks
    2 files changed, 2 insertions(+), 1 deletions(-)
   
   commit:      0e7ec5675652
+  bookmark:    default/master_bookmark
+  hoistedname: master_bookmark
   user:        test
   date:        Thu Jan 01 00:00:00 1970 +0000
   summary:     a
@@ -184,8 +186,9 @@ move master bookmarks
 
 push to Mononoke
 
-  $ hgmn push --force --config treemanifest.treeonly=True --debug mononoke://$(mononoke_address)/repo
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push --force --debug --allow-anon
+  tracking on None {}
+  pushing to mono:repo
   sending hello command
   sending clienttelemetry command
   query 1; heads
@@ -220,13 +223,17 @@ push to Mononoke
   bundle2-input-part: "reply:pushkey" (params: 2 mandatory) supported
   bundle2-input-bundle: 1 parts total
   updating bookmark master_bookmark
+  preparing listkeys for "bookmarks"
+  sending listkeys command
+  received listkey for "bookmarks": 57 bytes
 
 Now pull what was just pushed
 
   $ cd ../repo3
-  $ hgmn log -r "reverse(all())" --stat
+  $ hg log -r "reverse(all())" --stat
   commit:      0e7ec5675652
-  bookmark:    master_bookmark
+  bookmark:    default/master_bookmark
+  hoistedname: master_bookmark
   user:        test
   date:        Thu Jan 01 00:00:00 1970 +0000
   summary:     a
@@ -234,21 +241,21 @@ Now pull what was just pushed
    a |  1 +
    1 files changed, 1 insertions(+), 0 deletions(-)
    (re)
-  $ hgmn pull -q
+  $ hg pull -q
 
 Because the revision numbers are assigned nondeterministically we cannot
 compare output of the entire tree. Instead we compare only linear histories
 
-  $ hgmn log --graph --template '{node} {bookmarks}' -r "::f40c09205504"
-  pulling 'f40c09205504' from 'mononoke://$LOCALIP:$LOCAL_PORT/repo'
+  $ hg log --graph --template '{node} {bookmarks}' -r "::f40c09205504"
+  pulling 'f40c09205504' from 'mono:repo'
   o  f40c09205504d8410f8c8679bf7a85fef25f9337
   │
   o  bb0985934a0f8a493887892173b68940ceb40b4f
   │
   @  0e7ec5675652a04069cbf976a42e45b740f3243c
    (re)
-  $ hgmn log --graph --template '{node} {bookmarks}' -r "::634de738bb0f"
-  o  634de738bb0ff135e32d48567718fb9d7dedf575 master_bookmark
+  $ hg log --graph --template '{node} {bookmarks}' -r "::634de738bb0f"
+  o  634de738bb0ff135e32d48567718fb9d7dedf575
   │
   o  8315ea53ef41d34f56232c88669cc80225b6e66d
   │
@@ -264,7 +271,7 @@ This last step is verifying every commit one by one, it is done in a single
 command, but the output of this command is long
 
   $ for commit in `hg log --template '{node} ' -r '0e7ec567::634de738'` f40c09205504d8410f8c8679bf7a85fef25f9337; do \
-  $ if [ "`hg export -R $TESTTMP/repo2 ${commit}`" == "`hgmn export ${commit} 2> /dev/null`" ]; then echo "${commit} comparison SUCCESS"; fi; hgmn export ${commit}; echo; echo; done
+  $ if [ "`hg export -R $TESTTMP/repo2 ${commit}`" == "`hg export ${commit} 2> /dev/null`" ]; then echo "${commit} comparison SUCCESS"; fi; hg export ${commit}; echo; echo; done
   0e7ec5675652a04069cbf976a42e45b740f3243c comparison SUCCESS
   # HG changeset patch
   # User test

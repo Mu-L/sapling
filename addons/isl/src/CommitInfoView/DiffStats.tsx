@@ -12,9 +12,7 @@ import {T, t} from '../i18n';
 import {SLOC_THRESHOLD_FOR_SPLIT_SUGGESTIONS} from '../sloc/diffStatConstants';
 import {
   useFetchSignificantLinesOfCode,
-  useFetchStrictSignificantLinesOfCode,
   useFetchPendingSignificantLinesOfCode,
-  useFetchStrictPendingSignificantLinesOfCode,
 } from '../sloc/useFetchSignificantLinesOfCode';
 import * as stylex from '@stylexjs/stylex';
 import {ErrorBoundary} from 'isl-components/ErrorNotice';
@@ -41,8 +39,16 @@ export function LoadingDiffStatsView() {
   );
 }
 export function DiffStats({commit}: Props) {
-  const significantLinesOfCode = useFetchSignificantLinesOfCode(commit);
-  const strictSignificantLinesOfCode = useFetchStrictSignificantLinesOfCode(commit);
+  const {slocInfo, isLoading} = useFetchSignificantLinesOfCode(commit);
+  const significantLinesOfCode = slocInfo?.sloc;
+  const strictSignificantLinesOfCode = slocInfo?.strictSloc;
+
+  if (isLoading && significantLinesOfCode == null) {
+    return <LoadingDiffStatsView />;
+  } else if (!isLoading && significantLinesOfCode == null) {
+    return null;
+  }
+
   return (
     <ResolvedDiffStatsView
       significantLinesOfCode={significantLinesOfCode}
@@ -60,11 +66,16 @@ export function PendingDiffStats({showWarning = false}: {showWarning?: boolean})
 }
 
 export function PendingDiffStatsView({showWarning = false}: {showWarning?: boolean}) {
-  const significantLinesOfCode = useFetchPendingSignificantLinesOfCode();
-  const strictSignificantLinesOfCode = useFetchStrictPendingSignificantLinesOfCode();
-  if (significantLinesOfCode == null) {
+  const {slocInfo, isLoading} = useFetchPendingSignificantLinesOfCode();
+  const significantLinesOfCode = slocInfo?.sloc;
+  const strictSignificantLinesOfCode = slocInfo?.strictSloc;
+
+  if (isLoading && significantLinesOfCode == null) {
     return <LoadingDiffStatsView />;
+  } else if (!isLoading && significantLinesOfCode == null) {
+    return null;
   }
+
   return (
     <ResolvedDiffStatsView
       significantLinesOfCode={significantLinesOfCode}

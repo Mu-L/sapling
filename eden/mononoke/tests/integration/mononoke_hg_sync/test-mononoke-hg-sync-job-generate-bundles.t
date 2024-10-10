@@ -13,8 +13,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo foo > a
   $ echo foo > b
   $ hg addremove && hg ci -m 'initial'
@@ -33,35 +33,34 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Make client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client-push --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client-push --noupdate
 
 Push to Mononoke
   $ cd $TESTTMP/client-push
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
   $ hg up -q tip
 
   $ mkcommit pushcommit
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
   $ hg up -q master_bookmark
   $ mkcommit pushcommit2
   $ mkcommit pushcommit3
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Modify same file
   $ hg up -q master_bookmark
   $ echo 1 >> 1 && hg addremove && hg ci -m 'modify 1'
   adding 1
   $ echo 1 >> 1 && hg addremove && hg ci -m 'modify 1'
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Empty commits
   $ hg up -q "min(all())"
@@ -71,40 +70,36 @@ Empty commits
   $ echo 1 > 1 && hg -q addremove && hg ci -m empty
   $ hg revert -r ".^" 1 && hg commit --amend
 
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Two pushes synced one after another
   $ hg up -q master_bookmark
   $ mkcommit commit_first
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
   $ hg up -q master_bookmark
   $ mkcommit commit_second
-  $ hgmn push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
 
 Sync it to another client
-  $ cd $TESTTMP/repo-hg
+  $ cd $TESTTMP/repo
   $ enable_replay_verification_hook
-  $ cat >> .hg/hgrc <<EOF
-  > [treemanifest]
-  > treeonly=True
-  > EOF
   $ cd $TESTTMP
 
 Sync a pushrebase bookmark move
-  $ mononoke_hg_sync repo-hg 1 2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync repo 1 2>&1 | grep 'successful sync'
   * successful sync of entries [2]* (glob)
 
-  $ mononoke_hg_sync repo-hg 2 2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync repo 2 2>&1 | grep 'successful sync'
   * successful sync of entries [3]* (glob)
 
-  $ mononoke_hg_sync repo-hg 3 2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync repo 3 2>&1 | grep 'successful sync'
   * successful sync of entries [4]* (glob)
 
-  $ mononoke_hg_sync repo-hg 4 2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync repo 4 2>&1 | grep 'successful sync'
   * successful sync of entries [5]* (glob)
 
-  $ mononoke_hg_sync_loop_regenerate repo-hg 5  2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync_loop_regenerate repo 5  2>&1 | grep 'successful sync'
   * successful sync of entries [6]* (glob)
   * successful sync of entries [7]* (glob)
 
@@ -116,8 +111,8 @@ Do a manual move
   $ mononoke_newadmin bookmarks -R repo set master_bookmark "$NODE"
   Updating publishing bookmark master_bookmark from aa56217d7c6265a0624bfdc78047bd26d6189e9f2667f9a41e6a51ca80c30a3c to 8e7d2998fd68c6efaae7db7e93fdbaa73d34123ceedebc082acdb5ab955c5f2a
   $ cd "$TESTTMP"
-  $ mononoke_hg_sync_loop_regenerate repo-hg 6 2>&1 | grep 'successful sync'
+  $ mononoke_hg_sync_loop_regenerate repo 6 2>&1 | grep 'successful sync'
   * successful sync of entries [8]* (glob)
-  $ cd "$TESTTMP/repo-hg"
+  $ cd "$TESTTMP/repo"
   $ hg log -r master_bookmark -T '{node}\n'
   f5fb745185a2d197d092e7dfffe147f36de1af76

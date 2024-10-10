@@ -1,5 +1,4 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
 oncall("scm_client_infra")
 
@@ -18,6 +17,7 @@ rust_library(
         "fbsource//third-party/rust:whoami",
         "//common/rust/build_info:build_info",
         "//common/rust/fbwhoami:fbwhoami",
+        "//devx_www/cross_env_session_id:cross_env_session_id",
         "//eden/scm/lib/procinfo:procinfo",
     ],
 )

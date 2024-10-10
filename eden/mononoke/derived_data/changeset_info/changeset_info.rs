@@ -268,7 +268,7 @@ impl TryFrom<BlobstoreGetData> for ChangesetInfo {
 
 impl From<ChangesetInfo> for BlobstoreBytes {
     fn from(info: ChangesetInfo) -> BlobstoreBytes {
-        let data = compact_protocol::serialize(&info.into_thrift());
+        let data = compact_protocol::serialize(info.into_thrift());
         BlobstoreBytes::from_bytes(data)
     }
 }
@@ -287,6 +287,7 @@ fn get_title(message: &str) -> &str {
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
     use mononoke_types::BonsaiChangeset;
     use mononoke_types::BonsaiChangesetMut;
     use mononoke_types::DateTime;
@@ -296,7 +297,7 @@ mod test {
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn changeset_info_title_test() {
         {
             let bcs = create_bonsai_with_message("   \n\n  title \n\n summary\n");
@@ -336,15 +337,10 @@ mod test {
             parents: vec![],
             author: "author".to_string(),
             author_date: DateTime::now(),
-            committer: None,
-            committer_date: None,
             message: message.to_string(),
-            hg_extra: Default::default(),
             git_extra_headers: Some(sorted_vector_map! { SmallVec::new() => Bytes::from_static(b"world")}),
-            git_tree_hash: None,
             file_changes: sorted_vector_map! { NonRootMPath::new("file").unwrap() => FileChange::Deletion },
-            is_snapshot: false,
-            git_annotated_tag: None,
+            ..Default::default()
         }
         .freeze()
         .unwrap()

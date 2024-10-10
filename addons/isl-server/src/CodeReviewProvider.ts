@@ -18,9 +18,10 @@ import type {
   CodeReviewProviderSpecificClientToServerMessages,
   ClientToServerMessage,
   DiffComment,
+  ServerToClientMessage,
 } from 'isl/src/types';
 
-type DiffSummaries = Map<DiffId, DiffSummary>;
+export type DiffSummaries = Map<DiffId, DiffSummary>;
 /**
  * API to fetch data from Remote Code Review system, like GitHub and Phabricator.
  */
@@ -71,5 +72,6 @@ export interface CodeReviewProvider {
 
   handleClientToServerMessage?(
     message: ClientToServerMessage,
+    postMessage: (message: ServerToClientMessage) => void,
   ): message is CodeReviewProviderSpecificClientToServerMessages;
 }

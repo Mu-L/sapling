@@ -104,13 +104,14 @@ impl SqlConstructFromMetadataDatabaseConfig for SqlPushRedirectionConfigBuilder 
 impl PushRedirectionConfig for SqlPushRedirectionConfig {
     async fn set(
         &self,
-        _ctx: &CoreContext,
+        ctx: &CoreContext,
         repo_id: RepositoryId,
         draft_push: bool,
         public_push: bool,
     ) -> Result<()> {
-        Set::query(
+        Set::maybe_traced_query(
             &self.connections.write_connection,
+            ctx.client_request_info(),
             &repo_id,
             &draft_push,
             &public_push,
@@ -121,12 +122,13 @@ impl PushRedirectionConfig for SqlPushRedirectionConfig {
 
     async fn get(
         &self,
-        _ctx: &CoreContext,
+        ctx: &CoreContext,
         repo_id: RepositoryId,
     ) -> Result<Option<PushRedirectionConfigEntry>> {
-        let rows = Get::query(
+        let rows = Get::maybe_traced_query(
             self.sql_query_config.as_ref(),
             &self.connections.read_connection,
+            ctx.client_request_info(),
             &repo_id,
         )
         .await?;
@@ -137,10 +139,11 @@ impl PushRedirectionConfig for SqlPushRedirectionConfig {
 #[cfg(test)]
 mod test {
     use fbinit::FacebookInit;
+    use mononoke_macros::mononoke;
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_set(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let builder = SqlPushRedirectionConfigBuilder::with_sqlite_in_memory()?;
@@ -178,7 +181,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_get(fb: FacebookInit) -> Result<()> {
         let ctx = CoreContext::test_mock(fb);
         let builder = SqlPushRedirectionConfigBuilder::with_sqlite_in_memory()?;

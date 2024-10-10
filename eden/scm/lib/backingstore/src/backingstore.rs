@@ -20,6 +20,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use configloader::hg::PinnedConfig;
+use configloader::hg::RepoInfo;
 use configloader::Config;
 use edenapi::configmodel::config::ContentHash;
 use edenapi::configmodel::ConfigExt;
@@ -118,7 +119,7 @@ impl BackingStore {
         constructors::init();
 
         let info = RepoMinimalInfo::from_repo_root(root.to_path_buf())?;
-        let mut config = configloader::hg::embedded_load(Some(&info), extra_configs)?;
+        let mut config = configloader::hg::embedded_load(RepoInfo::Disk(&info), extra_configs)?;
 
         let source = "backingstore".into();
         if !allow_retries {
@@ -165,7 +166,7 @@ impl BackingStore {
         })
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn get_blob(&self, node: &[u8], fetch_mode: FetchMode) -> Result<Option<Vec<u8>>> {
         self.maybe_reload().filestore.single(node, fetch_mode)
     }
@@ -173,7 +174,7 @@ impl BackingStore {
     /// Fetch file contents in batch. Whenever a blob is fetched, the supplied `resolve` function is
     /// called with the file content or an error message, and the index of the blob in the request
     /// array.
-    #[instrument(level = "debug", skip(self, resolve))]
+    #[instrument(level = "trace", skip(self, resolve))]
     pub fn get_blob_batch<F>(&self, keys: Vec<Key>, fetch_mode: FetchMode, resolve: F)
     where
         F: Fn(usize, Result<Option<Vec<u8>>>),
@@ -183,7 +184,7 @@ impl BackingStore {
             .batch_with_callback(keys, fetch_mode, resolve)
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn get_manifest(&self, node: &[u8]) -> Result<[u8; 20]> {
         let inner = self.maybe_reload();
         let hgid = HgId::from_slice(node)?;
@@ -200,7 +201,7 @@ impl BackingStore {
         Ok(root_tree_id.into_byte_array())
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn get_tree(
         &self,
         node: &[u8],
@@ -212,7 +213,7 @@ impl BackingStore {
     /// Fetch tree contents in batch. Whenever a tree is fetched, the supplied `resolve` function is
     /// called with the tree content or an error message, and the index of the tree in the request
     /// array.
-    #[instrument(level = "debug", skip(self, resolve))]
+    #[instrument(level = "trace", skip(self, resolve))]
     pub fn get_tree_batch<F>(&self, keys: Vec<Key>, fetch_mode: FetchMode, resolve: F)
     where
         F: Fn(usize, Result<Option<Box<dyn TreeEntry>>>),
@@ -248,8 +249,12 @@ impl BackingStore {
             .batch_with_callback(keys, fetch_mode, resolve)
     }
 
+    pub fn using_dogfooding_host(&self) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Forces backing store to rescan pack files or local indexes
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn refresh(&self) {
         // We don't need maybe_reload() here. It doesn't make sense to
         // potentially reload everything right before refreshing it again
@@ -260,14 +265,14 @@ impl BackingStore {
         inner.treestore.refresh().ok();
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn flush(&self) {
         // No need to maybe_reload() - flush intends to operate on current backingstore.
         // It wouldn't hurt, though, since reloading also flushes.
         self.inner.load().flush();
     }
 
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn get_glob_files(
         &self,
         commit_id: &[u8],
@@ -329,7 +334,7 @@ impl BackingStore {
         if !inner.reload_interval.is_zero() && since_last_reload >= inner.reload_interval {
             if let Ok(info) = RepoMinimalInfo::from_repo_root(inner.repo.path().to_owned()) {
                 if let Ok(config) =
-                    configloader::hg::embedded_load(Some(&info), &inner.extra_configs)
+                    configloader::hg::embedded_load(RepoInfo::Disk(&info), &inner.extra_configs)
                 {
                     if let Some(reason) =
                         diff_config_files(&inner.repo.config().files(), &config.files())
@@ -383,6 +388,14 @@ impl BackingStore {
         };
 
         self.inner.store(Arc::new(new_inner));
+
+        if needs_reload {
+            // Flush the old stores again right after the swaperoo. This should help
+            // reduce the window for missed cache writes. This flush is effective even
+            // though we have already created new stores since the scmstore indexedlogs
+            // automatically notice things have changed on disk during the read path.
+            inner.flush();
+        }
 
         self.inner.load()
     }

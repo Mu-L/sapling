@@ -1,6 +1,5 @@
 #modern-config-incompatible
 #inprocess-hg-incompatible
-  $ setconfig experimental.allowfilepeer=True
   $ setconfig devel.segmented-changelog-rev-compat=true
 
 #require jq no-eden
@@ -15,15 +14,11 @@
   $ hg init server
   $ cd server
   $ cat >> .hg/hgrc << EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
   > [infinitepush]
   > server = yes
   > indextype = disk
   > storetype = disk
   > reponame = testrepo
-  > [treemanifest]
-  > server = True
   > EOF
   $ touch base
   $ hg commit -Aqm base

@@ -17,6 +17,7 @@ use fbinit::FacebookInit;
 use fixtures::Linear;
 use fixtures::TestRepoFixture;
 use maplit::btreemap;
+use mononoke_macros::mononoke;
 use mononoke_types::path::MPath;
 
 use crate::ChangesetContext;
@@ -28,13 +29,14 @@ use crate::CreateCopyInfo;
 use crate::CreateInfo;
 use crate::Mononoke;
 use crate::MononokeError;
+use crate::MononokeRepo;
 use crate::RepoContext;
 
-async fn create_changeset_stack(
-    repo: &RepoContext,
+async fn create_changeset_stack<R: MononokeRepo>(
+    repo: &RepoContext<R>,
     changes_stack: Vec<BTreeMap<MPath, CreateChange>>,
     stack_parents: Vec<ChangesetId>,
-) -> Result<Vec<ChangesetContext>, MononokeError> {
+) -> Result<Vec<ChangesetContext<R>>, MononokeError> {
     let author = String::from("Test Author <test@example.com>");
     let author_date = FixedOffset::east_opt(0)
         .unwrap()
@@ -64,11 +66,11 @@ async fn create_changeset_stack(
         .collect())
 }
 
-async fn create_changesets_sequentially(
-    repo: &RepoContext,
+async fn create_changesets_sequentially<R: MononokeRepo>(
+    repo: &RepoContext<R>,
     changes_stack: Vec<BTreeMap<MPath, CreateChange>>,
     stack_parents: Vec<ChangesetId>,
-) -> Result<Vec<ChangesetContext>, MononokeError> {
+) -> Result<Vec<ChangesetContext<R>>, MononokeError> {
     let author = String::from("Test Author <test@example.com>");
     let author_date = FixedOffset::east_opt(0)
         .unwrap()
@@ -102,12 +104,12 @@ async fn create_changesets_sequentially(
     Ok(result)
 }
 
-async fn compare_create_stack(
-    stack_repo: &RepoContext,
-    seq_repo: &RepoContext,
+async fn compare_create_stack<R: MononokeRepo>(
+    stack_repo: &RepoContext<R>,
+    seq_repo: &RepoContext<R>,
     changes_stack: Vec<BTreeMap<MPath, CreateChange>>,
     stack_parents: Vec<ChangesetId>,
-) -> Result<Option<Vec<ChangesetContext>>, Error> {
+) -> Result<Option<Vec<ChangesetContext<R>>>, Error> {
     let stack =
         create_changeset_stack(stack_repo, changes_stack.clone(), stack_parents.clone()).await;
     let seq = create_changesets_sequentially(seq_repo, changes_stack, stack_parents).await;
@@ -128,18 +130,12 @@ async fn compare_create_stack(
     }
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_commit_stack(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![
-        (
-            "test_stack".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
-        (
-            "test_seq".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
+        ("test_stack".to_string(), Linear::get_repo(fb).await),
+        ("test_seq".to_string(), Linear::get_repo(fb).await),
     ])
     .await?;
     let stack_repo = mononoke
@@ -220,18 +216,12 @@ async fn test_create_commit_stack(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_commit_stack_delete_files(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![
-        (
-            "test_stack".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
-        (
-            "test_seq".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
+        ("test_stack".to_string(), Linear::get_repo(fb).await),
+        ("test_seq".to_string(), Linear::get_repo(fb).await),
     ])
     .await?;
     let stack_repo = mononoke
@@ -342,18 +332,12 @@ async fn test_create_commit_stack_delete_files(fb: FacebookInit) -> Result<(), E
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_commit_stack_path_conflicts(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![
-        (
-            "test_stack".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
-        (
-            "test_seq".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
+        ("test_stack".to_string(), Linear::get_repo(fb).await),
+        ("test_seq".to_string(), Linear::get_repo(fb).await),
     ])
     .await?;
     let stack_repo = mononoke
@@ -421,18 +405,12 @@ async fn test_create_commit_stack_path_conflicts(fb: FacebookInit) -> Result<(),
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_create_commit_stack_copy_from(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![
-        (
-            "test_stack".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
-        (
-            "test_seq".to_string(),
-            Linear::get_custom_test_repo(fb).await,
-        ),
+        ("test_stack".to_string(), Linear::get_repo(fb).await),
+        ("test_seq".to_string(), Linear::get_repo(fb).await),
     ])
     .await?;
     let stack_repo = mononoke

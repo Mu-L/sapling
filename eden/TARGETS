@@ -1,5 +1,5 @@
 load("@fbcode_macros//build_defs:native_rules.bzl", "buck_genrule")
-load("//antlir/fbpkg:fbpkg.bzl", "fbpkg")
+load("//fbpkg:fbpkg.bzl", "fbpkg")
 
 oncall("scm_client_infra")
 
@@ -16,6 +16,11 @@ buck_genrule(
         "ovr_config//os:linux",
         "ovr_config//os:macos",
     ],
+    metadata = {
+        "buck.cfg_modifiers": [
+            "fbcode//eden/scm/lib/backingstore:edenfs-include-cas",
+        ],
+    },
 )
 
 fbpkg.builder(
@@ -47,6 +52,9 @@ fbpkg.builder(
         "etc/eden/NOT_MOUNTED_README.txt": "fs/facebook/packaging/NOT_MOUNTED_README.txt",
         "etc/eden/config.d": "fs/facebook/packaging/config.d",
         "etc/eden/ignore": "fs/facebook/packaging/ignore",
+
+        # static file for DevFeature installation instructions
+        "install.toml": "facebook/dev_feature_install.toml",
 
         # these should be put under "/usr/local/libexec/eden/"
         "libexec/eden/eden-fb303-collector": fbpkg.copy("//eden/fs/facebook:eden-fb303-collector"),

@@ -44,6 +44,8 @@ import mmap
 import os
 import tempfile
 
+from bindings import revisionstore
+
 from sapling import (
     bundle2,
     changegroup,
@@ -262,14 +264,7 @@ def repository(orig, ui, path, create=False, **kwargs):
     bundlepath = encoding.environ.get("HG_HOOK_BUNDLEPATH")
     if bundlepath:
         packpaths = encoding.environ.get("HG_HOOK_PACKPATHS")
-        if packpaths:
-            # Temporarily set the overall setting, then set it directly on the
-            # repository.
-            with ui.configoverride({("treemanifest", "treeonly"): True}):
-                repo = orig(ui, bundlepath, create=create, **kwargs)
-            repo.ui.setconfig("treemanifest", "treeonly", True)
-        else:
-            repo = orig(ui, bundlepath, create=create, **kwargs)
+        repo = orig(ui, bundlepath, create=create, **kwargs)
 
         # Add hook pack paths to the store
         if packpaths:
@@ -1272,9 +1267,9 @@ def resolveonto(repo, ontoarg):
     return None
 
 
-def _createpackstore(ui, packpath):
-    datastore = datapack.makedatapackstore(ui, packpath, True)
-    histstore = historypack.makehistorypackstore(ui, packpath, True)
+def _createpackstore(path):
+    datastore = revisionstore.mutabledeltastore(path)
+    histstore = revisionstore.mutablehistorystore(path)
     return datastore, histstore
 
 
@@ -1292,7 +1287,7 @@ def _addbundlepacks(ui, mfl, packpaths):
     bundledatastores = []
     bundlehiststores = []
     for path in packpaths:
-        datastore, histstore = _createpackstore(ui, path)
+        datastore, histstore = _createpackstore(path)
         bundledatastores.append(datastore)
         bundlehiststores.append(histstore)
 

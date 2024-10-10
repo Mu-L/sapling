@@ -17,6 +17,7 @@ use cpython::*;
 use cpython_async::PyFuture;
 use cpython_async::TStream;
 use cpython_ext::convert::Serde;
+use cpython_ext::ExtractInner;
 use cpython_ext::PyCell;
 use cpython_ext::PyPathBuf;
 use cpython_ext::ResultPyErrExt;
@@ -27,10 +28,13 @@ use edenapi::SaplingRemoteApi;
 use edenapi::SaplingRemoteApiError;
 use edenapi::Stats;
 use edenapi_ext::calc_contentid;
+use edenapi_types::cloud::SmartlogDataResponse;
 use edenapi_types::AlterSnapshotRequest;
 use edenapi_types::AlterSnapshotResponse;
 use edenapi_types::AnyFileContentId;
 use edenapi_types::AnyId;
+use edenapi_types::CloudShareWorkspaceRequest;
+use edenapi_types::CloudShareWorkspaceResponse;
 use edenapi_types::CommitGraphEntry;
 use edenapi_types::CommitGraphSegmentsEntry;
 use edenapi_types::CommitHashLookupResponse;
@@ -43,27 +47,36 @@ use edenapi_types::FetchSnapshotRequest;
 use edenapi_types::FetchSnapshotResponse;
 use edenapi_types::FileResponse;
 use edenapi_types::GetReferencesParams;
+use edenapi_types::GetSmartlogByVersionParams;
+use edenapi_types::GetSmartlogParams;
 use edenapi_types::HgChangesetContent;
 use edenapi_types::HgFilenodeData;
 use edenapi_types::HgMutationEntryContent;
+use edenapi_types::HistoricalVersionsParams;
+use edenapi_types::HistoricalVersionsResponse;
 use edenapi_types::HistoryEntry;
 use edenapi_types::IndexableId;
 use edenapi_types::LandStackResponse;
 use edenapi_types::LookupResult;
 use edenapi_types::ReferencesDataResponse;
+use edenapi_types::RenameWorkspaceRequest;
+use edenapi_types::RenameWorkspaceResponse;
 use edenapi_types::SaplingRemoteApiServerError;
 use edenapi_types::SetBookmarkResponse;
 use edenapi_types::TreeAttributes;
 use edenapi_types::TreeEntry;
+use edenapi_types::UpdateArchiveParams;
+use edenapi_types::UpdateArchiveResponse;
 use edenapi_types::UpdateReferencesParams;
 use edenapi_types::UploadHgChangeset;
 use edenapi_types::UploadToken;
 use edenapi_types::WorkspaceDataResponse;
 use edenapi_types::WorkspacesDataResponse;
+use format_util::split_hg_file_metadata;
 use futures::prelude::*;
-use hgstore::split_hg_file_metadata;
 use progress_model::ProgressBar;
-use pyrevisionstore::as_legacystore;
+use pyrevisionstore::filescmstore;
+use revisionstore::HgIdDataStore;
 use revisionstore::HgIdMutableDeltaStore;
 use revisionstore::StoreKey;
 use revisionstore::StoreResult;
@@ -311,7 +324,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         Ok(Serde(responses))
     }
 
-    fn commit_graph2_py(
+    fn commit_graph_py(
         &self,
         py: Python,
         heads: Vec<HgId>,
@@ -497,7 +510,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     fn uploadfiles_py(
         &self,
         py: Python,
-        store: PyObject,
+        store: filescmstore,
         keys: Vec<(
             PyPathBuf,   /* path */
             Serde<HgId>, /* hgid */
@@ -507,7 +520,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         use_sha1: bool,
     ) -> PyResult<(TStream<anyhow::Result<Serde<UploadToken>>>, PyFuture)> {
         let keys = to_keys_with_parents(py, &keys)?;
-        let store = as_legacystore(py, store)?;
+        let store = store.extract_inner(py);
 
         let file_content_id = |data: &[u8]| -> AnyFileContentId {
             if use_sha1 {
@@ -522,7 +535,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
 
         // Preupload LFS blobs
         store
-            .upload(
+            .upload_lfs(
                 &keys
                     .iter()
                     .map(|(key, _)| StoreKey::hgid(key.clone()))
@@ -756,6 +769,78 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     ) -> PyResult<Serde<ReferencesDataResponse>> {
         let responses = py
             .allow_threads(|| block_unless_interrupted(self.cloud_update_references(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_smartlog_py(
+        &self,
+        data: Serde<GetSmartlogParams>,
+        py: Python,
+    ) -> PyResult<Serde<SmartlogDataResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_smartlog(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_share_workspace_py(
+        &self,
+        data: Serde<CloudShareWorkspaceRequest>,
+        py: Python,
+    ) -> PyResult<Serde<CloudShareWorkspaceResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_share_workspace(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_update_archive_py(
+        &self,
+        data: Serde<UpdateArchiveParams>,
+        py: Python,
+    ) -> PyResult<Serde<UpdateArchiveResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_update_archive(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_rename_workspace_py(
+        &self,
+        data: Serde<RenameWorkspaceRequest>,
+        py: Python,
+    ) -> PyResult<Serde<RenameWorkspaceResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_rename_workspace(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_smartlog_by_version_py(
+        &self,
+        data: Serde<GetSmartlogByVersionParams>,
+        py: Python,
+    ) -> PyResult<Serde<SmartlogDataResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_smartlog_by_version(data.0)))
+            .map_pyerr(py)?
+            .map_pyerr(py)?;
+        Ok(Serde(responses))
+    }
+
+    fn cloud_historical_versions_py(
+        &self,
+        data: Serde<HistoricalVersionsParams>,
+        py: Python,
+    ) -> PyResult<Serde<HistoricalVersionsResponse>> {
+        let responses = py
+            .allow_threads(|| block_unless_interrupted(self.cloud_historical_versions(data.0)))
             .map_pyerr(py)?
             .map_pyerr(py)?;
         Ok(Serde(responses))

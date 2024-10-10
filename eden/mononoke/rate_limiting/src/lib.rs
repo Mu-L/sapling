@@ -18,6 +18,7 @@ use fbinit::FacebookInit;
 use permission_checker::MononokeIdentity;
 use permission_checker::MononokeIdentitySet;
 use permission_checker::MononokeIdentitySetExt;
+use scuba_ext::MononokeScubaSampleBuilder;
 use stats::prelude::*;
 use thiserror::Error;
 
@@ -41,6 +42,11 @@ pub mod config;
 pub type LoadCost = f64;
 pub type BoxRateLimiter = Box<dyn RateLimiter + Send + Sync + 'static>;
 
+pub enum RateLimitResult {
+    Pass,
+    Fail(RateLimitReason),
+}
+
 #[async_trait]
 pub trait RateLimiter {
     async fn check_rate_limit(
@@ -48,13 +54,15 @@ pub trait RateLimiter {
         metric: Metric,
         identities: &MononokeIdentitySet,
         main_id: Option<&str>,
-    ) -> Result<Result<(), RateLimitReason>, Error>;
+        scuba: &mut MononokeScubaSampleBuilder,
+    ) -> Result<RateLimitResult, Error>;
 
     fn check_load_shed(
         &self,
         identities: &MononokeIdentitySet,
         main_id: Option<&str>,
-    ) -> Result<(), RateLimitReason>;
+        scuba: &mut MononokeScubaSampleBuilder,
+    ) -> LoadShedResult;
 
     fn bump_load(&self, metric: Metric, load: LoadCost);
 
@@ -134,6 +142,40 @@ impl RateLimit {
     }
 }
 
+pub enum LoadShedResult {
+    Pass,
+    Fail(RateLimitReason),
+}
+
+pub fn log_or_enforce_status(
+    raw_config: rate_limiting_config::LoadShedLimit,
+    metric: String,
+    value: i64,
+    scuba: &mut MononokeScubaSampleBuilder,
+) -> LoadShedResult {
+    match raw_config.status {
+        RateLimitStatus::Disabled => LoadShedResult::Pass,
+        RateLimitStatus::Tracked => {
+            scuba.log_with_msg(
+                "Would have rate limited",
+                format!(
+                    "{:?}",
+                    (RateLimitReason::LoadShedMetric(metric, value, raw_config.limit,))
+                ),
+            );
+            LoadShedResult::Pass
+        }
+        RateLimitStatus::Enforced => LoadShedResult::Fail(RateLimitReason::LoadShedMetric(
+            metric,
+            value,
+            raw_config.limit,
+        )),
+        _ => panic!(
+            "Thrift enums aren't real enums once in Rust. We have to account for other values here."
+        ),
+    }
+}
+
 impl LoadShedLimit {
     // TODO(harveyhunt): Make identities none optional once LFS server enforces that.
     pub fn should_load_shed(
@@ -141,32 +183,24 @@ impl LoadShedLimit {
         fb: FacebookInit,
         identities: Option<&MononokeIdentitySet>,
         main_id: Option<&str>,
-    ) -> Result<(), RateLimitReason> {
+        scuba: &mut MononokeScubaSampleBuilder,
+    ) -> LoadShedResult {
         let applies_to_client = match &self.target {
             Some(t) => t.matches_client(identities, main_id),
             None => true,
         };
 
         if !applies_to_client {
-            return Ok(());
+            return LoadShedResult::Pass;
         }
 
         let metric = self.raw_config.metric.to_string();
 
         match STATS::load_shed_counter.get_value(fb, (metric.clone(),)) {
-            Some(value) if value > self.raw_config.limit => match self.raw_config.status {
-                RateLimitStatus::Disabled => Ok(()),
-                // TODO (liubovd): add logging to scuba for reached limits
-                RateLimitStatus::Tracked => Ok(()),
-                RateLimitStatus::Enforced => Err(RateLimitReason::LoadShedMetric(
-                    metric,
-                    value,
-                    self.raw_config.limit,
-                )),
-                // NOTE: Thrift enums aren't real enums once in Rust. We have to account for other values here.
-                _ => Ok(()),
-            },
-            _ => Ok(()),
+            Some(value) if value > self.raw_config.limit => {
+                log_or_enforce_status(self.raw_config.clone(), metric, value, scuba)
+            }
+            _ => LoadShedResult::Pass,
         }
     }
 }
@@ -270,9 +304,11 @@ fn in_throttled_slice(
 
 #[cfg(test)]
 mod test {
+    use mononoke_macros::mononoke;
+
     use super::*;
 
-    #[test]
+    #[mononoke::test]
     fn test_target_matches() {
         let test_ident = MononokeIdentity::new("USER", "foo");
         let test2_ident = MononokeIdentity::new("USER", "bar");
@@ -308,7 +344,7 @@ mod test {
         assert!(client_id_target.matches_client(None, Some(&test_client_id)))
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_target_in_static_slice() {
         let mut identities = MononokeIdentitySet::new();
         identities.insert(MononokeIdentity::new("MACHINE", "abc123.abc1.facebook.com"));
@@ -342,7 +378,7 @@ mod test {
     }
 
     #[cfg(fbcode_build)]
-    #[test]
+    #[mononoke::test]
     fn test_static_slice_of_identity_set() {
         let test_ident = MononokeIdentity::new("USER", "foo");
         let test2_ident = MononokeIdentity::new("SERVICE_IDENTITY", "bar");

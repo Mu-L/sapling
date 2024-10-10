@@ -12,8 +12,8 @@ setup configuration
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo "a" > a
   $ echo "b" > b
   $ hg addremove && hg ci -q -ma
@@ -27,12 +27,12 @@ create master bookmark
 
 setup repo-push and repo-pull
   $ cd $TESTTMP
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
 
 blobimport
 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
 
@@ -42,13 +42,12 @@ push some files with copy/move files
   $ cd $TESTTMP/repo-push
   $ hg up master_bookmark
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark master_bookmark)
   $ hg cp a a_copy
   $ hg mv b b_move
   $ hg addremove && hg ci -q -mb
   recording removal of b as rename to b_move (100% similar)
-  $ hgmn push mononoke://$(mononoke_address)/repo
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push --to master_bookmark
+  pushing rev 4b747ca852a4 to destination mono:repo bookmark master_bookmark
   searching for changes
   updating bookmark master_bookmark
 
@@ -57,16 +56,14 @@ pull them
   $ cd $TESTTMP/repo-pull
   $ hg up master_bookmark
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark master_bookmark)
   $ hg log -T '{node}\n'
   0cd96de13884b090099512d4794ae87ad067ea8e
-  $ hgmn pull mononoke://$(mononoke_address)/repo
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  updating bookmark master_bookmark
   $ hg log -T '{node}\n'
   4b747ca852a40a105b9bb71cd4d07248ea80f704
   0cd96de13884b090099512d4794ae87ad067ea8e
@@ -77,8 +74,8 @@ push files that modify copied and moved files
   $ echo "aa" >> a_copy
   $ echo "bb" >> b_move
   $ hg addremove && hg ci -q -mc
-  $ hgmn push mononoke://$(mononoke_address)/repo
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push --to master_bookmark
+  pushing rev 8b374fd7e2ef to destination mono:repo bookmark master_bookmark
   searching for changes
   updating bookmark master_bookmark
 
@@ -88,18 +85,17 @@ pull them
   $ hg log -T '{node}\n'
   4b747ca852a40a105b9bb71cd4d07248ea80f704
   0cd96de13884b090099512d4794ae87ad067ea8e
-  $ hgmn pull mononoke://$(mononoke_address)/repo
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
   adding file changes
-  updating bookmark master_bookmark
   $ hg log -T '{node}\n'
   8b374fd7e2ef1cc418b9c68f484ebd2cb6c6c6a1
   4b747ca852a40a105b9bb71cd4d07248ea80f704
   0cd96de13884b090099512d4794ae87ad067ea8e
-  $ hgmn up master_bookmark
+  $ hg up master_bookmark
   2 files updated, 0 files merged, 1 files removed, 0 files unresolved
   $ cat a_copy
   a

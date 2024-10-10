@@ -19,8 +19,10 @@ use dag::ops::DagAlgorithm;
 use eagerepo::EagerRepo as RustEagerRepo;
 use eagerepo::EagerRepoStore as RustEagerRepoStore;
 use edenapi_types::HgId;
+use pyconfigloader::config;
 use pydag::dagalgo::dagalgo as PyDag;
 use pyedenapi::PyClient;
+use storemodel::SerializationFormat;
 
 mod impl_into;
 
@@ -47,8 +49,10 @@ py_class!(class EagerRepo |py| {
 
     /// Construct `EagerRepo` from a URL.
     @staticmethod
-    def openurl(url: &str) -> PyResult<Self> {
-        let dir = match RustEagerRepo::url_to_dir(url) {
+    def openurl(config: &config, url: &str) -> PyResult<Self> {
+        let config = config.get_cfg(py);
+        let url = repourl::RepoUrl::from_str(&config, url).map_pyerr(py)?;
+        let dir = match RustEagerRepo::url_to_dir(&url) {
             Some(dir) => dir,
             None => return Err(PyErr::new::<exc::ValueError, _>(py, "invalid url")),
         };
@@ -127,9 +131,9 @@ py_class!(pub class EagerRepoStore |py| {
 
     /// Construct `EagerRepoStore` from a directory.
     @staticmethod
-    def open(dir: &PyPath) -> PyResult<Self> {
+    def open(dir: &PyPath, format: Serde<SerializationFormat> = Serde(SerializationFormat::Hg)) -> PyResult<Self> {
         let path = dir.as_path().to_path_buf();
-        let inner = RustEagerRepoStore::open(&path).map_pyerr(py)?;
+        let inner = RustEagerRepoStore::open(&path, format.0).map_pyerr(py)?;
         Self::create_instance(py, inner)
     }
 

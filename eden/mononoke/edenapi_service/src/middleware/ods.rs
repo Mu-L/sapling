@@ -26,7 +26,13 @@ define_stats! {
     blame_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     bookmarks_duration_ms: histogram(10, 0, 500, Average, Sum, Count; P 50; P 75; P 95; P 99),
     capabilities_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_historical_versions_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     cloud_references_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_rename_workspace_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    cloud_share_workspace_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 75; P 95; P 99),
+    cloud_smartlog_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 75; P 95; P 99),
+    cloud_smartlog_by_version: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 75; P 95; P 99),
+    cloud_update_archive_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     cloud_update_references_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 95; P 99),
     cloud_workspace_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     cloud_workspaces_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
@@ -45,6 +51,7 @@ define_stats! {
     failure_5xx: dynamic_timeseries("{}.failure_5xx", (method: String); Rate, Sum),
     fetch_snapshot_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     files2_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
+    git_objects_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     history_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
     land_stack_duration_ms: histogram(10, 0, 500, Average, Sum, Count; P 50; P 75; P 95; P 99),
     lookup_duration_ms: histogram(100, 0, 5000, Average, Sum, Count; P 50; P 75; P 95; P 99),
@@ -88,7 +95,15 @@ fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
                 Blame => STATS::blame_duration_ms.add_value(dur_ms),
                 Bookmarks => STATS::bookmarks_duration_ms.add_value(dur_ms),
                 Capabilities => STATS::capabilities_duration_ms.add_value(dur_ms),
+                CloudHistoricalVersions => {
+                    STATS::cloud_historical_versions_duration_ms.add_value(dur_ms)
+                }
                 CloudReferences => STATS::cloud_references_duration_ms.add_value(dur_ms),
+                CloudRenameWorkspace => STATS::cloud_rename_workspace_duration_ms.add_value(dur_ms),
+                CloudShareWorkspace => STATS::cloud_share_workspace_duration_ms.add_value(dur_ms),
+                CloudSmartlog => STATS::cloud_smartlog_duration_ms.add_value(dur_ms),
+                CloudSmartlogByVersion => STATS::cloud_smartlog_by_version.add_value(dur_ms),
+                CloudUpdateArchive => STATS::cloud_update_archive_duration_ms.add_value(dur_ms),
                 CloudUpdateReferences => {
                     STATS::cloud_update_references_duration_ms.add_value(dur_ms)
                 }
@@ -110,6 +125,7 @@ fn log_stats(state: &mut State, status: StatusCode) -> Option<()> {
                 EphemeralPrepare => STATS::ephemeral_prepare_duration_ms.add_value(dur_ms),
                 FetchSnapshot => STATS::fetch_snapshot_duration_ms.add_value(dur_ms),
                 Files2 => STATS::files2_duration_ms.add_value(dur_ms),
+                GitObjects => STATS::git_objects_duration_ms.add_value(dur_ms),
                 History => STATS::history_duration_ms.add_value(dur_ms),
                 LandStack => STATS::land_stack_duration_ms.add_value(dur_ms),
                 Lookup => STATS::lookup_duration_ms.add_value(dur_ms),

@@ -192,7 +192,6 @@ def rewrite(repo, old, updates, head, newbases, commitopts, mutop=None):
         # date
         date = commitopts.get("date") or None
         extra = dict(commitopts.get("extra", old.extra()))
-        extra["branch"] = head.branch()
         mutinfo = mutation.record(repo, extra, [c.node() for c in updates], mutop)
         loginfo = {
             "predecessors": " ".join(c.hex() for c in updates),
@@ -213,7 +212,7 @@ def rewrite(repo, old, updates, head, newbases, commitopts, mutop=None):
         )
 
         if commitopts.get("edit"):
-            new._text = cmdutil.commitforceeditor(repo, new, [])
+            new._text = cmdutil.commitforceeditor(repo, new)
         revcount = len(repo)
         newid = repo.commitctx(new)
         new = repo[newid]
@@ -246,7 +245,6 @@ def metarewrite(repo, old, newbases, commitopts):
         user = commitopts.get("user") or old.user()
         date = commitopts.get("date") or None  # old.date()
         extra = dict(commitopts.get("extra", old.extra()))
-        extra["branch"] = old.branch()
         preds = [old.node()]
         mutop = "metaedit"
         mutinfo = mutation.record(repo, extra, preds, mutop)
@@ -265,7 +263,7 @@ def metarewrite(repo, old, newbases, commitopts):
         )
 
         if commitopts.get("edit"):
-            new._text = cmdutil.commitforceeditor(repo, new, [])
+            new._text = cmdutil.commitforceeditor(repo, new)
         revcount = len(repo)
         newid = repo.commitctx(new)
         new = repo[newid]

@@ -31,10 +31,13 @@ mononoke_app::subcommands! {
     mod blobstore_unlink;
     mod bookmarks;
     mod cas_store;
+    mod case_conflict;
     mod changelog;
     mod commit;
     mod commit_graph;
     mod convert;
+    mod cross_repo;
+    mod cross_repo_config;
     mod derivation_queue;
     mod derived_data;
     mod ephemeral_store;
@@ -49,6 +52,7 @@ mononoke_app::subcommands! {
     mod megarepo;
     mod mutable_counters;
     mod mutable_renames;
+    mod phases;
     mod redaction;
     mod repo_info;
 }

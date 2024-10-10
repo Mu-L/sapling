@@ -13,7 +13,6 @@ use anyhow::Result;
 use gix_hash::ObjectId;
 use gix_packetline::PacketLineRef;
 use gix_packetline::StreamingPeekableIter;
-use gix_transport::bstr::ByteSlice;
 
 use super::fetch::parse_oid;
 use super::PUSH_MARKER;
@@ -23,6 +22,7 @@ const OBJECT_FORMAT: &str = "object-format=";
 const ATOMIC: &str = "atomic";
 const DELETE_REFS: &str = "delete-refs";
 const QUIET: &str = "quiet";
+const SHALLOW_PREFIX: &[u8] = b"shallow";
 
 /// Enum representing the object format for hashes
 #[derive(Clone, Debug, Copy)]
@@ -138,17 +138,31 @@ pub struct PushArgs<'a> {
     pub pack_file: &'a [u8],
     /// List of ref moves/updates that are part of the user push
     pub ref_updates: Vec<RefUpdate>,
+    /// List of shallow commits that are part of the user push
+    pub shallow: Vec<ObjectId>,
 }
 
 impl<'a> PushArgs<'a> {
     pub fn parse_from_packetline(args: &'a [u8]) -> Result<Self> {
         let mut push_args = Self::default();
-        let args = args.trim();
         let mut tokens = StreamingPeekableIter::new(args, &[PacketLineRef::Flush], true);
         while let Some(token) = tokens.read_line() {
             let token =
                 token.context("Failed to read line from packetline during push arg parsing")??;
             if let PacketLineRef::Data(data) = token {
+                if data.starts_with(SHALLOW_PREFIX) {
+                    let parsed_input = from_utf8(data)
+                        .context("Failure in converting shallow line into UTF-8 string")?;
+                    let mut parts = parsed_input.split_whitespace();
+                    if let (Some("shallow"), Some(oid)) = (parts.next(), parts.next()) {
+                        push_args
+                            .shallow
+                            .push(parse_oid(oid.as_bytes(), b"shallow ")?);
+                    } else {
+                        bail!("Invalid format for shallow: {:?}", parsed_input);
+                    }
+                    continue;
+                }
                 let mut parts = data.split(|elem| elem == &PUSH_MARKER);
                 match (parts.next(), parts.next()) {
                     (Some(ref_update), Some(push_settings)) => {
@@ -169,5 +183,9 @@ impl<'a> PushArgs<'a> {
         }
         push_args.pack_file = tokens.into_inner();
         Ok(push_args)
+    }
+
+    pub fn is_shallow(&self) -> bool {
+        !self.shallow.is_empty()
     }
 }

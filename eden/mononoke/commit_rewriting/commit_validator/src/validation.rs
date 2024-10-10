@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use anyhow::format_err;
 use anyhow::Error;
-use blobrepo::BlobRepo;
 use blobstore::Loadable;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateLogEntry;
@@ -51,7 +50,6 @@ use mercurial_types::HgFileNodeId;
 use mercurial_types::HgManifestId;
 use metaconfig_types::CommitSyncConfigVersion;
 use metaconfig_types::CommitSyncDirection;
-use mononoke_api_types::InnerRepo;
 use mononoke_types::ChangesetId;
 use mononoke_types::NonRootMPath;
 use mononoke_types::RepositoryId;
@@ -66,7 +64,9 @@ use slog::error;
 use slog::info;
 use stats::prelude::*;
 use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SyncedCommitMapping;
 
+use crate::repo::Repo;
 use crate::reporting::log_validation_result_to_scuba;
 use crate::tail::QueueSize;
 
@@ -209,16 +209,16 @@ type FullManifestDiff = HashSet<FilenodeDiff>;
 /// validation between a large repo and a single small repo
 #[derive(Clone)]
 struct ValidationHelper {
-    large_repo: Large<BlobRepo>,
-    small_repo: Small<BlobRepo>,
+    large_repo: Large<Repo>,
+    small_repo: Small<Repo>,
     scuba_sample: MononokeScubaSampleBuilder,
     live_commit_sync_config: CfgrLiveCommitSyncConfig,
 }
 
 impl ValidationHelper {
     fn new(
-        large_repo: Large<BlobRepo>,
-        small_repo: Small<BlobRepo>,
+        large_repo: Large<Repo>,
+        small_repo: Small<Repo>,
         scuba_sample: MononokeScubaSampleBuilder,
         live_commit_sync_config: CfgrLiveCommitSyncConfig,
     ) -> Self {
@@ -291,7 +291,7 @@ impl ValidationHelper {
     async fn is_true_change(
         &self,
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
         p1_root_mf_id: &HgManifestId,
         mpath: &NonRootMPath,
         payload: &FilenodeDiffPayload,
@@ -394,7 +394,7 @@ impl ValidationHelper {
     async fn filter_out_noop_filenode_id_changes(
         &self,
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
         cs_id: &ChangesetId,
         paths_and_payloads: Vec<(NonRootMPath, &FilenodeDiffPayload)>,
     ) -> Result<Vec<NonRootMPath>, Error> {
@@ -491,7 +491,7 @@ impl ValidationHelper {
 /// validation a large repo and potentially multiple small repos
 #[derive(Clone)]
 pub struct ValidationHelpers {
-    large_repo: Large<InnerRepo>,
+    large_repo: Large<Repo>,
     helpers: HashMap<Small<RepositoryId>, ValidationHelper>,
     /// The "master" bookmark in the large repo. This is needed when
     /// we are unfolding an entry, which creates a new bookmark. Such entry
@@ -504,11 +504,8 @@ pub struct ValidationHelpers {
 
 impl ValidationHelpers {
     pub fn new(
-        large_repo: InnerRepo,
-        helpers: HashMap<
-            RepositoryId,
-            (Large<BlobRepo>, Small<BlobRepo>, MononokeScubaSampleBuilder),
-        >,
+        large_repo: Repo,
+        helpers: HashMap<RepositoryId, (Large<Repo>, Small<Repo>, MononokeScubaSampleBuilder)>,
         large_repo_master_bookmark: BookmarkKey,
         mapping: SqlSyncedCommitMapping,
         live_commit_sync_config: CfgrLiveCommitSyncConfig,
@@ -541,7 +538,7 @@ impl ValidationHelpers {
             .ok_or_else(|| format_err!("Repo {} is not present in ValidationHelpers", repo_id))
     }
 
-    fn get_small_repo(&self, repo_id: &Small<RepositoryId>) -> Result<&Small<BlobRepo>, Error> {
+    fn get_small_repo(&self, repo_id: &Small<RepositoryId>) -> Result<&Small<Repo>, Error> {
         let helper = self.get_helper(repo_id)?;
         Ok(&helper.small_repo)
     }
@@ -579,7 +576,7 @@ impl ValidationHelpers {
 
     async fn get_root_full_manifest_diff(
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
         root_mf_id: HgManifestId,
     ) -> Result<FullManifestDiff, Error> {
         let all_files = list_all_filenode_ids(ctx, repo, root_mf_id).await?;
@@ -592,7 +589,7 @@ impl ValidationHelpers {
     /// Produce a full manifest diff between `cs_id` and its first parent
     async fn get_full_manifest_diff(
         ctx: &CoreContext,
-        repo: &BlobRepo,
+        repo: &Repo,
         cs_id: &ChangesetId,
     ) -> Result<FullManifestDiff, Error> {
         let cs_root_mf_id_fut = fetch_root_mf_id(ctx, repo, cs_id.clone());
@@ -633,7 +630,7 @@ impl ValidationHelpers {
         ctx: &CoreContext,
         cs_id: &Large<ChangesetId>,
     ) -> Result<Large<FullManifestDiff>, Error> {
-        Self::get_full_manifest_diff(ctx, &self.large_repo.0.blob_repo, &cs_id.0)
+        Self::get_full_manifest_diff(ctx, &self.large_repo, &cs_id.0)
             .await
             .map(Large)
     }
@@ -680,8 +677,6 @@ impl ValidationHelpers {
     async fn get_large_repo_master(&self, ctx: CoreContext) -> Result<ChangesetId, Error> {
         let maybe_cs_id = self
             .large_repo
-            .0
-            .blob_repo
             .bookmarks()
             .get(ctx, &self.large_repo_master_bookmark)
             .await?;
@@ -696,10 +691,7 @@ impl ValidationHelpers {
     ) -> Result<(Mover, Mover), Error> {
         let commit_sync_config = self
             .live_commit_sync_config
-            .get_commit_sync_config_by_version(
-                self.large_repo.0.blob_repo.repo_identity().id(),
-                version_name,
-            )
+            .get_commit_sync_config_by_version(self.large_repo.repo_identity().id(), version_name)
             .await?;
 
         let movers = get_movers(
@@ -981,7 +973,7 @@ async fn validate_topological_order<'a, R: RepoIdentityRef + CommitGraphRef + Co
     large_cs_id: Large<ChangesetId>,
     small_repo: &'a Small<R>,
     small_cs_id: Small<ChangesetId>,
-    mapping: &'a SqlSyncedCommitMapping,
+    mapping: Arc<dyn SyncedCommitMapping>,
     live_commit_sync_config: Arc<dyn LiveCommitSyncConfig>,
 ) -> Result<(), Error> {
     debug!(
@@ -999,14 +991,14 @@ async fn validate_topological_order<'a, R: RepoIdentityRef + CommitGraphRef + Co
 
     let remapped_small_parents: Vec<(ChangesetId, ChangesetId)> =
         try_join_all(small_parents.into_iter().map(|small_parent| {
-            cloned!(ctx, live_commit_sync_config);
+            cloned!(ctx, live_commit_sync_config, mapping);
             async move {
                 let maybe_commit_sync_outcome = get_commit_sync_outcome(
                     &ctx,
                     Source(small_repo_id),
                     Target(large_repo_id),
                     Source(small_parent),
-                    mapping,
+                    &mapping,
                     CommitSyncDirection::SmallToLarge,
                     live_commit_sync_config,
                 )
@@ -1360,7 +1352,7 @@ fn report_missing(
 async fn validate_in_a_single_repo(
     ctx: &CoreContext,
     validation_helper: ValidationHelper,
-    large_repo: Large<BlobRepo>,
+    large_repo: Large<Repo>,
     large_cs_id: Large<ChangesetId>,
     small_cs_id: Small<ChangesetId>,
     large_repo_full_manifest_diff: Large<FullManifestDiff>,
@@ -1387,7 +1379,7 @@ async fn validate_in_a_single_repo(
         large_cs_id,
         &validation_helper.small_repo,
         small_cs_id,
-        &mapping,
+        Arc::new(mapping),
         Arc::new(validation_helper.live_commit_sync_config.clone()),
     )
     .await
@@ -1434,7 +1426,7 @@ pub async fn validate_entry(
                             validate_in_a_single_repo(
                                 &ctx,
                                 validation_helper,
-                                Large(large_repo.blob_repo.clone()),
+                                large_repo,
                                 large_cs_id,
                                 small_cs_id,
                                 large_repo_full_manifest_diff,
@@ -1485,7 +1477,7 @@ pub async fn validate_entry(
 
 async fn fetch_root_mf_id(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     cs_id: ChangesetId,
 ) -> Result<HgManifestId, Error> {
     let hg_cs_id = repo.derive_hg_changeset(ctx, cs_id).await?;
@@ -1495,7 +1487,7 @@ async fn fetch_root_mf_id(
 
 async fn list_all_filenode_ids(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &Repo,
     mf_id: HgManifestId,
 ) -> Result<PathToFileNodeIdMapping, Error> {
     let repoid = repo.repo_identity().id();
@@ -1531,8 +1523,8 @@ async fn verify_filenodes_have_same_contents<
     I: IntoIterator<Item = (NonRootMPath, Source<HgFileNodeId>, Target<HgFileNodeId>)>,
 >(
     ctx: &CoreContext,
-    target_repo: &Target<BlobRepo>,
-    source_repo: &Source<BlobRepo>,
+    target_repo: &Target<Repo>,
+    source_repo: &Source<Repo>,
     source_hash: &Source<ChangesetId>,
     should_be_equivalent: I,
 ) -> Result<(), Error> {
@@ -1591,6 +1583,7 @@ mod tests {
     use cross_repo_sync_test_utils::TestRepo;
     use fbinit::FacebookInit;
     use maplit::hashmap;
+    use mononoke_macros::mononoke;
     use tests_utils::CommitIdentifier;
     use tests_utils::CreateCommitContext;
     use tokio::runtime::Runtime;
@@ -1667,7 +1660,7 @@ mod tests {
             Large(large_commits[large_index_to_test].clone()),
             &small_repo,
             Small(small_commits[small_index_to_test].clone()),
-            &small_to_large_commit_syncer.mapping,
+            small_to_large_commit_syncer.get_mapping().clone(),
             small_to_large_commit_syncer.live_commit_sync_config,
         )
         .await?;
@@ -1675,7 +1668,7 @@ mod tests {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_topological_order_validation_ok(fb: FacebookInit) -> Result<(), Error> {
         // Large repo  Mapping  Small repo
         //    2    -------------    1
@@ -1707,7 +1700,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_topological_order_validation_bad_direct_parents(fb: FacebookInit) -> Result<(), Error> {
         // Large repo  Mapping  Small repo
         //    1      --\   /--      1
@@ -1738,7 +1731,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_topological_order_validation_bad_ancestors(fb: FacebookInit) -> Result<(), Error> {
         // Large repo  Mapping  Small repo
         //    2      --\   /--      1
@@ -1770,7 +1763,7 @@ mod tests {
         })
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     fn test_topological_order_validation_bad_unremapped_ancestors(
         fb: FacebookInit,
     ) -> Result<(), Error> {

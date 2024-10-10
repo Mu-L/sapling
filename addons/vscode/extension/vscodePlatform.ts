@@ -9,6 +9,8 @@ import type {ServerPlatform} from 'isl-server/src/serverPlatform';
 import type {RepositoryContext} from 'isl-server/src/serverTypes';
 import type {
   AbsolutePath,
+  Diagnostic,
+  DiagnosticSeverity,
   PlatformSpecificClientToServerMessages,
   RepoRelativePath,
   ServerToClientMessage,
@@ -16,6 +18,7 @@ import type {
 import type {Json} from 'shared/typeUtils';
 
 import {executeVSCodeCommand} from './commands';
+import {PERSISTED_STORAGE_KEY_PREFIX, shouldOpenBeside} from './config';
 import {t} from './i18n';
 import {Repository} from 'isl-server/src/Repository';
 import {arraysEqual} from 'isl/src/utils';
@@ -45,25 +48,43 @@ function openFile(
     });
     return;
   }
-  vscode.window.showTextDocument(uri, {preview}).then(
-    editor => {
-      if (line != null) {
-        const lineZeroIndexed = line - 1; // vscode uses 0-indexed line numbers
-        editor.selections = [new vscode.Selection(lineZeroIndexed, 0, lineZeroIndexed, 0)]; // move cursor to line
-        editor.revealRange(
-          new vscode.Range(lineZeroIndexed, 0, lineZeroIndexed, 0),
-          vscode.TextEditorRevealType.InCenterIfOutsideViewport,
-        ); // scroll to line
-      }
-    },
-    err => {
-      vscode.window.showErrorMessage(err.message ?? String(err));
-    },
-  );
+  vscode.window
+    .showTextDocument(uri, {
+      preview,
+      viewColumn: shouldOpenBeside() ? vscode.ViewColumn.Beside : undefined,
+    })
+    .then(
+      editor => {
+        if (line != null) {
+          const lineZeroIndexed = line - 1; // vscode uses 0-indexed line numbers
+          editor.selections = [new vscode.Selection(lineZeroIndexed, 0, lineZeroIndexed, 0)]; // move cursor to line
+          editor.revealRange(
+            new vscode.Range(lineZeroIndexed, 0, lineZeroIndexed, 0),
+            vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+          ); // scroll to line
+        }
+      },
+      err => {
+        vscode.window.showErrorMessage(err.message ?? String(err));
+      },
+    );
 }
 export type VSCodeServerPlatform = ServerPlatform & {
   panelOrView: undefined | vscode.WebviewPanel | vscode.WebviewView;
 };
+
+function diagnosticSeverity(severity: vscode.DiagnosticSeverity): DiagnosticSeverity {
+  switch (severity) {
+    case vscode.DiagnosticSeverity.Error:
+      return 'error';
+    case vscode.DiagnosticSeverity.Warning:
+      return 'warning';
+    case vscode.DiagnosticSeverity.Information:
+      return 'info';
+    case vscode.DiagnosticSeverity.Hint:
+      return 'hint';
+  }
+}
 
 export const getVSCodePlatform = (context: vscode.ExtensionContext): VSCodeServerPlatform => ({
   platformName: 'vscode',
@@ -107,6 +128,38 @@ export const getVSCodePlatform = (context: vscode.ExtensionContext): VSCodeServe
           if (this.panelOrView != null) {
             this.panelOrView.title = message.title;
           }
+          break;
+        }
+        case 'platform/checkForDiagnostics': {
+          const diagnosticMap = new Map<RepoRelativePath, Array<Diagnostic>>();
+          const repoRoot = repo?.info.repoRoot;
+          if (repoRoot) {
+            for (const path of message.paths) {
+              const uri = vscode.Uri.file(pathModule.join(repoRoot, path));
+              const diagnostics = vscode.languages.getDiagnostics(uri);
+              if (diagnostics.length > 0) {
+                diagnosticMap.set(
+                  path,
+                  diagnostics.map(diagnostic => ({
+                    message: diagnostic.message,
+                    range: {
+                      startLine: diagnostic.range.start.line,
+                      startCol: diagnostic.range.start.character,
+                      endLine: diagnostic.range.end.line,
+                      endCol: diagnostic.range.end.character,
+                    },
+                    severity: diagnosticSeverity(diagnostic.severity),
+                    source: diagnostic.source,
+                    code:
+                      typeof diagnostic.code === 'object'
+                        ? String(diagnostic.code.value)
+                        : String(diagnostic.code),
+                  })),
+                );
+              }
+            }
+          }
+          postMessage({type: 'platform/gotDiagnostics', diagnostics: diagnosticMap});
           break;
         }
         case 'platform/confirm': {
@@ -196,8 +249,8 @@ export const getVSCodePlatform = (context: vscode.ExtensionContext): VSCodeServe
           break;
         }
         case 'platform/setPersistedState': {
-          const {data} = message;
-          context.globalState.update('isl-persisted', data);
+          const {key, data} = message;
+          context.globalState.update(PERSISTED_STORAGE_KEY_PREFIX + key, data);
           break;
         }
         case 'platform/subscribeToVSCodeConfig': {

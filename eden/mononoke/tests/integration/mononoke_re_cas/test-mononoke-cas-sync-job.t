@@ -9,7 +9,7 @@
   $ export CAS_STORE_PATH="$TESTTMP"
 
   $ start_and_wait_for_mononoke_server
-  $ hgmn_init repo
+  $ hg clone -q mono:repo repo
   $ cd repo
   $ drawdag << EOS
   > D # D/bar = zero\nuno\ntwo\n
@@ -21,17 +21,17 @@
   > A # A/foo = one\n
   > EOS
 
-  $ sl goto A -q
-  $ sl push -r . --to master -q --create
+  $ hg goto A -q
+  $ hg push -r . --to master -q --create
 
-  $ sl goto B -q
-  $ sl push -r . --to master -q
+  $ hg goto B -q
+  $ hg push -r . --to master -q
 
-  $ sl goto C -q
-  $ sl push -r . --to master -q
+  $ hg goto C -q
+  $ hg push -r . --to master -q
 
-  $ sl goto D -q
-  $ sl push -r . --to master -q
+  $ hg goto D -q
+  $ hg push -r . --to master -q
 
 Check that new entry was added to the sync database. 4 pushes
   $ sqlite3 "$TESTTMP/monsql/sqlite_dbs" "select count(*) from bookmarks_update_log";
@@ -43,7 +43,7 @@ Sync all bookmarks moves
   using repo "repo" repoid RepositoryId(0), repo: repo
   syncing log entries [1, 2, 3, 4] ..., repo: repo
   log entry BookmarkUpdateLogEntry * is a creation of bookmark, repo: repo (glob)
-  log entries [1, 2, 3, 4] synced (4 commits uploaded, upload stats: *, repo: repo (glob)
+  log entries [1, 2, 3, 4] synced *, repo: repo (glob)
   queue size after processing: 0, repo: repo
   successful sync of entries [1, 2, 3, 4], repo: repo
   Finished mononoke RE CAS sync command execution for repo repo, repo: repo

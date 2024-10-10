@@ -1,7 +1,6 @@
 #chg-compatible
 #debugruntest-incompatible
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
   $ setconfig checkout.use-rust=true
 
 TODO: configure mutation
@@ -80,7 +79,7 @@ Stack of non-conflicting commits should be accepted
   running * (glob)
   sending hello command
   sending between command
-  remote: 542
+  remote: * (glob)
   remote: capabilities: * (glob)
   remote: 1
   pushing rev 0e3997dc0733 to destination ssh://user@dummy/server bookmark main
@@ -663,7 +662,7 @@ Test date rewriting
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to tip
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd rewritedateclient
   $ cat >> .hg/hgrc <<EOF
@@ -799,7 +798,7 @@ Test force pushes
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd forcepushserver
   $ echo a >> a && hg commit -Aqm aa

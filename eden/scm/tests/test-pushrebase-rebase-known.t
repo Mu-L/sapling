@@ -5,7 +5,6 @@
 
 Pushrebase still needs filepeer.
 
-  $ setconfig experimental.allowfilepeer=True
 
   $ configure modern
   $ enable pushrebase

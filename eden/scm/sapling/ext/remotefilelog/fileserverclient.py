@@ -11,20 +11,16 @@ import struct
 import time
 import traceback
 
-from sapling import error, perftrace, pycompat, revlog, wireproto
+from sapling import error, perftrace, pycompat, wireproto
 from sapling.i18n import _
-from sapling.node import bin
 
 from . import constants, shallowutil, wirepack
-
 
 # Statistics for debugging
 fetchcost = 0
 fetches = 0
 fetched = 0
 fetchmisses = 0
-
-_lfsmod = None
 
 
 def peersetup(ui, peer):
@@ -95,7 +91,7 @@ class getpackclient:
 
         # Issue request
         pipeo = shallowutil.trygetattr(remote, ("_pipeo", "pipeo"))
-        for filename, nodes in pycompat.iteritems(grouped):
+        for filename, nodes in grouped.items():
             filename = pycompat.encodeutf8(filename)
             filenamelen = struct.pack(constants.FILENAMESTRUCT, len(filename))
             countlen = struct.pack(constants.PACKREQUESTCOUNTSTRUCT, len(nodes))
@@ -202,17 +198,16 @@ class fileserverclient:
         """downloads the given file versions to the cache"""
         repo = self.repo
 
-        batchlfsdownloads = self.ui.configbool(
-            "remotefilelog", "_batchlfsdownloads", True
-        )
-        dolfsprefetch = self.ui.configbool("remotefilelog", "dolfsprefetch", True)
+        contentstore = repo.fileslog.filestore
+        metadatastore = repo.fileslog.metadatastore
 
-        if not force:
-            contentstore = repo.fileslog.filestore
-            metadatastore = repo.fileslog.metadatastore
-        else:
-            # TODO(meyer): Convert this to support scmstore.
-            contentstore, metadatastore = repo.fileslog.makesharedonlyruststore(repo)
+        if force:
+            # There are handful of cases (such as fetching up-to-date linkrev after
+            # pushrebase) where we need to force prefetch data that is present in the
+            # local store, for this specific case, let's build shared-only stores. See
+            # D19412620.
+            contentstore = contentstore.getsharedmutable()
+            metadatastore = metadatastore.getsharedmutable()
 
         if type(fileids) is not list:
             fileids = list(fileids)
@@ -221,43 +216,6 @@ class fileserverclient:
             contentstore.prefetch(fileids)
         if fetchhistory:
             metadatastore.prefetch(fileids)
-
-        if batchlfsdownloads and dolfsprefetch:
-            self._lfsprefetch(fileids)
-
-        if force:
-            # Yay, since the shared-only stores and the regular ones aren't
-            # shared, we need to commit data to force the stores to be
-            # rebuilt. Forced prefetch are very rare and thus it is most
-            # likely OK to do this.
-            contentstore = None
-            metadatastore = None
-            repo.commitpending()
-
-    @perftrace.tracefunc("LFS Prefetch")
-    def _lfsprefetch(self, fileids):
-        if not _lfsmod or not hasattr(self.repo.svfs, "lfslocalblobstore"):
-            return
-        if not _lfsmod.wrapper.candownload(self.repo):
-            return
-        pointers = []
-        filenames = {}
-        store = self.repo.svfs.lfslocalblobstore
-        for file, node in fileids:
-            rlog = self.repo.file(file)
-            if rlog.flags(node) & revlog.REVIDX_EXTSTORED:
-                text = rlog.revision(node, raw=True)
-                p = _lfsmod.pointer.deserialize(text)
-                oid = p.oid()
-                if not store.has(oid):
-                    pointers.append(p)
-                    filenames[oid] = file
-        if len(pointers) > 0:
-            perftrace.tracevalue("Missing", len(pointers))
-            self.repo.svfs.lfsremoteblobstore.readbatch(
-                pointers, store, objectnames=filenames
-            )
-            assert all(store.has(p.oid()) for p in pointers)
 
     def logstacktrace(self):
         self.ui.log(

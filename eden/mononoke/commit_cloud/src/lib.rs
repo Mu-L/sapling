@@ -8,48 +8,64 @@
 #![feature(trait_alias)]
 pub mod ctx;
 pub mod references;
+pub mod smartlog;
 pub mod sql;
+use std::fmt::Display;
 use std::sync::Arc;
 
+use anyhow::bail;
+use anyhow::ensure;
+use anyhow::Context;
 use bonsai_hg_mapping::BonsaiHgMapping;
-use changeset_info::ChangesetInfo;
+use commit_cloud_helpers::make_workspace_acl_name;
+#[cfg(fbcode_build)]
+use commit_cloud_intern_utils::acl_check::ACL_LINK;
 #[cfg(fbcode_build)]
 use commit_cloud_intern_utils::interngraph_publisher::publish_single_update;
 #[cfg(fbcode_build)]
 use commit_cloud_intern_utils::notification::NotificationData;
+use commit_cloud_types::CommitCloudError;
+use commit_cloud_types::CommitCloudInternalError;
+use commit_cloud_types::CommitCloudUserError;
+use commit_cloud_types::HistoricalVersion;
+use commit_cloud_types::ReferencesData;
+use commit_cloud_types::SmartlogFilter;
+use commit_cloud_types::UpdateReferencesParams;
+use commit_cloud_types::WorkspaceData;
+use commit_cloud_types::WorkspaceSharingData;
 use context::CoreContext;
-use edenapi_types::cloud::RemoteBookmark;
-use edenapi_types::cloud::SmartlogData;
-use edenapi_types::GetReferencesParams;
-use edenapi_types::GetSmartlogParams;
-use edenapi_types::HgId;
-use edenapi_types::ReferencesData;
-use edenapi_types::SmartlogNode;
-use edenapi_types::UpdateReferencesParams;
-use edenapi_types::WorkspaceData;
 use facet::facet;
-use mercurial_types::HgChangesetId;
+use futures_stats::futures03::TimedFutureExt;
 use metaconfig_types::CommitCloudConfig;
+use mononoke_types::DateTime;
 use mononoke_types::Timestamp;
 use permission_checker::AclProvider;
 use permission_checker::BoxPermissionChecker;
+use references::history::historical_versions_from_get_output;
+use references::history::WorkspaceHistory;
+use references::rename_all;
 use repo_derived_data::ArcRepoDerivedData;
+use sql::history_ops::GetOutput;
+use sql::history_ops::GetType;
+use sql::versions_ops::UpdateVersionArgs;
 
 use crate::ctx::CommitCloudContext;
 use crate::references::cast_references_data;
 use crate::references::fetch_references;
 use crate::references::update_references_data;
 use crate::references::versions::WorkspaceVersion;
-use crate::references::RawSmartlogData;
+use crate::sql::ops::GenericGet;
 use crate::sql::ops::Get;
 use crate::sql::ops::Insert;
 use crate::sql::ops::SqlCommitCloud;
+use crate::sql::ops::Update;
+
 #[facet]
 pub struct CommitCloud {
     pub storage: SqlCommitCloud,
     pub bonsai_hg_mapping: Arc<dyn BonsaiHgMapping>,
     pub repo_derived_data: ArcRepoDerivedData,
-    pub core_ctx: CoreContext,
+    pub ctx: CoreContext,
     pub acl_provider: Arc<dyn AclProvider>,
     pub config: Arc<CommitCloudConfig>,
 }
@@ -59,7 +75,7 @@ impl CommitCloud {
         storage: SqlCommitCloud,
         bonsai_hg_mapping: Arc<dyn BonsaiHgMapping>,
         repo_derived_data: ArcRepoDerivedData,
-        core_ctx: CoreContext,
+        ctx: CoreContext,
         acl_provider: Arc<dyn AclProvider>,
         config: Arc<CommitCloudConfig>,
     ) -> Self {
@@ -67,31 +83,45 @@ impl CommitCloud {
             storage,
             bonsai_hg_mapping,
             repo_derived_data,
-            core_ctx,
+            ctx,
             acl_provider,
             config,
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientInfo {
-    pub hostname: String,
-    pub reporoot: String,
-    pub version: u64,
+#[derive(Clone)]
+pub enum Phase {
+    Public,
+    Draft,
+}
+
+impl Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Phase::Public => write!(f, "public"),
+            Phase::Draft => write!(f, "draft"),
+        }
+    }
 }
 
 impl CommitCloud {
-    pub async fn get_workspace(&self, ctx: &CommitCloudContext) -> anyhow::Result<WorkspaceData> {
+    pub async fn get_workspace(
+        &self,
+        cc_ctx: &CommitCloudContext,
+    ) -> Result<WorkspaceData, CommitCloudError> {
         let maybeworkspace =
-            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+            WorkspaceVersion::fetch_from_db(&self.storage, &cc_ctx.workspace, &cc_ctx.reponame)
+                .await
+                .map_err(CommitCloudInternalError::Error)?;
         if let Some(res) = maybeworkspace {
-            return Ok(res.into_workspace_data(&ctx.reponame));
+            return Ok(res.into_workspace_data(&cc_ctx.reponame));
         }
-        Err(anyhow::anyhow!(
-            "'get_workspace' failed: workspace {} does not exist",
-            ctx.workspace
-        ))
+        Err(CommitCloudUserError::NonexistantWorkspace(
+            cc_ctx.workspace.clone(),
+            cc_ctx.reponame.clone(),
+        )
+        .into())
     }
 
     pub async fn get_workspaces(
@@ -99,17 +129,16 @@ impl CommitCloud {
         prefix: &str,
         reponame: &str,
     ) -> anyhow::Result<Vec<WorkspaceData>> {
-        if reponame.is_empty() || prefix.is_empty() {
-            return Err(anyhow::anyhow!(
-                "'get workspaces' failed: empty reponame or prefix "
-            ));
-        }
+        ensure!(
+            !reponame.is_empty() && !prefix.is_empty(),
+            "'get workspaces' failed: empty reponame or prefix "
+        );
 
-        if prefix.len() < 3 {
-            return Err(anyhow::anyhow!(
-                "'get workspaces' failed: prefix must be at least 3 characters "
-            ));
-        }
+        ensure!(
+            prefix.len() >= 3,
+            "'get workspaces' failed: prefix must be at least 3 characters "
+        );
+
         let maybeworkspace =
             WorkspaceVersion::fetch_by_prefix(&self.storage, prefix, reponame).await?;
 
@@ -121,32 +150,38 @@ impl CommitCloud {
 
     pub async fn get_references(
         &self,
-        ctx: &CommitCloudContext,
-        params: &GetReferencesParams,
-    ) -> anyhow::Result<ReferencesData> {
-        let base_version = params.version;
+        cc_ctx: &CommitCloudContext,
+        version: u64,
+    ) -> Result<ReferencesData, CommitCloudError> {
+        let base_version = version;
 
         let mut latest_version: u64 = 0;
         let mut version_timestamp: i64 = 0;
         let maybeworkspace =
-            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+            WorkspaceVersion::fetch_from_db(&self.storage, &cc_ctx.workspace, &cc_ctx.reponame)
+                .await
+                .map_err(CommitCloudInternalError::Error)?;
         if let Some(workspace_version) = maybeworkspace {
             latest_version = workspace_version.version;
-            version_timestamp = workspace_version.timestamp.timestamp_nanos();
+            version_timestamp = workspace_version.timestamp.timestamp_seconds();
         }
+
         if base_version > latest_version && latest_version == 0 {
-            return Err(anyhow::anyhow!(
-                "'get_references' failed: workspace {} has been removed or renamed",
-                ctx.workspace.clone()
-            ));
+            return Err(CommitCloudUserError::WorkspaceWasRemoved(
+                cc_ctx.workspace.clone(),
+                cc_ctx.reponame.clone(),
+            )
+            .into());
         }
 
         if base_version > latest_version {
-            return Err(anyhow::anyhow!(
-                "'get_references' failed: base version {} is greater than latest version {}",
+            return Err(CommitCloudUserError::InvalidVersions(
                 base_version,
-                latest_version
-            ));
+                latest_version,
+                cc_ctx.workspace.clone(),
+                cc_ctx.reponame.clone(),
+            )
+            .into());
         }
 
         if base_version == latest_version {
@@ -161,7 +196,9 @@ impl CommitCloud {
             });
         }
 
-        let raw_references_data = fetch_references(ctx, &self.storage).await?;
+        let raw_references_data = fetch_references(cc_ctx, &self.storage)
+            .await
+            .map_err(CommitCloudInternalError::Error)?;
 
         let references_data = cast_references_data(
             raw_references_data,
@@ -169,40 +206,45 @@ impl CommitCloud {
             version_timestamp,
             self.bonsai_hg_mapping.clone(),
             self.repo_derived_data.clone(),
-            &self.core_ctx,
+            &self.ctx,
         )
-        .await?;
+        .await
+        .map_err(CommitCloudInternalError::Error)?;
 
         Ok(references_data)
     }
 
     pub async fn update_references(
         &self,
-        ctx: &CommitCloudContext,
+        cc_ctx: &CommitCloudContext,
         params: &UpdateReferencesParams,
-    ) -> anyhow::Result<ReferencesData> {
+    ) -> Result<ReferencesData, CommitCloudError> {
         let mut latest_version: u64 = 0;
         let mut version_timestamp: i64 = 0;
 
         let maybeworkspace =
-            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+            WorkspaceVersion::fetch_from_db(&self.storage, &cc_ctx.workspace, &cc_ctx.reponame)
+                .await
+                .map_err(CommitCloudInternalError::Error)?;
 
         if let Some(workspace_version) = maybeworkspace {
             latest_version = workspace_version.version;
-            version_timestamp = workspace_version.timestamp.timestamp_nanos();
+            version_timestamp = workspace_version.timestamp.timestamp_seconds();
         }
-
+        let raw_references_data = fetch_references(cc_ctx, &self.storage)
+            .await
+            .map_err(CommitCloudInternalError::Error)?;
         if params.version < latest_version {
-            let raw_references_data = fetch_references(ctx, &self.storage).await?;
             return cast_references_data(
                 raw_references_data,
                 latest_version,
                 version_timestamp,
                 self.bonsai_hg_mapping.clone(),
                 self.repo_derived_data.clone(),
-                &self.core_ctx,
+                &self.ctx,
             )
-            .await;
+            .await
+            .map_err(CommitCloudError::internal_error);
         }
 
         let mut txn = self
@@ -210,8 +252,9 @@ impl CommitCloud {
             .connections
             .write_connection
             .start_transaction()
-            .await?;
-        let cri = self.core_ctx.client_request_info();
+            .await
+            .map_err(CommitCloudInternalError::Error)?;
+        let cri = self.ctx.client_request_info();
 
         let initiate_workspace = params.version == 0
             && (params.new_heads.is_empty()
@@ -222,14 +265,20 @@ impl CommitCloud {
                     .is_some_and(|x| !x.is_empty()));
 
         if !initiate_workspace {
-            txn = update_references_data(&self.storage, txn, cri, params.clone(), ctx).await?;
+            txn = update_references_data(&self.storage, txn, cri, params.clone(), cc_ctx)
+                .await
+                .context(format!(
+                    "Failed to update references for request {:?}",
+                    params.clone()
+                ))
+                .map_err(CommitCloudInternalError::Error)?;
         }
 
         let new_version_timestamp = Timestamp::now();
         let new_version = latest_version + 1;
 
         let args = WorkspaceVersion {
-            workspace: ctx.workspace.clone(),
+            workspace: cc_ctx.workspace.clone(),
             version: new_version,
             timestamp: new_version_timestamp,
             archived: false,
@@ -240,26 +289,69 @@ impl CommitCloud {
             .insert(
                 txn,
                 cri,
-                ctx.reponame.clone(),
-                ctx.workspace.clone(),
+                cc_ctx.reponame.clone(),
+                cc_ctx.workspace.clone(),
                 args.clone(),
             )
-            .await?;
+            .await
+            .context(format!(
+                "Failed to update references for request {:?} for new version {:?}",
+                params.clone(),
+                args
+            ))
+            .map_err(CommitCloudInternalError::Error)?;
 
-        txn.commit().await?;
+        let history_entry = WorkspaceHistory::from_references(
+            raw_references_data,
+            latest_version,
+            version_timestamp,
+        );
+
+        txn = self
+            .storage
+            .insert(
+                txn,
+                cri,
+                cc_ctx.reponame.clone(),
+                cc_ctx.workspace.clone(),
+                history_entry,
+            )
+            .await
+            .map_err(CommitCloudInternalError::Error)?;
+
+        txn.commit()
+            .await
+            .map_err(CommitCloudInternalError::Error)?;
 
         #[cfg(fbcode_build)]
-        if std::env::var_os("SANDCASTLE").map_or(true, |sc| sc != "1") && !initiate_workspace {
+        if !self.config.disable_interngraph_notification && !initiate_workspace {
             let notification =
                 NotificationData::from_update_references_params(params.clone(), new_version);
-            let _ = publish_single_update(
+
+            let (stats, res) = publish_single_update(
                 notification,
-                &ctx.workspace.clone(),
-                &ctx.reponame.clone(),
-                self.core_ctx.fb,
+                &cc_ctx.workspace.clone(),
+                &cc_ctx.reponame.clone(),
+                self.ctx.fb,
             )
-            .await?;
+            .timed()
+            .await;
+
+            self.ctx
+                .scuba()
+                .clone()
+                .add_future_stats(&stats)
+                .log_with_msg(
+                    "commit cloud: sent interngraph notification",
+                    format!(
+                        "For workspace {} in repo {} with response {}",
+                        cc_ctx.workspace,
+                        cc_ctx.reponame,
+                        res.map_err(CommitCloudInternalError::Error)?
+                    ),
+                );
         }
+
         Ok(ReferencesData {
             version: new_version,
             heads: None,
@@ -267,62 +359,225 @@ impl CommitCloud {
             heads_dates: None,
             remote_bookmarks: None,
             snapshots: None,
-            timestamp: Some(new_version_timestamp.timestamp_nanos()),
+            timestamp: Some(new_version_timestamp.timestamp_seconds()),
         })
-    }
-
-    pub async fn get_smartlog(
-        &self,
-        _ctx: &CommitCloudContext,
-        _params: &GetSmartlogParams,
-    ) -> anyhow::Result<SmartlogData> {
-        Err(anyhow::anyhow!("Not implemented"))
     }
 
     pub async fn commit_cloud_acl(
         &self,
         name: &str,
     ) -> anyhow::Result<Option<BoxPermissionChecker>> {
-        self.acl_provider.commitcloud_workspace_acl(name).await
+        self.acl_provider
+            .commitcloud_workspace_acl(name, &None)
+            .await
     }
 
-    pub async fn get_smartlog_raw_info(
+    pub async fn share_workspace(
         &self,
-        params: &GetSmartlogParams,
-    ) -> anyhow::Result<RawSmartlogData> {
-        RawSmartlogData::fetch_smartlog_references(
-            &CommitCloudContext::new(&params.workspace, &params.reponame)?,
+        ctx: &CommitCloudContext,
+    ) -> anyhow::Result<WorkspaceSharingData> {
+        let maybeworkspace =
+            WorkspaceVersion::fetch_from_db(&self.storage, &ctx.workspace, &ctx.reponame).await?;
+        if maybeworkspace.is_none() {
+            bail!(
+                "'share_workspace' failed: workspace {} does not exist in repo {}",
+                ctx.workspace,
+                ctx.reponame
+            )
+        }
+
+        if maybeworkspace.unwrap().archived {
+            bail!(
+                "'share_workspace' failed: workspace {} has been archived",
+                ctx.workspace
+            );
+        }
+        let acl_name = make_workspace_acl_name(&ctx.workspace, &ctx.reponame);
+
+        #[cfg(fbcode_build)]
+        let link = format!("[{}{}]", ACL_LINK, acl_name);
+        #[cfg(not(fbcode_build))]
+        let link = String::new();
+
+        let maybe_acl = self.commit_cloud_acl(&acl_name).await?;
+        if maybe_acl.is_some() {
+            return Ok(WorkspaceSharingData {
+                acl_name: acl_name.clone(),
+                sharing_message: format!(
+                    "'share_workspace' succeeded: workspace {} has been already shared under the acl {} {}",
+                    ctx.workspace, &acl_name, &link
+                ),
+            });
+        }
+
+        if ctx.owner.is_none() {
+            bail!(
+                "'share_workspace' failed: no owner inferred for workspace {} ",
+                ctx.workspace
+            );
+        }
+
+        match self
+            .acl_provider
+            .commitcloud_workspace_acl(&acl_name, &ctx.owner)
+            .await
+        {
+            Err(e) => bail!(
+                "'share_workspace' failed: unable to create acl {} for workspace {}: {} ",
+                acl_name,
+                ctx.workspace,
+                e.to_string()
+            ),
+            Ok(_) => Ok(WorkspaceSharingData {
+                acl_name: acl_name.clone(),
+                sharing_message: format!(
+                    "'share_workspace' succeeded: workspace {} is now marked for sharing through the ACL {} [{}]",
+                    ctx.workspace, &acl_name, &link
+                ),
+            }),
+        }
+    }
+
+    pub async fn rename_workspace(
+        &self,
+        cc_ctx: &CommitCloudContext,
+        new_workspace: &str,
+    ) -> anyhow::Result<String> {
+        ensure!(
+            !new_workspace.is_empty(),
+            "'rename_workspace' failed: new workspace name cannot be empty"
+        );
+
+        ensure!(
+            WorkspaceVersion::fetch_from_db(&self.storage, new_workspace, &cc_ctx.reponame)
+                .await?
+                .is_none(),
+            format!(
+                "'rename_workspace' failed: workspace {} already exists",
+                new_workspace
+            ),
+        );
+
+        let cri = self.ctx.client_request_info();
+        let (txn, affected_rows) = rename_all(&self.storage, cri, cc_ctx, new_workspace).await?;
+
+        ensure!(
+            affected_rows > 0,
+            format!(
+                "'rename_workspace' failed: workspace {} does not exist",
+                cc_ctx.workspace
+            )
+        );
+        txn.commit().await?;
+
+        Ok("'rename_workspace' succeeded".to_string())
+    }
+
+    pub async fn update_workspace_archive(
+        &self,
+        cc_ctx: &CommitCloudContext,
+        archived: bool,
+    ) -> anyhow::Result<String> {
+        // Check if workspace exists
+        let _ = self.get_workspace(cc_ctx).await?;
+
+        let txn = self
+            .storage
+            .connections
+            .write_connection
+            .start_transaction()
+            .await?;
+        let cri = self.ctx.client_request_info();
+        let (txn, affected_rows) = Update::<WorkspaceVersion>::update(
             &self.storage,
-            &params.flags,
+            txn,
+            cri,
+            cc_ctx.clone(),
+            UpdateVersionArgs::Archive(archived),
         )
-        .await
+        .await?;
+        txn.commit().await?;
+
+        ensure!(
+            affected_rows > 0,
+            "'update_workspace_archive' failed: failed on updating the workspace {} from DB",
+            cc_ctx.workspace.clone()
+        );
+
+        Ok(String::from("'update_workspace_archive' succeeded"))
     }
 
-    pub fn make_smartlog_node(
+    pub async fn get_history_by(
         &self,
-        hgid: &HgChangesetId,
-        parents: &Vec<HgId>,
-        node: &ChangesetInfo,
-        local_bookmarks: &Vec<String>,
-        remote_bookmarks: &Option<Vec<RemoteBookmark>>,
-        is_public: bool,
-    ) -> anyhow::Result<SmartlogNode> {
-        let author = node.author();
-        let date = node.author_date().as_chrono().timestamp();
-        let message = node.message();
-
-        let phase = if is_public { "public" } else { "draft" };
-
-        let node = SmartlogNode {
-            node: (*hgid).into(),
-            phase: String::from(phase),
-            author: author.to_string(),
-            date,
-            message: message.to_string(),
-            parents: parents.to_owned(),
-            bookmarks: local_bookmarks.to_owned(),
-            remote_bookmarks: remote_bookmarks.to_owned(),
+        cc_ctx: &CommitCloudContext,
+        filter: &SmartlogFilter,
+    ) -> anyhow::Result<WorkspaceHistory> {
+        let args = match filter {
+            SmartlogFilter::Version(version) => {
+                ensure!(
+                    *version >= 0,
+                    "'get_smartlog_by_version' failed: version must be greater than 0"
+                );
+                GetType::GetHistoryVersion {
+                    version: *version as u64,
+                }
+            }
+            SmartlogFilter::Timestamp(timestamp) => {
+                let timestamp = Timestamp::from_timestamp_secs(*timestamp);
+                GetType::GetHistoryDate {
+                    timestamp,
+                    limit: 1,
+                }
+            }
         };
-        Ok(node)
+
+        let history = GenericGet::<WorkspaceHistory>::get(
+            &self.storage,
+            cc_ctx.reponame.clone(),
+            cc_ctx.workspace.clone(),
+            args.clone(),
+        )
+        .await?;
+
+        ensure!(
+            !history.is_empty(),
+            "'get_smartlog_by_version' failed: no smartlog found for {}",
+            match args {
+                GetType::GetHistoryVersion { version } => format!("version {}", version),
+                GetType::GetHistoryDate { timestamp, .. } =>
+                    format!("timestamp {}", DateTime::from(timestamp)),
+                _ => unreachable!(),
+            }
+        );
+        return match history.first() {
+            Some(GetOutput::WorkspaceHistory(history)) => Ok(history.clone()),
+            _ => Err(anyhow::anyhow!("unexpected history type")),
+        };
+    }
+
+    pub async fn get_historical_versions(
+        &self,
+        cc_ctx: &CommitCloudContext,
+    ) -> anyhow::Result<Vec<HistoricalVersion>> {
+        ensure!(
+            WorkspaceVersion::fetch_from_db(&self.storage, &cc_ctx.workspace, &cc_ctx.reponame)
+                .await?
+                .is_some(),
+            format!(
+                "'get_historical_versions' failed: workspace {} does not exist",
+                &cc_ctx.workspace
+            ),
+        );
+
+        let args = GetType::GetHistoryVersionTimestamp;
+        let results = GenericGet::<WorkspaceHistory>::get(
+            &self.storage,
+            cc_ctx.reponame.clone(),
+            cc_ctx.workspace.clone(),
+            args.clone(),
+        )
+        .await?;
+
+        historical_versions_from_get_output(results)
     }
 }

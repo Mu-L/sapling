@@ -23,6 +23,7 @@ pub use crate::iddag::IdDagAlgorithm;
 use crate::set::id_lazy::IdLazySet;
 use crate::set::id_static::IdStaticSet;
 use crate::set::Set;
+use crate::IdList;
 use crate::IdSet;
 use crate::Result;
 use crate::VerLink;
@@ -61,6 +62,9 @@ pub trait DagAlgorithm: Send + Sync {
 
     /// Returns a set that covers all vertexes in the master group.
     async fn master_group(&self) -> Result<Set>;
+
+    /// Returns a set that covers all vertexes in the virtual group.
+    async fn virtual_group(&self) -> Result<Set>;
 
     /// Calculates all ancestors reachable from any name from the given set.
     async fn ancestors(&self, set: Set) -> Result<Set>;
@@ -639,6 +643,9 @@ pub trait ToIdSet {
 pub trait ToSet {
     /// Converts [`IdSet`] to [`Set`].
     fn to_set(&self, set: &IdSet) -> Result<Set>;
+
+    /// Converts [`IdList`] to [`Set`].
+    fn id_list_to_set(&self, list: &IdList) -> Result<Set>;
 }
 
 pub trait IdMapSnapshot {
@@ -757,5 +764,9 @@ impl<T: IdMapSnapshot + DagAlgorithm> ToSet for T {
     /// Converts [`IdSet`] to [`Set`].
     fn to_set(&self, set: &IdSet) -> Result<Set> {
         Set::from_id_set_dag(set.clone(), self)
+    }
+
+    fn id_list_to_set(&self, list: &IdList) -> Result<Set> {
+        Set::from_id_list_dag(list.clone(), self)
     }
 }

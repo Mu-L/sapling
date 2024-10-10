@@ -283,11 +283,6 @@ class HgRepository(repobase.Repository):
         # Eagerepo allows us to fake remote fetches from the server
         eagerepo = self.temp_mgr.make_temp_dir(prefix="eagerepo")
 
-        hgrc.setdefault("extensions", {})
-        hgrc["extensions"]["treemanifest"] = ""
-        hgrc["extensions"]["remotefilelog"] = ""
-        hgrc.setdefault("treemanifest", {})
-        hgrc["treemanifest"]["treeonly"] = "true"
         hgrc.setdefault("remotefilelog", {})
         hgrc["remotefilelog"]["server"] = "false"
         hgrc["remotefilelog"]["reponame"] = "test"
@@ -313,6 +308,12 @@ class HgRepository(repobase.Repository):
         # It's safe to use EdenAPI push for testing purposes
         hgrc.add_section("push")
         hgrc["push"]["edenapi"] = "true"
+
+        # Turn off commit cloud. Some tests require testing the behavior of
+        # local-only changes. Commit cloud makes it difficult to test that.
+        if not hgrc.has_section("extensions"):
+            hgrc.add_section("extensions")
+        hgrc["extensions"]["commitcloud"] = "!"
 
         self.write_hgrc(hgrc)
 

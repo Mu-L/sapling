@@ -185,6 +185,7 @@ elif sys.platform.startswith("linux") and not os.path.exists("/etc/redhat-releas
         # issue.
         "test_post_clone_permissions"
     ]
+
 elif sys.platform.startswith("darwin"):
     # OSERROR AF_UNIX path too long
     TEST_DISABLED["hg.status_test.StatusTestTreeOnly"] = [

@@ -11,8 +11,11 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use blobstore::Loadable;
+use bonsai_git_mapping::BonsaiGitMapping;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use bonsai_hg_mapping::BonsaiHgMapping;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
+use bonsai_svnrev_mapping::BonsaiSvnrevMapping;
 use bookmarks::Bookmarks;
 use clap::Parser;
 use clap::ValueEnum;
@@ -69,6 +72,15 @@ pub struct CommandArgs {
 pub struct Repo {
     #[facet]
     bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    bonsai_git_mapping: dyn BonsaiGitMapping,
+
+    #[facet]
+    bonsai_globalrev_mapping: dyn BonsaiGlobalrevMapping,
+
+    #[facet]
+    bonsai_svnrev_mapping: dyn BonsaiSvnrevMapping,
 
     #[facet]
     bookmarks: dyn Bookmarks,
@@ -247,7 +259,7 @@ async fn display_hg_entry(
                 .load(ctx, blobstore)
                 .await
                 .context("Failed to load manifest")?;
-            display_hg_manifest(std::io::stdout(), &manifest)?;
+            display_hg_manifest(ctx, blobstore, std::io::stdout(), &manifest).await?;
         }
     }
     Ok(())

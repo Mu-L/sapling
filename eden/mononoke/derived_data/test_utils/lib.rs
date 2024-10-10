@@ -22,6 +22,7 @@ use mercurial_types::HgChangesetId;
 use mononoke_types::path::MPath;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::ChangesetId;
+use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreRef;
 
 pub async fn bonsai_changeset_from_hg(
@@ -39,15 +40,15 @@ pub async fn bonsai_changeset_from_hg(
     Ok((bcs_id, bcs))
 }
 
-pub fn iterate_all_manifest_entries<'a, MfId, LId>(
+pub fn iterate_all_manifest_entries<'a, MfId, L>(
     ctx: &'a CoreContext,
     repo: &'a (impl RepoBlobstoreRef + Send + Sync),
-    entry: Entry<MfId, LId>,
-) -> impl Stream<Item = Result<(MPath, Entry<MfId, LId>)>> + 'a
+    entry: Entry<MfId, L>,
+) -> impl Stream<Item = Result<(MPath, Entry<MfId, L>)>> + 'a
 where
     MfId: Loadable + Send + Sync + Clone + 'a,
-    LId: Send + Clone + 'static,
-    <MfId as Loadable>::Value: Manifest<TreeId = MfId, LeafId = LId>,
+    L: Send + Clone + 'static,
+    <MfId as Loadable>::Value: Manifest<RepoBlobstore, TreeId = MfId, Leaf = L> + Send + Sync,
 {
     bounded_traversal_stream(256, Some((MPath::ROOT, entry)), move |(path, entry)| {
         async move {
@@ -56,12 +57,14 @@ where
                 Entry::Tree(tree) => {
                     let mf = tree.load(ctx, repo.repo_blobstore()).await?;
                     let recurse = mf
-                        .list()
-                        .map(|(basename, new_entry)| {
+                        .list(ctx, repo.repo_blobstore())
+                        .await?
+                        .map_ok(|(basename, new_entry)| {
                             let path = path.join_element(Some(&basename));
                             (path, new_entry)
                         })
-                        .collect();
+                        .try_collect()
+                        .await?;
 
                     Ok::<_, Error>((vec![(path, Entry::Tree(tree))], recurse))
                 }

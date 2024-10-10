@@ -1,10 +1,6 @@
 
 #require no-eden
 
-
-  $ setconfig treemanifest.flatcompat=False
-  $ setconfig remotefilelog.write-hgcache-to-indexedlog=False remotefilelog.write-local-to-indexedlog=False
-
   $ configure mutation-norecord
   $ . "$TESTDIR/library.sh"
 
@@ -12,15 +8,10 @@ Disable Rust strip since it does not strip manifest revlog.
 
   $ setconfig experimental.rust-commits=0
 
-Disable simplecache since it can cause certain reads to not actually hit the
-ondisk structures.
-  $ disable simplecache
-
   $ hginit repo
   $ cd repo
   $ enable pushrebase
-  $ setconfig extensions.treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  $ setconfig treemanifest.server=True treemanifest.treeonly=True remotefilelog.server=True
+  $ setconfig remotefilelog.server=True
 
 Make some commits that include a merge.  In the merge commit, we modify a directory that is the same on both sides.
   $ drawdag << 'EOS'

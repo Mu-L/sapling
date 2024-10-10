@@ -6,17 +6,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-trait = "0.1.71"
 commits-trait = { version = "0.1.0", path = "../trait" }
+configmodel = { version = "0.1.0", path = "../../config/model" }
 dag = { version = "0.1.0", path = "../../dag" }
 factory = { version = "0.1.0", path = "../../util/factory" }
 fs-err = { version = "2.6.0", features = ["tokio"] }
 futures = { version = "0.3.30", features = ["async-await", "compat"] }
+gitcompat = { version = "0.1.0", path = "../../gitcompat" }
 gitdag = { version = "0.1.0", path = "../../dag/gitdag" }
 metalog = { version = "0.1.0", path = "../../metalog" }
 minibytes = { version = "0.1.0", path = "../../minibytes" }
 parking_lot = { version = "0.12.1", features = ["send_guard"] }
+paste = "1.0.14"
+pathmatcher-types = { version = "0.1.0", path = "../../pathmatcher/types" }
 refencode = { version = "0.1.0", path = "../../refencode" }
 storemodel = { version = "0.1.0", path = "../../storemodel" }
 tracing = { version = "0.1.40", features = ["attributes", "valuable"] }

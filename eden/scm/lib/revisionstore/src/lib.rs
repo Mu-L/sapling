@@ -15,12 +15,12 @@
 //! these are either created during a `hg commit` operation, or on-demand fetched
 //! when accessed.
 //!
-//! This functionality is provided by the `ContentStore` (for content), and
+//! This functionality is provided by the `ScmStore` (for content), and
 //! `MetadataStore` (for history) types and are the main entry-points of this
 //! library. Both of these have the exact same behavior, they only differ by
 //! what they store.
 //!
-//! The `ContentStore` (and `Metadatastore`) keeps track of data in 2 locations:
+//! The `ScmStore` (and `Metadatastore`) keeps track of data in 2 locations:
 //!   - A shared store location,
 //!   - A local store location.
 //!
@@ -34,8 +34,8 @@
 //!
 //! The local store is where `hg commit` data goes into. As opposed to the
 //! shared store, it is not automatically reclaimed and will grow unbounded.
-//! The `ContentStore::add` (from `HgIdMutableDeltaStore`) allows adding data
-//! to this store. Care must be taken to call `ContentStore::flush` (from
+//! The `ScmStore::add` (from `HgIdMutableDeltaStore`) allows adding data
+//! to this store. Care must be taken to call `ScmStore::flush` (from
 //! `HgIdMutableDeltaStore`) for the written data to be persisted on disk.
 //!
 //! # Types
@@ -55,29 +55,10 @@
 //! Compose multiple stores into one and re-implement the main traits by
 //! iterating over these stores.
 //!
-//! ## `MultiplexDeltaStore`, `MultiplexHgIdHistoryStore`
-//!
-//! Similarly to the `UnionStore`, this allows composing stores together but
-//! for the purposes of duplicating all the writes to all the stores. Mainly
-//! used to send data to both a fast caching server (ex: Memcache), and to a
-//! shared store when receiving network data. It can also be used for data format
-//! migration
-//!
-//! ## `DataPack`, `HistoryPack`
-//!
-//! Immutable file storage comprised of an index file that tracks the location
-//! of the actual data in its associated pack file. Must be repacked frequently
-//! to avoid linear searches in them during read operations.
-//!
-//! On repack, the pack files are squashed together by writing all their data into a
-//! `ContentStore` (or `MetadataStore`), which is then committed to disk before the
-//! squashed pack files are then deleted from disk. This ensures that a new Mercurial
-//! process spawned while repack is running will still be able to read all the data.
-//!
 //! ## `IndexedLogHgIdDataStore`, `IndexedLogHgIdHistoryStore`
 //!
-//! Basic `IndexedLog` backed stores. As opposed to the packfiles described above,
-//! these allow update in place (append-only).
+//! Basic `IndexedLog` backed stores. As opposed to the packfiles, these allow
+//! update in place (append-only).
 //!
 //! ## `LfsStore`
 //!
@@ -121,10 +102,6 @@
 //!
 //! The produced stores must implement the `HgIdDataStore` trait.
 
-mod contentstore;
-mod dataindex;
-mod fanouttable;
-mod historyindex;
 mod indexedloghistorystore;
 mod indexedlogutil;
 mod lfs;
@@ -132,85 +109,61 @@ mod metadatastore;
 mod missing;
 mod redacted;
 mod remotestore;
-mod repack;
+mod repair;
 mod sliceext;
 mod types;
 mod unionstore;
 
-pub mod datapack;
 pub mod datastore;
 pub mod edenapi;
 pub mod error;
-pub mod historypack;
 pub mod historystore;
 pub mod indexedlogauxstore;
 pub mod indexedlogdatastore;
 pub mod indexedlogtreeauxstore;
 pub mod localstore;
-pub mod multiplexstore;
-pub mod mutabledatapack;
-pub mod mutablehistorypack;
-pub mod mutablepack;
-pub mod packstore;
-pub mod packwriter;
 pub mod scmstore;
 pub mod trait_impls;
 pub mod uniondatastore;
 pub mod unionhistorystore;
 pub mod util;
 
+use ::types::Key;
 pub use revisionstore_types::*;
 
-pub use crate::contentstore::ContentStore;
-pub use crate::contentstore::ContentStoreBuilder;
-pub use crate::datapack::DataEntry;
-pub use crate::datapack::DataPack;
-pub use crate::datapack::DataPackVersion;
 pub use crate::datastore::ContentDataStore;
 pub use crate::datastore::ContentMetadata;
 pub use crate::datastore::Delta;
 pub use crate::datastore::HgIdDataStore;
 pub use crate::datastore::HgIdMutableDeltaStore;
-pub use crate::datastore::LegacyStore;
 pub use crate::datastore::RemoteDataStore;
 pub use crate::datastore::StoreResult;
 pub use crate::edenapi::SaplingRemoteApiFileStore;
 pub use crate::edenapi::SaplingRemoteApiRemoteStore;
 pub use crate::edenapi::SaplingRemoteApiTreeStore;
-pub use crate::historypack::HistoryEntry;
-pub use crate::historypack::HistoryPack;
-pub use crate::historypack::HistoryPackVersion;
 pub use crate::historystore::HgIdHistoryStore;
 pub use crate::historystore::HgIdMutableHistoryStore;
+pub use crate::historystore::HistoryStore;
 pub use crate::historystore::RemoteHistoryStore;
 pub use crate::indexedlogauxstore::AuxStore;
 pub use crate::indexedlogdatastore::IndexedLogHgIdDataStore;
 pub use crate::indexedlogdatastore::IndexedLogHgIdDataStoreConfig;
 pub use crate::indexedloghistorystore::IndexedLogHgIdHistoryStore;
 pub use crate::indexedlogutil::StoreType;
-pub use crate::localstore::ExtStoredPolicy;
+pub use crate::lfs::LfsRemote;
 pub use crate::localstore::LocalStore;
 pub use crate::metadatastore::MetadataStore;
 pub use crate::metadatastore::MetadataStoreBuilder;
-pub use crate::multiplexstore::MultiplexDeltaStore;
-pub use crate::multiplexstore::MultiplexHgIdHistoryStore;
-pub use crate::mutabledatapack::MutableDataPack;
-pub use crate::mutablehistorypack::MutableHistoryPack;
-pub use crate::packstore::CorruptionPolicy;
-pub use crate::packstore::DataPackStore;
-pub use crate::packstore::HistoryPackStore;
-pub use crate::packstore::MutableDataPackStore;
-pub use crate::packstore::MutableHistoryPackStore;
 pub use crate::redacted::redact_if_needed;
 pub use crate::remotestore::HgIdRemoteStore;
-pub use crate::repack::repack;
-pub use crate::repack::RepackKind;
-pub use crate::repack::RepackLocation;
-pub use crate::repack::Repackable;
-pub use crate::repack::ToKeys;
+pub use crate::repair::repair;
 pub use crate::types::ContentHash;
 pub use crate::types::StoreKey;
 pub use crate::uniondatastore::UnionHgIdDataStore;
+
+pub trait ToKeys {
+    fn to_keys(&self) -> Vec<anyhow::Result<Key>>;
+}
 
 #[cfg(any(test, feature = "for-tests"))]
 pub mod testutil;

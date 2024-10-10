@@ -21,7 +21,7 @@ use manifest::ManifestOps;
 use maplit::hashset;
 use mercurial_derivation::DeriveHgChangeset;
 use metaconfig_types::LfsParams;
-use mononoke_api::Repo;
+use mononoke_macros::mononoke;
 use mononoke_types_mocks::changesetid::ONES_CSID;
 use repo_blobstore::RepoBlobstoreRef;
 use scuba_ext::MononokeScubaSampleBuilder;
@@ -29,8 +29,9 @@ use serde_json::json;
 use tests_utils::CreateCommitContext;
 
 use super::*;
+use crate::repo::RepoClientRepo;
 
-#[test]
+#[mononoke::test]
 fn test_parsing_caps_simple() {
     assert_eq!(
         parse_utf8_getbundle_caps(b"cap"),
@@ -82,7 +83,7 @@ fn test_parsing_caps_simple() {
     );
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 fn get_changed_manifests_stream_test(fb: FacebookInit) -> Result<(), Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(get_changed_manifests_stream_test_impl(fb))
@@ -90,7 +91,7 @@ fn get_changed_manifests_stream_test(fb: FacebookInit) -> Result<(), Error> {
 
 async fn get_changed_manifests_stream_test_impl(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = ManyFilesDirs::getrepo(fb).await;
+    let repo: RepoClientRepo = ManyFilesDirs::get_repo(fb).await;
 
     // Commit that has only dir2 directory
     let root_mf_id = HgChangesetId::from_str("051946ed218061e925fb120dac02634f9ad40ae2")?
@@ -150,7 +151,7 @@ async fn get_changed_manifests_stream_test_impl(fb: FacebookInit) -> Result<(), 
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 fn get_changed_manifests_stream_test_depth(fb: FacebookInit) -> Result<(), Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(get_changed_manifests_stream_test_depth_impl(fb))
@@ -158,7 +159,7 @@ fn get_changed_manifests_stream_test_depth(fb: FacebookInit) -> Result<(), Error
 
 async fn get_changed_manifests_stream_test_depth_impl(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = ManyFilesDirs::getrepo(fb).await;
+    let repo: RepoClientRepo = ManyFilesDirs::get_repo(fb).await;
 
     let root_mf_id = HgChangesetId::from_str("d261bc7900818dea7c86935b3fb17a33b2e3a6b4")?
         .load(&ctx, &repo.repo_blobstore().clone())
@@ -204,7 +205,7 @@ async fn get_changed_manifests_stream_test_depth_impl(fb: FacebookInit) -> Resul
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 fn get_changed_manifests_stream_test_base_path(fb: FacebookInit) -> Result<(), Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(get_changed_manifests_stream_test_base_path_impl(fb))
@@ -212,7 +213,7 @@ fn get_changed_manifests_stream_test_base_path(fb: FacebookInit) -> Result<(), E
 
 async fn get_changed_manifests_stream_test_base_path_impl(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo = ManyFilesDirs::getrepo(fb).await;
+    let repo: RepoClientRepo = ManyFilesDirs::get_repo(fb).await;
 
     let root_mf_id = HgChangesetId::from_str("d261bc7900818dea7c86935b3fb17a33b2e3a6b4")?
         .load(&ctx, &repo.repo_blobstore().clone())
@@ -245,7 +246,7 @@ async fn get_changed_manifests_stream_test_base_path_impl(fb: FacebookInit) -> R
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_lfs_rollout(fb: FacebookInit) -> Result<(), Error> {
     with_just_knobs_async(
         JustKnobsInMemory::new(hashmap! {
@@ -288,10 +289,10 @@ async fn test_lfs_rollout(fb: FacebookInit) -> Result<(), Error> {
     ).await
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn test_maybe_validate_pushed_bonsais(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo: BlobRepo = test_repo_factory::build_empty(ctx.fb).await?;
+    let repo: RepoClientRepo = test_repo_factory::build_empty(ctx.fb).await?;
     let commit = CreateCommitContext::new_root(&ctx, &repo)
         .add_file("largefile", "11111_11111")
         .commit()
@@ -374,10 +375,10 @@ async fn test_maybe_validate_pushed_bonsais(fb: FacebookInit) -> Result<(), Erro
 }
 
 async fn run_and_check_if_lfs(ctx: &CoreContext, lfs_params: LfsParams) -> Result<bool, Error> {
-    let repo = Arc::new(
+    let repo: Arc<RepoClientRepo> = Arc::new(
         test_repo_factory::TestRepoFactory::new(ctx.fb)?
             .with_config_override(|config| config.lfs = lfs_params)
-            .build::<Repo>()
+            .build()
             .await?,
     );
     let commit = CreateCommitContext::new_root(ctx, &repo)
@@ -443,7 +444,7 @@ async fn run_and_check_if_lfs(ctx: &CoreContext, lfs_params: LfsParams) -> Resul
 
 async fn fetch_mfs(
     ctx: &CoreContext,
-    repo: &BlobRepo,
+    repo: &RepoClientRepo,
     root_mf_id: HgManifestId,
     base_root_mf_id: HgManifestId,
     base_path: MPath,
@@ -468,14 +469,14 @@ async fn fetch_mfs(
     Ok(fetched_mfs)
 }
 
-#[test]
+#[mononoke::test]
 fn test_debug_format_directories() {
     assert_eq!(&debug_format_directories(vec![&"foo"]), "foo,");
     assert_eq!(&debug_format_directories(vec![&"foo,bar"]), "foo:obar,");
     assert_eq!(&debug_format_directories(vec![&"foo", &"bar"]), "foo,bar,");
 }
 
-#[test]
+#[mononoke::test]
 fn test_parse_git_lookup() -> Result<(), Error> {
     assert!(parse_git_lookup("ololo").is_none());
     assert!(parse_git_lookup("_gitlookup_hg_badhash").is_none());

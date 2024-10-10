@@ -10,7 +10,7 @@
 setup configuration
   $ export BLOCK_MERGES=1
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 setup_common_config
+  $ setup_common_config
   $ cd $TESTTMP
 
 setup common configuration
@@ -20,9 +20,8 @@ setup common configuration
   > EOF
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > C
   > |
@@ -37,18 +36,16 @@ create master bookmark
 
 blobimport them into Mononoke storage and start Mononoke
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 Clone the repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
 Try to push merge commit
@@ -71,9 +68,9 @@ Try to push merge commit
   o  A [public;rev=0;426bada5c675]
   $
 
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   fallback reason: merge commit is not supported by EdenApi push yet
-  pushing rev 3e1c4ca1f9be to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  pushing rev 3e1c4ca1f9be to destination mono:repo bookmark master_bookmark
   searching for changes
   remote: Command failed
   remote:   Error:

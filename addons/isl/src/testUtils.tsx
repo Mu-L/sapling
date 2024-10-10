@@ -8,7 +8,6 @@
 import type {TestingEventBus} from './__mocks__/MessageBus';
 import type {
   ClientToServerMessage,
-  ClientToServerMessageWithPayload,
   CommitInfo,
   Hash,
   Result,
@@ -41,9 +40,7 @@ function filterMessages(wantedType?: string) {
   return messages;
 }
 
-export function expectMessageSentToServer(
-  message: Partial<ClientToServerMessage | ClientToServerMessageWithPayload>,
-): void {
+export function expectMessageSentToServer(message: Partial<ClientToServerMessage>): void {
   expect(filterMessages(message.type)).toContainEqual(message);
 }
 
@@ -52,18 +49,10 @@ export function expectMessageNOTSentToServer(message: Partial<ClientToServerMess
 }
 
 /**
- * Return last `num` raw messages sent to the server.
- * Normal messages will be stingified JSON.
- * Binary messages with be ArrayBuffers.
+ * Return last `num` stringified JSON messages sent to the server.
  */
-export function getLastMessagesSentToServer(num: number): Array<string | ArrayBuffer> {
+export function getLastMessagesSentToServer(num: number): Array<string> {
   return testMessageBus.sent.slice(-num);
-}
-
-export function getLastBinaryMessageSentToServer(): ArrayBuffer | undefined {
-  return testMessageBus.sent.find(
-    (message): message is ArrayBuffer => message instanceof ArrayBuffer,
-  );
 }
 
 export function simulateServerDisconnected(): void {
@@ -155,8 +144,9 @@ export const emptyCommit: CommitInfo = {
   description: '',
   bookmarks: [],
   remoteBookmarks: [],
-  filesSample: [],
+  filePathsSample: [],
   totalFileCount: 0,
+  maxCommonPathPrefix: '',
 };
 
 export function COMMIT(

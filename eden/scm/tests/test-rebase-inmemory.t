@@ -1,8 +1,5 @@
-  $ setconfig experimental.allowfilepeer=True
-
 #require symlink execbit no-eden
 
-  $ eagerepo
   $ enable amend morestatus rebase
   $ setconfig morestatus.show=True
   $ setconfig diff.git=True

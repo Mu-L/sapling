@@ -318,7 +318,7 @@ def _setupupdates(_ui) -> None:
             sparsematch = repo.sparsematch(mctx.rev())
 
         temporaryfiles = []
-        for file, action in pycompat.iteritems(actions):
+        for file, action in actions.items():
             type, args, msg = action
             files.add(file)
             if sparsematch(file):
@@ -1255,7 +1255,7 @@ def _wraprepo(ui, repo) -> None:
                 )
 
             # Check for files that were only in the dirstate.
-            for file, state in pycompat.iteritems(dirstate):
+            for file, state in dirstate.items():
                 if not file in files:
                     old = origsparsematch(file)
                     new = sparsematch(file)
@@ -1270,7 +1270,7 @@ def _wraprepo(ui, repo) -> None:
             )
 
             with progress.bar(ui, _("applying"), total=len(actions)) as prog:
-                for f, (m, args, msg) in pycompat.iteritems(actions):
+                for f, (m, args, msg) in actions.items():
                     prog.value += 1
                     if m not in typeactions:
                         typeactions[m] = []
@@ -1618,19 +1618,7 @@ def readsparseprofile(
 
 
 def getrawprofile(repo, profile, changeid):
-    try:
-        simplecache = extensions.find("simplecache")
-
-        # Use unfiltered to avoid computing hidden commits
-        node = repo[changeid].hex()
-
-        def func():
-            return pycompat.decodeutf8(repo.filectx(profile, changeid=changeid).data())
-
-        key = "sparseprofile:%s:%s" % (profile.replace("/", "__"), node)
-        return simplecache.memoize(func, key, simplecache.stringserializer, repo.ui)
-    except KeyError:
-        return pycompat.decodeutf8(repo.filectx(profile, changeid=changeid).data())
+    return pycompat.decodeutf8(repo.filectx(profile, changeid=changeid).data())
 
 
 def _getcachedprofileconfigs(repo):

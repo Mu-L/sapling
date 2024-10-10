@@ -49,6 +49,7 @@ use repo_blobstore::RepoBlobstoreRef;
 use repo_identity::RepoIdentityRef;
 use repo_update_logger::log_new_commits;
 use repo_update_logger::CommitInfo;
+use scuba_ext::FutureStatsScubaExt;
 use smallvec::SmallVec;
 use sorted_vector_map::SortedVectorMap;
 
@@ -59,6 +60,7 @@ use crate::file::FileType;
 use crate::path::MononokePathPrefixes;
 use crate::repo::RepoContext;
 use crate::specifiers::ChangesetSpecifier;
+use crate::MononokeRepo;
 
 #[derive(Clone)]
 pub struct CreateCopyInfo {
@@ -71,10 +73,10 @@ impl CreateCopyInfo {
         CreateCopyInfo { path, parent_index }
     }
 
-    async fn check_valid(
+    async fn check_valid<R: MononokeRepo>(
         &self,
         stack_changes: Option<&PathTree<CreateChangeType>>,
-        stack_parents: &[ChangesetContext],
+        stack_parents: &[ChangesetContext<R>],
     ) -> Result<(), MononokeError> {
         if let Some(stack_changes) = stack_changes {
             // Since this is a stacked commit, there is only one parent.
@@ -309,13 +311,13 @@ impl CreateChangeType {
 }
 
 impl CreateChange {
-    async fn resolve(
+    async fn resolve<R: MononokeRepo>(
         &mut self,
         ctx: &CoreContext,
         filestore_config: FilestoreConfig,
         repo_blobstore: RepoBlobstore,
         stack_changes: Option<&PathTree<CreateChangeType>>,
-        stack_parents: &[ChangesetContext],
+        stack_parents: &[ChangesetContext<R>],
     ) -> Result<(), MononokeError> {
         let file = match self {
             CreateChange::Tracked(file, copy_info) => {
@@ -402,13 +404,13 @@ pub struct CreateInfo {
 }
 
 /// Verify that all deleted files existed in at least one of the parents.
-async fn verify_deleted_files_existed_in_a_parent(
-    parent_ctxs: &[ChangesetContext],
+async fn verify_deleted_files_existed_in_a_parent<R: MononokeRepo>(
+    parent_ctxs: &[ChangesetContext<R>],
     stack_changes: Option<&PathTree<CreateChangeType>>,
     mut deleted_files: BTreeSet<MPath>,
 ) -> Result<(), MononokeError> {
-    async fn get_matching_files<'a>(
-        parent_ctx: &'a ChangesetContext,
+    async fn get_matching_files<'a, R: MononokeRepo>(
+        parent_ctx: &'a ChangesetContext<R>,
         files: &'a BTreeSet<MPath>,
     ) -> Result<impl Stream<Item = Result<MPath, MononokeError>> + 'a, MononokeError> {
         Ok(parent_ctx
@@ -499,8 +501,8 @@ fn is_prefix_changed(path: &MPath, paths: &PathTree<CreateChangeType>) -> bool {
 /// Verify that any files in `prefix_paths` that exist in any of
 /// `parent_ctxs`, as modified by the existing stack changes, have been marked
 /// as deleted in `path_changes`.
-async fn verify_prefix_files_deleted(
-    parent_ctxs: &[ChangesetContext],
+async fn verify_prefix_files_deleted<R: MononokeRepo>(
+    parent_ctxs: &[ChangesetContext<R>],
     stack_changes: Option<&PathTree<CreateChangeType>>,
     mut prefix_paths: BTreeSet<MPath>,
     path_changes: &PathTree<CreateChangeType>,
@@ -549,10 +551,10 @@ async fn verify_prefix_files_deleted(
         .await
 }
 
-async fn check_addless_union_conflicts(
+async fn check_addless_union_conflicts<R: MononokeRepo>(
     ctx: &CoreContext,
     repo_blobstore: RepoBlobstore,
-    changesets: &[ChangesetContext],
+    changesets: &[ChangesetContext<R>],
     fix_paths: &PathTree<CreateChangeType>,
 ) -> Result<(), MononokeError> {
     if changesets.len() < 2 {
@@ -645,7 +647,7 @@ async fn check_addless_union_conflicts(
     }
 }
 
-impl RepoContext {
+impl<R: MononokeRepo> RepoContext<R> {
     pub(crate) async fn save_changesets(
         &self,
         changesets: Vec<BonsaiChangeset>,
@@ -697,7 +699,7 @@ impl RepoContext {
         // If some, this changeset is a snapshot. Currently unsupported to upload a
         // normal commit to a bubble, though can be easily added.
         bubble: Option<&Bubble>,
-    ) -> Result<(SortedVectorMap<String, Vec<u8>>, ChangesetContext), MononokeError> {
+    ) -> Result<(SortedVectorMap<String, Vec<u8>>, ChangesetContext<R>), MononokeError> {
         let changesets = self
             .create_changeset_stack(parents, vec![info], vec![changes], bubble)
             .await?;
@@ -724,14 +726,10 @@ impl RepoContext {
         // If some, this changeset is a snapshot. Currently unsupported to upload a
         // normal commit to a bubble, though can be easily added.
         bubble: Option<&Bubble>,
-    ) -> Result<Vec<(SortedVectorMap<String, Vec<u8>>, ChangesetContext)>, MononokeError> {
+    ) -> Result<Vec<(SortedVectorMap<String, Vec<u8>>, ChangesetContext<R>)>, MononokeError> {
         self.start_write()?;
         self.authorization_context()
-            .require_repo_write(
-                self.ctx(),
-                self.inner_repo(),
-                RepoWriteOperation::CreateChangeset,
-            )
+            .require_repo_write(self.ctx(), self.repo(), RepoWriteOperation::CreateChangeset)
             .await?;
 
         let allowed_no_parents = self
@@ -877,17 +875,18 @@ impl RepoContext {
                 // This does NOT consider "missing" (untracked deletion) files as it is NOT
                 // necessary for them to exist in a parent. If they don't exist on a parent,
                 // this means the file was "hg added" and then manually deleted.
-                let (stats, result) = verify_deleted_files_existed_in_a_parent(
+                verify_deleted_files_existed_in_a_parent(
                     stack_parent_ctxs,
                     stack_changes.as_ref(),
                     tracked_deletion_files,
                 )
                 .timed()
-                .await;
-                let mut scuba = self.ctx().scuba().clone();
-                scuba.add_future_stats(&stats);
-                scuba.log_with_msg("Verify deleted files existed in a parent", None);
-                result
+                .await
+                .log_future_stats(
+                    self.ctx().scuba().clone(),
+                    "Verify deleted files existed in a parent",
+                    None,
+                )
             })
             .await
         };
@@ -905,18 +904,19 @@ impl RepoContext {
             .try_for_each_concurrent(
                 10,
                 |((prefix_paths, path_changes), stack_changes)| async move {
-                    let (stats, result) = verify_prefix_files_deleted(
+                    verify_prefix_files_deleted(
                         stack_parent_ctxs,
                         stack_changes.as_ref(),
                         prefix_paths,
                         path_changes,
                     )
                     .timed()
-                    .await;
-                    let mut scuba = self.ctx().scuba().clone();
-                    scuba.add_future_stats(&stats);
-                    scuba.log_with_msg("Verify prefix files in parents have been deleted", None);
-                    result
+                    .await
+                    .log_future_stats(
+                        self.ctx().scuba().clone(),
+                        "Verify prefix files in parents have been deleted",
+                        None,
+                    )
                 },
             )
             .await
@@ -925,13 +925,13 @@ impl RepoContext {
         // Check for merge conflicts.  This only applies to the first commit
         // in a stack.
         let verify_no_merge_conflicts_fut = async {
-            let (stats, result) = check_addless_union_conflicts(
+            check_addless_union_conflicts(
                 self.ctx(),
                 match &bubble {
                     Some(bubble) => {
-                        bubble.wrap_repo_blobstore(self.blob_repo().repo_blobstore().clone())
+                        bubble.wrap_repo_blobstore(self.repo().repo_blobstore().clone())
                     }
-                    None => self.blob_repo().repo_blobstore().clone(),
+                    None => self.repo().repo_blobstore().clone(),
                 },
                 stack_parent_ctxs,
                 path_changes_stack
@@ -939,19 +939,19 @@ impl RepoContext {
                     .ok_or_else(|| anyhow!("Should be at least one commit"))?,
             )
             .timed()
-            .await;
-
-            let mut scuba = self.ctx().scuba().clone();
-            scuba.add_future_stats(&stats);
-            scuba.log_with_msg("Verify all merge conflicts are resolved", None);
-            result
+            .await
+            .log_future_stats(
+                self.ctx().scuba().clone(),
+                "Verify all merge conflicts are resolved",
+                None,
+            )
         };
 
         // Resolve the changes so that they are ready to be converted into
         // bonsai changes. This also checks (1) for copy-from info.
         let blobstore = match &bubble {
-            Some(bubble) => bubble.wrap_repo_blobstore(self.blob_repo().repo_blobstore().clone()),
-            None => self.blob_repo().repo_blobstore().clone(),
+            Some(bubble) => bubble.wrap_repo_blobstore(self.repo().repo_blobstore().clone()),
+            None => self.repo().repo_blobstore().clone(),
         };
         borrowed!(blobstore);
         let resolve_file_changes_fut = async move {
@@ -961,31 +961,27 @@ impl RepoContext {
                     .zip(stack_changes_stack.iter())
                     .map(|(changes, stack_changes)| async move {
                         let stack_changes = stack_changes.as_ref();
-                        let (stats, result) = stream::iter(changes.into_iter().map(
-                            |(path, mut change)| async move {
-                                change
-                                    .resolve(
-                                        self.ctx(),
-                                        *self.blob_repo().filestore_config(),
-                                        blobstore.clone(),
-                                        stack_changes,
-                                        stack_parent_ctxs,
-                                    )
-                                    .await?;
-                                Ok::<_, MononokeError>((path, change))
-                            },
-                        ))
+                        stream::iter(changes.into_iter().map(|(path, mut change)| async move {
+                            change
+                                .resolve(
+                                    self.ctx(),
+                                    *self.repo().filestore_config(),
+                                    blobstore.clone(),
+                                    stack_changes,
+                                    stack_parent_ctxs,
+                                )
+                                .await?;
+                            Ok::<_, MononokeError>((path, change))
+                        }))
                         .buffered(1000)
                         .try_collect::<SortedVectorMap<NonRootMPath, CreateChange>>()
                         .timed()
-                        .await;
-                        let mut scuba = self.ctx().scuba().clone();
-                        scuba.add_future_stats(&stats);
-                        scuba.log_with_msg(
+                        .await
+                        .log_future_stats(
+                            self.ctx().scuba().clone(),
                             "Convert create changeset parameters to bonsai changes",
                             None,
-                        );
-                        result
+                        )
                     }),
             )
             .boxed()
@@ -1046,14 +1042,10 @@ impl RepoContext {
         }
 
         if let Some(bubble) = &bubble {
-            self.save_changesets(
-                new_changesets,
-                &bubble.repo_view(self.inner_repo()),
-                Some(bubble),
-            )
-            .await?;
+            self.save_changesets(new_changesets, &bubble.repo_view(self.repo()), Some(bubble))
+                .await?;
         } else {
-            self.save_changesets(new_changesets, self.inner_repo(), None)
+            self.save_changesets(new_changesets, self.repo(), None)
                 .await?;
         }
 

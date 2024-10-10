@@ -6,6 +6,7 @@
 from typing import Optional
 
 import bindings
+
 from sapling import tracing
 
 from . import error, peer, repository, util
@@ -39,7 +40,7 @@ class eagerpeer(repository.peer):
         self._reload()
 
     def _reload(self):
-        self._inner = EagerRepo.openurl(self._url)
+        self._inner = EagerRepo.openurl(self._ui._rcfg, self._url)
         # Invalidate propertycache.
         for name in ("dag", "edenapi"):
             self.__dict__.pop(name, None)
@@ -84,11 +85,11 @@ class eagerpeer(repository.peer):
 
     # "Pull" without using getbundle.
 
-    def commitgraph2(self, heads, common):
+    def commitgraph(self, heads, common):
         """heads: [node], common: [node]
         Returns a list of [(node, parents)], parents is a list of node.
         """
-        items = self.edenapi.commitgraph2(heads, common)
+        items = self.edenapi.commitgraph(heads, common)
         shouldtrace = tracing.isenabled(tracing.LEVEL_TRACE)
         for item in items:
             node = item["hgid"]
@@ -137,7 +138,6 @@ class eagerpeer(repository.peer):
             "known",
             "branchmap",
             "addblobs",
-            "commitgraph2",
             "clonedata",
         }
 
@@ -205,7 +205,12 @@ class eagerpeer(repository.peer):
         if node is not None:
             if self.known([node]) == [True]:
                 return node
-        # NOTE: Prefix match does not work yet.
+
+        prefix_resp = self.edenapi.hashlookup([key])
+        hgids = prefix_resp[0]["hgids"]
+        if len(hgids) == 1:
+            return hgids[0]
+
         # bookmark?
         m = self.listkeyspatterns("bookmarks", [key])
         node = m.get(key, None)

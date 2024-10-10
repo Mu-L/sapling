@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@stylexjs/stylex": "^0.4.1",
+    "@stylexjs/stylex": "^0.7.5",
     "@testing-library/jest-dom": "^5.14.1",
     "@testing-library/react": "^15.0.6",
     "@testing-library/user-event": "^13.2.1",
@@ -20,8 +20,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shared": "0.1.0",
-    "typescript": "^5.4.5",
-    "vite": "^5.2.8",
+    "typescript": "5.5.4",
+    "vite": "5.4.7",
     "vite-tsconfig-paths": "^4.3.1",
     "vscode-oniguruma": "^1.6.1",
     "vscode-textmate": "^6.0.0"
@@ -33,7 +33,7 @@
     "jest-environment-jsdom": "^29.7.0",
     "resize-observer-polyfill": "^1.5.1",
     "ts-jest": "29",
-    "vite-plugin-stylex": "^0.4.1"
+    "vite-plugin-stylex": "^0.10.1"
   },
   "scripts": {
     "start": "vite",

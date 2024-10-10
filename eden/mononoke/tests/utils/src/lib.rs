@@ -13,6 +13,7 @@ use std::str::FromStr;
 
 use anyhow::format_err;
 use anyhow::Error;
+use bonsai_git_mapping::BonsaiGitMapping;
 use bonsai_hg_mapping::BonsaiHgMapping;
 use bonsai_hg_mapping::BonsaiHgMappingRef;
 use bonsai_tag_mapping::BonsaiTagMapping;
@@ -22,7 +23,6 @@ use bookmarks::Bookmarks;
 use bookmarks::BookmarksRef;
 use bytes::Bytes;
 use bytes::BytesMut;
-use changesets::Changesets;
 use changesets_creation::save_changesets;
 use commit_graph::CommitGraph;
 use commit_graph::CommitGraphRef;
@@ -79,9 +79,6 @@ pub struct BasicTestRepo {
     pub repo_blobstore: RepoBlobstore,
 
     #[facet]
-    pub changesets: dyn Changesets,
-
-    #[facet]
     pub commit_graph: CommitGraph,
 
     #[facet]
@@ -104,6 +101,9 @@ pub struct BasicTestRepo {
 
     #[facet]
     pub bonsai_tag_mapping: dyn BonsaiTagMapping,
+
+    #[facet]
+    pub bonsai_git_mapping: dyn BonsaiGitMapping,
 }
 
 pub async fn list_working_copy_utf8(
@@ -431,11 +431,7 @@ impl<'a, R: Repo> CreateCommitContext<'a, R> {
             committer_date: self.committer_date,
             message: self.message.unwrap_or_else(|| String::from("message")),
             hg_extra: self.extra.into(),
-            git_extra_headers: None,
-            git_tree_hash: None,
-            file_changes: Default::default(),
-            is_snapshot: false,
-            git_annotated_tag: None,
+            ..Default::default()
         };
 
         for (path, file_change) in files {
@@ -819,15 +815,9 @@ pub async fn create_commit(
         parents,
         author: "author".to_string(),
         author_date: DateTime::from_timestamp(0, 0).unwrap(),
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
         file_changes: file_changes.into(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap();
@@ -848,15 +838,10 @@ pub async fn create_commit_with_date(
         parents,
         author: "author".to_string(),
         author_date,
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
         hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
         file_changes: file_changes.into(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap();

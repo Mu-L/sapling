@@ -12,7 +12,6 @@ use std::str::FromStr;
 use anyhow::Error;
 use anyhow::Result;
 use async_trait::async_trait;
-use blobrepo::BlobRepo;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateReason;
 use bytes::Bytes;
@@ -23,7 +22,6 @@ use futures::stream;
 use mercurial_derivation::DeriveHgChangeset;
 use mercurial_types::HgChangesetId;
 use mercurial_types::NonRootMPath;
-use mononoke_api_types::InnerRepo;
 use mononoke_types::BonsaiChangeset;
 use mononoke_types::BonsaiChangesetMut;
 use mononoke_types::ChangesetId;
@@ -141,15 +139,15 @@ pub trait TestRepoFixture {
         repo
     }
 
-    async fn get_custom_test_repo<
+    async fn get_repo<
         R: Repo + for<'builder> facet::AsyncBuildable<'builder, TestRepoFactoryBuilder<'builder>>,
     >(
         fb: FacebookInit,
     ) -> R {
-        Self::get_custom_test_repo_with_id(fb, RepositoryId::new(0)).await
+        Self::get_repo_with_id(fb, RepositoryId::new(0)).await
     }
 
-    async fn get_custom_test_repo_with_id<
+    async fn get_repo_with_id<
         R: Repo + for<'builder> facet::AsyncBuildable<'builder, TestRepoFactoryBuilder<'builder>>,
     >(
         fb: FacebookInit,
@@ -163,32 +161,6 @@ pub trait TestRepoFixture {
             .await
             .unwrap();
         Self::init_repo(fb, &repo).await.unwrap();
-        repo
-    }
-
-    // This method should be considered as deprecated. For new tests, please use `get_test_repo`
-    // instead.
-    async fn getrepo(fb: FacebookInit) -> BlobRepo {
-        Self::get_inner_repo(fb).await.blob_repo
-    }
-
-    async fn get_inner_repo(fb: FacebookInit) -> InnerRepo {
-        Self::get_inner_repo_with_id(fb, RepositoryId::new(0)).await
-    }
-
-    async fn getrepo_with_id(fb: FacebookInit, id: RepositoryId) -> BlobRepo {
-        Self::get_inner_repo_with_id(fb, id).await.blob_repo
-    }
-
-    async fn get_inner_repo_with_id(fb: FacebookInit, id: RepositoryId) -> InnerRepo {
-        let repo: InnerRepo = TestRepoFactory::new(fb)
-            .unwrap()
-            .with_id(id)
-            .with_name(Self::REPO_NAME.to_string())
-            .build()
-            .await
-            .unwrap();
-        Self::init_repo(fb, &repo.blob_repo).await.unwrap();
         repo
     }
 }
@@ -807,15 +779,8 @@ pub fn create_bonsai_changeset(parents: Vec<ChangesetId>) -> BonsaiChangeset {
         parents,
         author: "author".to_string(),
         author_date: DateTime::from_timestamp(0, 0).unwrap(),
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
-        file_changes: Default::default(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap()
@@ -829,15 +794,8 @@ pub fn create_bonsai_changeset_with_author(
         parents,
         author,
         author_date: DateTime::from_timestamp(0, 0).unwrap(),
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
-        file_changes: Default::default(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap()
@@ -851,15 +809,9 @@ pub fn create_bonsai_changeset_with_files(
         parents,
         author: "author".to_string(),
         author_date: DateTime::from_timestamp(0, 0).unwrap(),
-        committer: None,
-        committer_date: None,
         message: "message".to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
         file_changes: file_changes.into(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()
     .unwrap()
@@ -986,6 +938,7 @@ pub fn json_config_small() -> String {
 #[cfg(test)]
 mod test {
     use commit_graph::CommitGraphRef;
+    use mononoke_macros::mononoke;
 
     use super::*;
 
@@ -1031,57 +984,57 @@ mod test {
         assert_eq!(hg_changeset.to_hex(), expected_master_hg_id);
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_branch_even(fb: FacebookInit) {
         check_fixture::<BranchEven>(fb, "4f7f3fd428bec1a48f9314414b063c706d9c1aed").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_branch_uneven(fb: FacebookInit) {
         check_fixture::<BranchUneven>(fb, "264f01429683b3dd8042cb3979e8bf37007118bc").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_branch_wide(fb: FacebookInit) {
         check_fixture::<BranchWide>(fb, "49f53ab171171b3180e125b918bd1cf0af7e5449").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_many_files_dirs(fb: FacebookInit) {
         check_fixture::<ManyFilesDirs>(fb, "5a28e25f924a5d209b82ce0713d8d83e68982bc8").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_linear(fb: FacebookInit) {
         check_fixture::<Linear>(fb, "79a13814c5ce7330173ec04d279bf95ab3f652fb").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_merge_even(fb: FacebookInit) {
         check_fixture::<MergeEven>(fb, "1f6bc010883e397abeca773192f3370558ee1320").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_merge_uneven(fb: FacebookInit) {
         check_fixture::<MergeUneven>(fb, "d35b1875cdd1ed2c687e86f1604b9d7e989450cb").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_merge_multiple_files(fb: FacebookInit) {
         check_fixture::<MergeMultipleFiles>(fb, "c7bfbeed73ed19b01f5309716164d5b37725a61d").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_unshared_merge_even(fb: FacebookInit) {
         check_fixture::<UnsharedMergeEven>(fb, "7fe9947f101acb4acf7d945e69f0d6ce76a81113").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_unshared_merge_uneven(fb: FacebookInit) {
         check_fixture::<UnsharedMergeUneven>(fb, "dd993aab2bed7276e17c88470286ba8459ba6d94").await;
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_many_diamonds(fb: FacebookInit) {
         check_fixture::<ManyDiamonds>(fb, "6b43556e77b7312cabd16ac5f0a85cd920d95272").await;
     }

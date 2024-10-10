@@ -5,6 +5,8 @@
  * GNU General Public License version 2.
  */
 
+#![allow(unexpected_cfgs)]
+
 mod request_info;
 
 use anyhow::Context;
@@ -20,6 +22,7 @@ mod facebook;
 #[cfg(not(fbcode_build))]
 mod oss;
 use facebook::get_fb_client_info;
+use facebook::log_cross_environment_session_id;
 use facebook::FbClientInfo;
 #[cfg(not(fbcode_build))]
 use oss as facebook;

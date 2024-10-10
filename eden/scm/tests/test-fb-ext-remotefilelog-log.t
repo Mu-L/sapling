@@ -1,7 +1,6 @@
 #chg-compatible
 #require mononoke
 #debugruntest-incompatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
 
@@ -28,8 +27,6 @@ Shallow clone from full
   $ clone master shallow --noupdate
   $ cd shallow
   $ cat .hg/requires
-  dotencode
-  fncache
   generaldelta
   lz4revlog
   remotefilelog
@@ -39,10 +36,6 @@ Shallow clone from full
   windowssymlinks
 
   $ hg goto tip
-  fetching tree '' 05bd2758dd7a25912490d0633b8975bf52bfab06
-  1 trees fetched over 0.00s
-  fetching tree 'dir' 8a87e5128a9877c501d5a20c32dbd2103a54afad
-  1 trees fetched over 0.00s
   2 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
 Log on a file without -f

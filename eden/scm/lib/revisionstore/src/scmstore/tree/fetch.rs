@@ -6,25 +6,27 @@
  */
 
 use std::collections::HashMap;
+use std::future;
 use std::time::Instant;
 
 use anyhow::Result;
 use async_runtime::block_on;
 use cas_client::CasClient;
 use crossbeam::channel::Sender;
+use futures::StreamExt;
 use tracing::field;
 use types::fetch_mode::FetchMode;
 use types::hgid::NULL_ID;
 use types::AugmentedTree;
 use types::AugmentedTreeWithDigest;
 use types::CasDigest;
+use types::CasDigestType;
 use types::Key;
 use types::NodeInfo;
 
 use super::metrics::TreeStoreFetchMetrics;
 use super::types::StoreTree;
 use super::types::TreeAttributes;
-use crate::error::ClonableError;
 use crate::indexedlogtreeauxstore::TreeAuxStore;
 use crate::scmstore::fetch::CommonFetchState;
 use crate::scmstore::fetch::FetchErrors;
@@ -112,23 +114,7 @@ impl FetchState {
             let entry = LazyTree::SaplingRemoteApi(entry);
 
             if aux_cache.is_some() || tree_aux_store.is_some() {
-                let aux_data = entry.children_aux_data();
-                for (hgid, aux) in aux_data.into_iter() {
-                    match aux {
-                        AuxData::File(file_aux) => {
-                            if let Some(aux_cache) = aux_cache.as_ref() {
-                                tracing::trace!(?hgid, "writing to aux cache");
-                                aux_cache.put(hgid, &file_aux)?;
-                            }
-                        }
-                        AuxData::Tree(tree_aux) => {
-                            if let Some(tree_aux_store) = tree_aux_store.as_ref() {
-                                tracing::trace!(?hgid, "writing to tree aux store");
-                                tree_aux_store.put(hgid, &tree_aux)?;
-                            }
-                        }
-                    }
-                }
+                cache_child_aux_data(&entry, aux_cache, tree_aux_store)?;
 
                 if let Some(aux_data) = entry.aux_data() {
                     if let Some(tree_aux_store) = tree_aux_store.as_ref() {
@@ -172,7 +158,18 @@ impl FetchState {
         Ok(())
     }
 
-    pub(crate) fn fetch_cas(&mut self, cas_client: &dyn CasClient) {
+    pub(crate) fn fetch_cas(
+        &mut self,
+        cas_client: &dyn CasClient,
+        aux_cache: Option<&AuxStore>,
+        tree_aux_store: Option<&TreeAuxStore>,
+    ) {
+        if self.common.request_attrs == TreeAttributes::AUX_DATA {
+            // If we are only requesting aux data, don't bother querying CAS. Aux data is
+            // required to query CAS, so CAS cannot possibly help.
+            return;
+        }
+
         let span = tracing::info_span!(
             "fetch_cas",
             keys = field::Empty,
@@ -219,16 +216,12 @@ impl FetchState {
         let mut error = 0;
         let mut reqs = 0;
 
-        // TODO: configure
-        let max_batch_size = 1000;
         let start_time = Instant::now();
 
-        for chunk in digests.chunks(max_batch_size) {
-            reqs += 1;
-
-            // TODO: should we fan out here into multiple requests?
-            match block_on(cas_client.fetch(chunk)) {
+        block_on(async {
+            cas_client.fetch(&digests, CasDigestType::Tree).await.for_each(|results| match results {
                 Ok(results) => {
+                    reqs += 1;
                     for (digest, data) in results {
                         let Some(key) = digest_to_key.remove(&digest) else {
                             tracing::error!("got CAS result for unrequested digest {:?}", digest);
@@ -243,25 +236,34 @@ impl FetchState {
                                 self.errors.keyed_error(key, err);
                             }
                             Ok(None) => {
-                                tracing::error!(target: "cas", ?key, ?digest, "tree not in cas");
+                                tracing::trace!(target: "cas", ?key, ?digest, "tree not in cas");
                                 // miss
                             }
                             Ok(Some(data)) => match AugmentedTree::try_deserialize(&*data) {
                                 Ok(tree) => {
                                     found += 1;
-                                    tracing::error!(target: "cas", ?key, ?digest, "tree found in cas");
-                                    self.common.found(
-                                        key,
-                                        StoreTree {
-                                            content: Some(LazyTree::Cas(AugmentedTreeWithDigest {
-                                                augmented_manifest_id: digest.hash,
-                                                augmented_manifest_size: digest.size,
-                                                augmented_tree: tree,
-                                            })),
-                                            parents: None,
-                                            aux_data: None,
-                                        },
-                                    );
+                                    tracing::trace!(target: "cas", ?key, ?digest, "tree found in cas");
+
+                                    let lazy_tree = LazyTree::Cas(AugmentedTreeWithDigest {
+                                        augmented_manifest_id: digest.hash,
+                                        augmented_manifest_size: digest.size,
+                                        augmented_tree: tree,
+                                    });
+
+                                    if let Err(err) =
+                                        cache_child_aux_data(&lazy_tree, aux_cache, tree_aux_store)
+                                    {
+                                        self.errors.keyed_error(key, err);
+                                    } else {
+                                        self.common.found(
+                                            key,
+                                            StoreTree {
+                                                content: Some(lazy_tree),
+                                                parents: None,
+                                                aux_data: None,
+                                            },
+                                        );
+                                    }
                                 }
                                 Err(err) => {
                                     error += 1;
@@ -270,18 +272,18 @@ impl FetchState {
                             },
                         }
                     }
+                    future::ready(())
                 }
                 Err(err) => {
                     tracing::error!(?err, "overall CAS error");
-                    let err = ClonableError::new(err);
-                    for digest in chunk {
-                        if let Some(key) = digest_to_key.get(digest) {
-                            self.errors.keyed_error(key.clone(), err.clone().into());
-                        }
-                    }
+
+                    // Don't propagate CAS error - we want to fall back to SLAPI.
+                    reqs += 1;
+                    error += 1;
+                    future::ready(())
                 }
-            }
-        }
+            }).await;
+        });
 
         span.record("hits", found);
         span.record("requests", reqs);
@@ -292,4 +294,37 @@ impl FetchState {
         self.metrics.cas.err(error);
         self.metrics.cas.hit(found);
     }
+}
+
+fn cache_child_aux_data(
+    tree: &LazyTree,
+    aux_cache: Option<&AuxStore>,
+    tree_aux_store: Option<&TreeAuxStore>,
+) -> Result<()> {
+    if aux_cache.is_none() && tree_aux_store.is_none() {
+        return Ok(());
+    }
+
+    let aux_data = tree.children_aux_data();
+    for (hgid, aux) in aux_data.into_iter() {
+        match aux {
+            AuxData::File(file_aux) => {
+                if let Some(aux_cache) = aux_cache.as_ref() {
+                    if !aux_cache.contains(hgid)? {
+                        tracing::trace!(?hgid, "writing to aux cache");
+                        aux_cache.put(hgid, &file_aux)?;
+                    }
+                }
+            }
+            AuxData::Tree(tree_aux) => {
+                if let Some(tree_aux_store) = tree_aux_store.as_ref() {
+                    if !tree_aux_store.contains(hgid)? {
+                        tracing::trace!(?hgid, "writing to tree aux store");
+                        tree_aux_store.put(hgid, &tree_aux)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }

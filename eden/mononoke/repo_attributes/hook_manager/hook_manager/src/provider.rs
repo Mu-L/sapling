@@ -89,11 +89,27 @@ pub trait HookStateProvider: Send + Sync {
         bookmark: &'b BookmarkKey,
     ) -> Result<TagType, HookStateProviderError>;
 
+    /// If the repo for which the hook is being run is a Git repo, return the corresponding
+    /// Git commit hash for the given Bonsai commit.
+    async fn get_git_commit<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        bonsai_commit_id: ChangesetId,
+    ) -> Result<Option<GitSha1>, HookStateProviderError>;
+
     /// Find the content of a set of files at a particular bookmark.
     async fn find_content<'a>(
         &'a self,
         ctx: &'a CoreContext,
         bookmark: BookmarkKey,
+        paths: Vec<NonRootMPath>,
+    ) -> Result<HashMap<NonRootMPath, PathContent>, HookStateProviderError>;
+
+    /// Find the content of a set of files at a particular changeset.
+    async fn find_content_by_changeset_id<'a>(
+        &'a self,
+        ctx: &'a CoreContext,
+        changeset_id: ChangesetId,
         paths: Vec<NonRootMPath>,
     ) -> Result<HashMap<NonRootMPath, PathContent>, HookStateProviderError>;
 
@@ -103,7 +119,7 @@ pub trait HookStateProvider: Send + Sync {
         ctx: &'a CoreContext,
         new_cs_id: ChangesetId,
         old_cs_id: ChangesetId,
-    ) -> Result<Vec<(NonRootMPath, FileChange)>, HookStateProviderError>;
+    ) -> Result<Vec<(NonRootMPath, FileChangeType)>, HookStateProviderError>;
 
     /// Find the latest changesets that affected a set of paths at a particular bookmark.
     async fn latest_changes<'a>(
@@ -129,7 +145,7 @@ pub enum PathContent {
 }
 
 #[derive(Clone, Debug)]
-pub enum FileChange {
+pub enum FileChangeType {
     Added(ContentId),
     Changed(ContentId, ContentId),
     Removed,

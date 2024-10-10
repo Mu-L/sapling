@@ -7,7 +7,7 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 DISALLOW_NON_PUSHREBASE=1 GLOBALREVS_PUBLISHING_BOOKMARK=master_bookmark EMIT_OBSMARKERS=1 BLOB_TYPE="blob_files" default_setup
+  $ DISALLOW_NON_PUSHREBASE=1 GLOBALREVS_PUBLISHING_BOOKMARK=master_bookmark EMIT_OBSMARKERS=1 BLOB_TYPE="blob_files" default_setup
   hg repo
   o  C [draft;rev=2;26805aba1e60]
   │
@@ -23,40 +23,40 @@
 Push commit, check a globalrev was assigned
   $ touch file1
   $ hg ci -Aqm commit1
-  $ sl push -q -r . --to master_bookmark
+  $ hg push -q -r . --to master_bookmark
   $ hg log -r . -T '{extras % "{extra}\n"}'
   branch=default
   global_rev=1000147970
-  $ hgmn bookmarks --remote
+  $ hg bookmarks --remote
      default/master_bookmark   2fa5be0dd895
 
 Push another commit, check that the globalrev is incrementing
   $ touch file2
   $ hg ci -Aqm commit2
-  $ sl push -q -r . --to master_bookmark
+  $ hg push -q -r . --to master_bookmark
   $ hg log -r . -T '{extras % "{extra}\n"}'
   branch=default
   global_rev=1000147971
-  $ hgmn bookmarks --remote
+  $ hg bookmarks --remote
      default/master_bookmark   7a3a1e2e51f5
 
 
 Check that we create a new bookmark that is a descendant of the globalrev bookmark
-  $ sl push -q -r '.^' --to other_bookmark --create
-  $ hgmn bookmarks --remote
+  $ hg push -q -r '.^' --to other_bookmark --create
+  $ hg bookmarks --remote
      default/master_bookmark   7a3a1e2e51f5
      default/other_bookmark    2fa5be0dd895
 
 Check that we update bookmark to a descendant of the globalrev bookmark
-  $ sl push -q -r . --to other_bookmark --force
-  $ hgmn bookmarks --remote
+  $ hg push -q -r . --to other_bookmark --force
+  $ hg bookmarks --remote
      default/master_bookmark   7a3a1e2e51f5
      default/other_bookmark    7a3a1e2e51f5
 
 Check that we cannot pushrebase on that bookmark
   $ touch file3
   $ hg ci -Aqm commit3
-  $ sl push -r . --to other_bookmark
+  $ hg push -r . --to other_bookmark
   pushing rev 9596b4eb01f6 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark other_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 0 files for upload
@@ -71,14 +71,14 @@ Check that we cannot push to that bookmark if the commit is not a descendant
   $ touch file3
   $ hg ci -Aqm commit3
   [1]
-  $ sl push -r . --to other_bookmark --force
+  $ hg push -r . --to other_bookmark --force
   pushing rev 9596b4eb01f6 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark other_bookmark
   moving remote bookmark other_bookmark from 7a3a1e2e51f5 to 9596b4eb01f6
   abort: server error: invalid request: Bookmark 'other_bookmark' can only be moved to ancestors of 'master_bookmark'
   [255]
 
 Check that we cannot do a regular push to the globalrev bookmark either
-  $ sl push -r . --to master_bookmark --force
+  $ hg push -r . --to master_bookmark --force
   pushing rev 9596b4eb01f6 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   moving remote bookmark master_bookmark from 7a3a1e2e51f5 to 9596b4eb01f6
   abort: server error: invalid request: Bookmark 'master_bookmark' can only be moved to ancestors of 'master_bookmark'

@@ -12,8 +12,8 @@ name = "cross_repo_sync_test"
 path = "test/main.rs"
 
 [dependencies]
-anyhow = "1.0.75"
-async-recursion = "1.0.2"
+anyhow = "1.0.86"
+async-recursion = "1.1.1"
 async-trait = "0.1.71"
 blobstore = { version = "0.1.0", path = "../../blobstore" }
 bonsai_git_mapping = { version = "0.1.0", path = "../../bonsai_git_mapping" }
@@ -36,7 +36,7 @@ derived_data = { version = "0.1.0", path = "../../derived_data" }
 either = "1.5"
 environment = { version = "0.1.0", path = "../../cmdlib/environment" }
 facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
-fbinit = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fbinit = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 filenodes = { version = "0.1.0", path = "../../filenodes" }
 filestore = { version = "0.1.0", path = "../../filestore" }
 fsnodes = { version = "0.1.0", path = "../../derived_data/fsnodes" }
@@ -74,19 +74,21 @@ sql_query_config = { version = "0.1.0", path = "../../repo_attributes/sql_query_
 static_assertions = "1.1.0"
 synced_commit_mapping = { version = "0.1.0", path = "../synced_commit_mapping" }
 synced_commit_mapping_pushrebase_hook = { version = "0.1.0", path = "../synced_commit_mapping/pushrebase_hook" }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }
 topo_sort = { version = "0.1.0", path = "../../common/topo_sort" }
 
 [dev-dependencies]
 ascii = "1.0"
-blobrepo = { version = "0.1.0", path = "../../blobrepo" }
 bulk_derivation = { version = "0.1.0", path = "../../derived_data/bulk_derivation" }
 cross_repo_sync_test_utils = { version = "0.1.0", path = "test_utils" }
 fbinit-tokio = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fixtures = { version = "0.1.0", path = "../../tests/fixtures" }
+fn-error-context = "0.2"
 mercurial_derivation = { version = "0.1.0", path = "../../derived_data/mercurial_derivation" }
+mononoke_macros = { version = "0.1.0", path = "../../mononoke_macros" }
 mononoke_types-mocks = { version = "0.1.0", path = "../../mononoke_types/mocks" }
+rendezvous = { version = "0.1.0", path = "../../common/rendezvous" }
 sql_construct = { version = "0.1.0", path = "../../common/sql_construct" }
 sql_ext = { version = "0.1.0", path = "../../common/rust/sql_ext" }
 strum = { version = "0.26.2", features = ["derive"] }

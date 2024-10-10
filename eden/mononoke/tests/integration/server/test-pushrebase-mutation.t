@@ -9,29 +9,28 @@
 
 setup configuration
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 setup_common_config "blob_files"
+  $ setup_common_config "blob_files"
   $ cd $TESTTMP
 
 setup common configuration
   $ setconfig ui.ssh="\"$DUMMYSSH\"" mutation.date="0 0"
   $ enable amend
 
-  $ newrepo repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ echo base > base
   $ hg commit -Aqm base
   $ hg bookmark master -r tip
 
 blobimport
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 clone the repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg client --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo client --noupdate
   $ cd client
-  $ setup_hg_client
   $ enable pushrebase remotenames
 
 create a commit with mutation extras
@@ -43,7 +42,7 @@ create a commit with mutation extras
       f0161ad23099c690115006c21e96f780f5d740b6
   
 pushrebase it directly onto master - it will be rewritten without the mutation extras
-  $ sl push -r . --to master --config push.skip-cleanup-commits=true
+  $ hg push -r . --to master --config push.skip-cleanup-commits=true
   pushing rev 6ad95cdc8ab9 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -74,7 +73,7 @@ create another commit on the base commit with mutation extras
       1b9fe529321657f93e84f23afaf9c855b9af34ff
   
 pushrebase it onto master - it will be rebased and rewritten without the mutation extras
-  $ sl push -r . --to master --config push.skip-cleanup-commits=true
+  $ hg push -r . --to master --config push.skip-cleanup-commits=true
   pushing rev fd935a5d42c4 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload

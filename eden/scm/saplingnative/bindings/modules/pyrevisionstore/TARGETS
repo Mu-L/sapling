@@ -21,10 +21,8 @@ rust_python_library(
     crate_root = "src/lib.rs",
     deps = [
         "fbsource//third-party/rust:anyhow",
-        "fbsource//third-party/rust:parking_lot",
         "//eden/scm/lib/config/model:configmodel",
         "//eden/scm/lib/cpython-ext:cpython-ext",
-        "//eden/scm/lib/minibytes:minibytes",
         "//eden/scm/lib/revisionstore:revisionstore",
         "//eden/scm/lib/storemodel:storemodel",
         "//eden/scm/lib/types:types",

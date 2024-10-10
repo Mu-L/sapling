@@ -181,6 +181,9 @@ struct Repo {
 struct RepoInfo {
   1: string name;
   2: CommitIdentityScheme default_commit_identity_scheme;
+  /// Name of a large repo to which this repo is push redirected, i.e. when
+  /// the large repo is the source of truth.
+  3: optional string push_redirected_to;
 }
 
 struct CommitInfo {
@@ -1122,6 +1125,39 @@ struct RepoUploadFileContentParams {
   5: optional string service_identity;
 }
 
+/// Optional metadata for the commit that will be created
+struct RepoUpdateSubmoduleExpansionCommitInfo {
+  /// The commit message.
+  1: optional string message;
+
+  /// The author of the commit.
+  2: optional string author;
+
+  /// The date the commit was authored. If omitted, the server will use the
+  /// current time in its default timezone.
+  3: optional DateTime author_date;
+}
+
+/// Params for repo_update_submodule_expansion method
+struct RepoUpdateSubmoduleExpansionParams {
+  /// Large repo containing the expansion being updated
+  1: RepoSpecifier large_repo;
+  /// Large repo commit that will be the base commit for the generated commit
+  /// updating the submodule expansion.
+  2: CommitId base_commit_id;
+  /// Path of the submodule expansion in the large repo
+  3: Path submodule_expansion_path;
+  /// New submodule commit to expand.
+  /// NOTE: if this is set to null, the submodule expansion will be DELETED!
+  /// This means deleting the submodule from the Git repo when backsyncing the
+  /// commit.
+  4: optional CommitId new_submodule_commit_or_delete;
+  /// Commit identity schemes to return.
+  5: set<CommitIdentityScheme> identity_schemes;
+  /// Optional metadata for the commit that will be generated
+  6: optional RepoUpdateSubmoduleExpansionCommitInfo commit_info;
+}
+
 struct CommitLookupParams {
   /// Commit identity schemes to return.
   1: set<CommitIdentityScheme> identity_schemes;
@@ -1526,6 +1562,49 @@ struct CommitLookupXRepoParams {
   5: bool exact;
 }
 
+struct CustomAclParams {
+  1: string hipster_group;
+}
+
+enum RepoSizeBucket {
+  /// <100MB
+  EXTRA_SMALL = 0,
+  /// <1GB
+  SMALL = 1,
+  /// <10GB
+  MEDIUM = 2,
+  /// <100GB
+  LARGE = 3,
+  /// >100GB
+  EXTRA_LARGE = 4,
+}
+
+enum RepoScmType {
+  // Only git repos can be created via this API now.
+  GIT = 0,
+}
+
+struct RepoCreationRequest {
+  1: string repo_name;
+  /// What kind of repo should it be? (sl or git)
+  2: RepoScmType scm_type;
+  /// Oncall Owning he repo
+  3: string oncall_name;
+  /// Hipster group owning a custom ACL (if custom ACL is required)
+  4: optional CustomAclParams custom_acl;
+  /// Size bucket (allows for provisioning the right amount of resources for the new repo)
+  5: RepoSizeBucket size_bucket;
+}
+
+struct CreateReposParams {
+  /// Lists of repos to create
+  1: list<RepoCreationRequest> repos;
+  /// Dry run:
+  2: bool dry_run;
+}
+
+struct CreateReposToken {}
+
 /// Synchronization target
 struct MegarepoTarget {
   /// Mononoke repository id, where the target is located
@@ -1551,34 +1630,29 @@ struct MegarepoSyncTargetConfig {
 
 /// Polling tokens for async megarepo methods
 struct MegarepoChangeConfigToken {
-  /// A target this token relates to
-  1: MegarepoTarget target;
+  // 1: deprecated
   /// An actual token payload
   2: i64 id;
 }
 
 struct MegarepoSyncChangesetToken {
-  /// A target this token relates to
-  1: MegarepoTarget target;
+  // 1: deprecated
   /// An actual token payload
   2: i64 id;
 }
 struct MegarepoRemergeSourceToken {
-  /// A target this token relates to
-  1: MegarepoTarget target;
+  // 1: deprecated
   /// An actual token payload
   2: i64 id;
 }
 struct MegarepoAddTargetToken {
-  /// A target this token relates to
-  1: MegarepoTarget target;
+  // 1: deprecated
   /// An actual token payload
   2: i64 id;
 }
 
 struct MegarepoAddBranchingTargetToken {
-  /// A target this token relates to
-  1: MegarepoTarget target;
+  // 1: deprecated
   /// An actual token payload
   2: i64 id;
 }
@@ -1831,6 +1905,17 @@ struct RepoUploadFileContentResponse {
   1: binary id;
 }
 
+struct RepoUpdateSubmoduleExpansionResponse {
+  /// IDs of the commit updating the submodule expansion in the provided
+  /// repo in all the requested schemes.
+  1: map<CommitIdentityScheme, CommitId> ids;
+}
+
+union RepoUpdateSubmoduleExpansionResult {
+  1: RepoUpdateSubmoduleExpansionResponse success;
+  2: MegarepoAsynchronousRequestError error;
+}
+
 struct CommitCompareResponse {
   /// List of the files that are different between commits with their metadata
   /// Can be used for subsequent `commit_path_diff` calls for file-level diffs.
@@ -2008,6 +2093,15 @@ struct FileDiffResponse {
   1: Diff diff;
 }
 
+struct CreateReposResponse {
+/// Indicates successfull repo creation.
+}
+
+struct CreateReposPollResponse {
+  /// Maybe a response to an underlying call, if it is ready
+  1: optional CreateReposResponse result;
+}
+
 struct MegarepoAddConfigResponse {}
 
 struct MegarepoReadConfigResponse {
@@ -2104,6 +2198,135 @@ struct CreateGitTagResponse {
   1: binary created_changeset_id;
 }
 
+/// Specifies a commit cloud workspace
+struct WorkspaceSpecifier {
+  /// The repository associated with the workspace.
+  1: RepoSpecifier repo;
+  /// Workspace name (user/<unixname>/<workspace_name>)
+  2: string name;
+} (rust.ord)
+
+/// Information about a commit cloud workspace
+struct WorkspaceInfo {
+  /// Workspace name and the repo it's associated with
+  1: WorkspaceSpecifier specifier;
+  /// Whether the workspace has been archived
+  2: bool is_archived;
+  /// Latest version number of the workspace
+  3: i64 latest_version;
+  /// Latest timestamp the workspace was updated
+  4: i64 latest_timestamp;
+}
+
+/// Represents a remote bookmark in a commit cloud workspace.
+struct WorkspaceRemoteBookmark {
+  /// Prefix (usually 'remote').
+  1: string remote;
+  /// Bookmark name, e.g., 'master'.
+  2: string name;
+  /// Optional Mercurial commit ID the remote bookmark is associated with.
+  3: optional string hg_id;
+}
+
+/// Represents a single commit within a workspace.
+struct SmartlogNode {
+  /// Mercurial commit ID.
+  1: string hg_id;
+  /// Whether the commit is public or draft.
+  2: string phase;
+  /// The author of the commit.
+  3: string author;
+  /// The date the commit was authored, as a Unix timestamp.
+  4: i64 date;
+  /// A message to be used in the commit description.
+  5: string message;
+  /// The parents of the commit.
+  6: list<string> parents;
+  /// Local bookmarks associated with the commit.
+  7: list<string> bookmarks;
+  /// Optional list of remote bookmarks associated with the commit.
+  8: optional list<WorkspaceRemoteBookmark> remote_bookmarks;
+}
+
+/// Represents the Smartlog view of the contents of a commit cloud workspace.
+struct SmartlogData {
+  /// List of nodes that make up the Smartlog.
+  1: list<SmartlogNode> nodes;
+  /// Optional version number of the workspace being retrieved.
+  2: optional i64 version;
+  /// Optional timestamp of when the workspace version was updated.
+  3: optional i64 timestamp;
+}
+
+enum CloudWorkspaceSmartlogFlags {
+  /// Do not provide metadata about public commits in the response
+  /// (by default both draft commits and their public roots are returned)
+  SKIP_PUBLIC_COMMITS_METADATA = 1,
+  /// return all remote bookmarks
+  /// (by default only remote bookmarks that belong to draft commits (scratch bookmarks) or their public roots are returned)
+  ADD_REMOTE_BOOKMARKS = 3,
+  /// return all local bookmarks
+  /// (by default only bookmarks that belong to draft commits or their public roots are returned)
+  ADD_ALL_BOOKMARKS = 4,
+}
+
+struct CloudWorkspaceInfoParams {
+  /// Workspace name and the repo it's associated with
+  1: WorkspaceSpecifier workspace;
+}
+
+struct CloudWorkspaceInfoResponse {
+  /// General info about the workspace, similar to `sl cloud status`
+  1: WorkspaceInfo workspace_info;
+}
+
+struct CloudUserWorkspacesParams {
+  /// Repo the workspace is associated with
+  1: RepoSpecifier repo;
+  /// User unixname whose workspace list is being queried
+  2: string user;
+}
+
+struct CloudUserWorkspacesResponse {
+  /// Workspaces associated with a certain user in a speific repo
+  1: list<WorkspaceInfo> workspaces;
+}
+
+struct CloudWorkspaceSmartlogParams {
+  /// Workspace name and the repo it's associated with
+  1: WorkspaceSpecifier workspace;
+  /// Options about what info to include in the response
+  2: list<CloudWorkspaceSmartlogFlags> flags;
+}
+
+struct CloudWorkspaceSmartlogResponse {
+  /// Smartlog view of a commit cloud workspace
+  1: SmartlogData smartlog;
+}
+
+// Note that this method has no repo nor commit specifier–that is intentional, tests depend on that.
+struct AsyncPingParams {
+  /// The request payload, which will be echoed back into the response.
+  1: string payload;
+}
+
+struct AsyncPingToken {
+  1: i64 id;
+}
+
+struct AsyncPingResponse {
+  1: string payload;
+}
+
+union AsyncPingResult {
+  1: AsyncPingResponse success;
+  2: AsyncRequestError error;
+}
+
+struct AsyncPingPollResponse {
+  1: optional AsyncPingResult result;
+}
+
 /// Exceptions
 
 enum RequestErrorKind {
@@ -2148,6 +2371,11 @@ struct InternalErrorStruct {
   1: string reason;
   2: optional string backtrace;
   3: list<string> source_chain;
+}
+
+union AsyncRequestError {
+  1: RequestErrorStruct request_error;
+  2: InternalErrorStruct internal_error;
 }
 
 union MegarepoAsynchronousRequestError {
@@ -2660,7 +2888,7 @@ service SourceControlService extends fb303_core.BaseService {
     3: OverloadError overload_error,
   );
 
-  /// Old-style Cross-Repo Methods (used for ovrsource merge into fbsource)
+  /// Cross-Repo Methods
   /// ============================
 
   /// Look-up a commit to find its identity (if any) in another repo
@@ -2668,6 +2896,21 @@ service SourceControlService extends fb303_core.BaseService {
     1: CommitSpecifier commit,
     2: CommitLookupXRepoParams params,
   ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  /// Repository management methods
+  /// ==============================
+
+  CreateReposToken create_repos(1: CreateReposParams params) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  CreateReposPollResponse create_repos_poll(1: CreateReposToken token) throws (
     1: RequestError request_error,
     2: InternalError internal_error,
     3: OverloadError overload_error,
@@ -2801,6 +3044,14 @@ service SourceControlService extends fb303_core.BaseService {
     3: OverloadError overload_error,
   );
 
+  RepoUpdateSubmoduleExpansionResponse repo_update_submodule_expansion(
+    1: RepoUpdateSubmoduleExpansionParams params,
+  ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
   /// Git Import Methods
   /// ==================
 
@@ -2844,6 +3095,51 @@ service SourceControlService extends fb303_core.BaseService {
     1: RepoSpecifier repo,
     2: CreateGitTagParams params,
   ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  /// Commit Cloud Methods
+  /// ==================
+
+  /// Get general info of a commit cloud workspace
+  CloudWorkspaceInfoResponse cloud_workspace_info(
+    1: CloudWorkspaceInfoParams params,
+  ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  /// Get general info about all the workspaces associated with a user
+  CloudUserWorkspacesResponse cloud_user_workspaces(
+    1: CloudUserWorkspacesParams params,
+  ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  CloudWorkspaceSmartlogResponse cloud_workspace_smartlog(
+    1: CloudWorkspaceSmartlogParams params,
+  ) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  /// Test support methods
+  /// ==================
+
+  AsyncPingToken async_ping(1: AsyncPingParams params) throws (
+    1: RequestError request_error,
+    2: InternalError internal_error,
+    3: OverloadError overload_error,
+  );
+
+  //// Poll the execution of async_ping request
+  AsyncPingPollResponse async_ping_poll(1: AsyncPingToken token) throws (
     1: RequestError request_error,
     2: InternalError internal_error,
     3: OverloadError overload_error,

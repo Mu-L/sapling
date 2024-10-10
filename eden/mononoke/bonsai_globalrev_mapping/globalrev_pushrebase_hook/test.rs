@@ -9,15 +9,21 @@ use std::time::Duration;
 
 use anyhow::Error;
 use async_trait::async_trait;
-use blobrepo::BlobRepo;
 use blobstore::Loadable;
+use bonsai_globalrev_mapping::BonsaiGlobalrevMapping;
 use bonsai_globalrev_mapping::BonsaiGlobalrevMappingArc;
+use bonsai_hg_mapping::BonsaiHgMapping;
 use bookmarks::BookmarkTransactionError;
+use bookmarks::Bookmarks;
 use borrowed::borrowed;
+use commit_graph::CommitGraph;
+use commit_graph::CommitGraphWriter;
 use context::CoreContext;
 use fbinit::FacebookInit;
+use filestore::FilestoreConfig;
 use futures::future::try_join_all;
 use maplit::hashset;
+use mononoke_macros::mononoke;
 use mononoke_types::globalrev::Globalrev;
 use mononoke_types::globalrev::START_COMMIT_GLOBALREV;
 use mononoke_types::BonsaiChangesetMut;
@@ -29,7 +35,10 @@ use pushrebase_hook::PushrebaseHook;
 use pushrebase_hook::PushrebaseTransactionHook;
 use pushrebase_hook::RebasedChangesets;
 use rand::Rng;
+use repo_blobstore::RepoBlobstore;
 use repo_blobstore::RepoBlobstoreRef;
+use repo_derived_data::RepoDerivedData;
+use repo_identity::RepoIdentity;
 use repo_identity::RepoIdentityRef;
 use sql::Transaction;
 use test_repo_factory::TestRepoFactory;
@@ -39,7 +48,38 @@ use tests_utils::CreateCommitContext;
 
 use crate::GlobalrevPushrebaseHook;
 
-#[fbinit::test]
+#[facet::container]
+#[derive(Clone)]
+struct Repo {
+    #[facet]
+    repo_identity: RepoIdentity,
+
+    #[facet]
+    bonsai_globalrev_mapping: dyn BonsaiGlobalrevMapping,
+
+    #[facet]
+    bonsai_hg_mapping: dyn BonsaiHgMapping,
+
+    #[facet]
+    repo_derived_data: RepoDerivedData,
+
+    #[facet]
+    repo_blobstore: RepoBlobstore,
+
+    #[facet]
+    commit_graph: CommitGraph,
+
+    #[facet]
+    commit_graph_writer: dyn CommitGraphWriter,
+
+    #[facet]
+    filestore_config: FilestoreConfig,
+
+    #[facet]
+    bookmarks: dyn Bookmarks,
+}
+
+#[mononoke::fbinit_test]
 fn pushrebase_assigns_globalrevs(fb: FacebookInit) -> Result<(), Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(pushrebase_assigns_globalrevs_impl(fb))
@@ -47,7 +87,7 @@ fn pushrebase_assigns_globalrevs(fb: FacebookInit) -> Result<(), Error> {
 
 async fn pushrebase_assigns_globalrevs_impl(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let repo: BlobRepo = TestRepoFactory::new(fb)?
+    let repo: Repo = TestRepoFactory::new(fb)?
         .with_id(RepositoryId::new(1))
         .build()
         .await?;
@@ -148,7 +188,7 @@ async fn pushrebase_assigns_globalrevs_impl(fb: FacebookInit) -> Result<(), Erro
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 fn test_pushrebase_race_assigns_monotonic_globalrevs(fb: FacebookInit) -> Result<(), Error> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(pushrebase_race_assigns_monotonic_globalrevs(fb))
@@ -202,7 +242,7 @@ async fn pushrebase_race_assigns_monotonic_globalrevs(fb: FacebookInit) -> Resul
     }
 
     let ctx = CoreContext::test_mock(fb);
-    let repo: BlobRepo = TestRepoFactory::new(fb)?
+    let repo: Repo = TestRepoFactory::new(fb)?
         .with_id(RepositoryId::new(1))
         .build()
         .await?;

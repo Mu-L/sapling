@@ -10,12 +10,12 @@
 function verify_wc() {
    local large_repo_commit
    large_repo_commit="$1"
-   "$MONONOKE_ADMIN" \
+   "$MONONOKE_NEWADMIN" \
      "${CACHE_ARGS[@]}" \
      "${COMMON_ARGS[@]}" --log-level ERROR \
      --mononoke-config-path  "$TESTTMP"/mononoke-config \
-     --source-repo-id="$REPOIDLARGE" --target-repo-id="$REPOIDSMALL" \
-     crossrepo verify-wc "$large_repo_commit"
+     cross-repo --source-repo-id="$REPOIDLARGE" --target-repo-id="$REPOIDSMALL" \
+     verify-working-copy "$large_repo_commit"
 }
 
 function validate_commit_sync() {
@@ -26,7 +26,7 @@ function validate_commit_sync() {
     "${CACHE_ARGS[@]}" \
     "${COMMON_ARGS[@]}" --debug --repo-id "$REPOIDLARGE" \
     --mononoke-config-path "$TESTTMP/mononoke-config" \
-    --master-bookmark=master_bookmark \
+    --master-bookmark="${MASTER_BOOKMARK:-master_bookmark}" \
     once --entry-id "$entry_id" "$@"
 }
 
@@ -35,7 +35,7 @@ function test_version_cfg {
   jq . << EOF
    {
     "large_repo_id": $LARGE_REPO_ID,
-    "common_pushrebase_bookmarks": ["master_bookmark"],
+    "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
     "small_repos": [
       {
         "repoid": $SMALL_REPO_ID,
@@ -71,7 +71,7 @@ function large_small_megarepo_config() {
         }
       ],
       "common": {
-        "common_pushrebase_bookmarks": ["master_bookmark"],
+        "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
         "large_repo_id": $LARGE_REPO_ID,
         "small_repos": {
           1: {
@@ -98,7 +98,9 @@ function large_small_config() {
 }
 
 function large_small_setup() {
-  quiet testtool_drawdag -R small-mon --no-default-files <<'EOF'
+
+quiet testtool_drawdag -R small-mon --no-default-files < <(
+  cat <<EOF
 S_B
 |
 S_A
@@ -108,13 +110,15 @@ S_A
 # message: S_B "first post-move commit"
 # author: S_B test
 # modify: S_B filetoremove "1\n"
-# bookmark: S_B master_bookmark
+# bookmark: S_B ${MASTER_BOOKMARK:-master_bookmark}
 EOF
+)
 
   export SMALL_MASTER_BONSAI
   SMALL_MASTER_BONSAI=$S_B
 
-  quiet testtool_drawdag -R large-mon --no-default-files <<'EOF'
+  quiet testtool_drawdag -R large-mon --no-default-files < <(
+  cat <<EOF
 L_C
 |
 L_B
@@ -130,8 +134,9 @@ L_A
 # message: L_C "first post-move commit"
 # author: L_C test
 # modify: L_C smallrepofolder/filetoremove "1\n"
-# bookmark: L_C master_bookmark
+# bookmark: L_C ${MASTER_BOOKMARK:-master_bookmark}
 EOF
+)
 
   export LARGE_MASTER_BONSAI
   LARGE_MASTER_BONSAI=$L_C
@@ -174,7 +179,7 @@ function update_commit_sync_map_first_option {
         $TEST_VERSION_CFG,
       {
         "large_repo_id": $LARGE_REPO_ID,
-        "common_pushrebase_bookmarks": ["master_bookmark"],
+        "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
         "small_repos": [
           {
             "repoid": $SMALL_REPO_ID,
@@ -191,7 +196,7 @@ function update_commit_sync_map_first_option {
       }
       ],
       "common": {
-        "common_pushrebase_bookmarks": ["master_bookmark"],
+        "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
         "large_repo_id": $LARGE_REPO_ID,
         "small_repos": {
           1: {
@@ -214,7 +219,7 @@ function update_commit_sync_map_second_option {
       "versions": [
         {
           "large_repo_id": $LARGE_REPO_ID,
-          "common_pushrebase_bookmarks": ["master_bookmark"],
+          "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
           "small_repos": [
             {
               "repoid": $SMALL_REPO_ID,
@@ -232,7 +237,7 @@ function update_commit_sync_map_second_option {
         {
           "large_repo_id": $LARGE_REPO_ID,
           "common_pushrebase_bookmarks": [
-            "master_bookmark"
+            "${MASTER_BOOKMARK:-master_bookmark}"
           ],
           "small_repos": [
             {
@@ -250,7 +255,7 @@ function update_commit_sync_map_second_option {
         }
       ],
       "common": {
-        "common_pushrebase_bookmarks": ["master_bookmark"],
+        "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
         "large_repo_id": $LARGE_REPO_ID,
         "small_repos": {
           1: {
@@ -270,7 +275,7 @@ function imported_noop_cfg {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $IMPORTED_REPO_ID,
@@ -291,7 +296,7 @@ function another_noop {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $ANOTHER_REPO_ID,
@@ -312,7 +317,7 @@ function new_version {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $SMALL_REPO_ID,
@@ -343,7 +348,7 @@ function another_version {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $SMALL_REPO_ID,
@@ -413,7 +418,7 @@ function update_commit_sync_map_for_new_repo_import {
           $ANOTHER_VERSION_CFG
         ],
         "common": {
-          "common_pushrebase_bookmarks": ["master_bookmark"],
+          "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
           "large_repo_id": $LARGE_REPO_ID,
           "small_repos": {
             1: {
@@ -421,11 +426,11 @@ function update_commit_sync_map_for_new_repo_import {
             },
             2: {
               "bookmark_prefix": "imported_repo/",
-              "common_pushrebase_bookmarks_map": { "master_bookmark": "heads/master_bookmark" }
+              "common_pushrebase_bookmarks_map": { "${MASTER_BOOKMARK:-master_bookmark}": "heads/${MASTER_BOOKMARK:-master_bookmark}" }
             },
             3: {
               "bookmark_prefix": "another_repo/",
-              "common_pushrebase_bookmarks_map": { "master_bookmark": "heads/master_bookmark" }
+              "common_pushrebase_bookmarks_map": { "${MASTER_BOOKMARK:-master_bookmark}": "heads/${MASTER_BOOKMARK:-master_bookmark}" }
             }
           }
         }
@@ -444,7 +449,7 @@ function submodule_expansion_noop {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $SUBMODULE_REPO_ID,
@@ -469,7 +474,7 @@ function after_submodule_repo_version {
   jq . << EOF
     {
       "large_repo_id": $LARGE_REPO_ID,
-      "common_pushrebase_bookmarks": ["master_bookmark"],
+      "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
       "small_repos": [
         {
           "repoid": $SMALL_REPO_ID,
@@ -532,7 +537,7 @@ function update_commit_sync_map_for_import_expanding_git_submodules {
           $AFTER_SUBMODULE_REPO_VERSION
         ],
         "common": {
-          "common_pushrebase_bookmarks": ["master_bookmark"],
+          "common_pushrebase_bookmarks": ["${MASTER_BOOKMARK:-master_bookmark}"],
           "large_repo_id": $LARGE_REPO_ID,
           "small_repos": {
             1: {
@@ -540,15 +545,15 @@ function update_commit_sync_map_for_import_expanding_git_submodules {
             },
             2: {
               "bookmark_prefix": "imported_repo/",
-              "common_pushrebase_bookmarks_map": { "master_bookmark": "heads/master_bookmark" }
+              "common_pushrebase_bookmarks_map": { "${MASTER_BOOKMARK:-master_bookmark}": "heads/${MASTER_BOOKMARK:-master_bookmark}" }
             },
             3: {
               "bookmark_prefix": "another_repo/",
-              "common_pushrebase_bookmarks_map": { "master_bookmark": "heads/master_bookmark" }
+              "common_pushrebase_bookmarks_map": { "${MASTER_BOOKMARK:-master_bookmark}": "heads/${MASTER_BOOKMARK:-master_bookmark}" }
             },
             $SUBMODULE_REPO_ID: {
               "bookmark_prefix": "$SUBMODULE_REPO_NAME/",
-              "common_pushrebase_bookmarks_map": { "master_bookmark": "heads/master_bookmark" }
+              "common_pushrebase_bookmarks_map": { "${MASTER_BOOKMARK:-master_bookmark}": "heads/${MASTER_BOOKMARK:-master_bookmark}" }
             }
           }
         }
@@ -568,12 +573,12 @@ function init_large_small_repo() {
 
 function init_local_large_small_clones {
   cd "$TESTTMP" || exit 1
-  REPONAME=small-mon hgmn_clone "mononoke://$(mononoke_address)/small-mon" small-hg-client --config extensions.remotenames=
+  hg clone -q mono:small-mon small-hg-client
   cat >> small-hg-client/.hg/hgrc <<EOF
 [extensions]
 pushrebase =
 EOF
-  REPONAME=large-mon hgmn_clone "mononoke://$(mononoke_address)/large-mon" large-hg-client --config extensions.remotenames=
+  hg clone -q mono:large-mon large-hg-client
   cat >> large-hg-client/.hg/hgrc <<EOF
 [extensions]
 pushrebase =
@@ -604,12 +609,11 @@ function create_first_post_move_commit {
 
 function init_client() {
   cd "$TESTTMP" || exit 1
-  hgclone_treemanifest ssh://user@dummy/"$1" "$2" --noupdate --config extensions.remotenames=
+  hg clone -q mono:"$1" "$2" --noupdate
   cd "$TESTTMP/$2" || exit 1
   cat >> .hg/hgrc <<EOF
 [extensions]
 pushrebase =
-remotenames =
 EOF
 }
 
@@ -710,28 +714,26 @@ EOF
 
   # init fbsource
   cd "$TESTTMP" || exit 1
-  hginit_treemanifest fbs-hg-srv
-  cd fbs-hg-srv || exit 1
+  hginit_treemanifest fbs-mon
+  cd fbs-mon || exit 1
   # create an initial commit, which will be the last_synced_commit
   createfile fbcode/fbcodefile_fbsource
   createfile arvr/arvrfile_fbsource
   createfile otherfile_fbsource
-  hg -q ci -m "fbsource commit 1" && hg book -ir . master_bookmark
-
+  hg -q ci -m "fbsource commit 1" && hg book -ir . "${MASTER_BOOKMARK:-master_bookmark}"
   # init ovrsource
   cd "$TESTTMP" || exit 1
-  hginit_treemanifest ovr-hg-srv
-  cd ovr-hg-srv || exit 1
+  hginit_treemanifest ovr-mon
+  cd ovr-mon || exit 1
   createfile fbcode/fbcodefile_ovrsource
   createfile arvr/arvrfile_ovrsource
   createfile otherfile_ovrsource
   createfile Research/researchfile_ovrsource
-  hg -q ci -m "ovrsource commit 1" && hg book -r . master_bookmark
-
+  hg -q ci -m "ovrsource commit 1" && hg book -r . "${MASTER_BOOKMARK:-master_bookmark}"
   # init megarepo - note that some paths are shifted, but content stays the same
   cd "$TESTTMP" || exit 1
-  hginit_treemanifest meg-hg-srv
-  cd meg-hg-srv || exit 1
+  hginit_treemanifest meg-mon
+  cd meg-mon || exit 1
   createfile fbcode/fbcodefile_fbsource
   createfile_with_content .fbsource-rest/arvr/arvrfile_fbsource arvr/arvrfile_fbsource
   createfile otherfile_fbsource
@@ -740,35 +742,15 @@ EOF
   createfile_with_content arvr-legacy/otherfile_ovrsource otherfile_ovrsource
   createfile_with_content arvr-legacy/Research/researchfile_ovrsource Research/researchfile_ovrsource
   hg -q ci -m "megarepo commit 1"
-  hg book -r . master_bookmark
-
+  hg book -r . "${MASTER_BOOKMARK:-master_bookmark}"
   # blobimport hg servers repos into Mononoke repos
   cd "$TESTTMP" || exit 1
-  REPOID=0 blobimport meg-hg-srv/.hg meg-mon
-  REPOID=1 blobimport fbs-hg-srv/.hg fbs-mon
-  REPOID=2 blobimport ovr-hg-srv/.hg ovr-mon
+  REPOID=0 blobimport meg-mon/.hg meg-mon
+  REPOID=1 blobimport fbs-mon/.hg fbs-mon
+  REPOID=2 blobimport ovr-mon/.hg ovr-mon
 }
 
 function enable_pushredirect {
-  local repo_id=$1
-  local draft_push=${2:-false}
-  local public_push=${3:-true}
-
-  cat > "$PUSHREDIRECT_CONF/enable" <<EOF
-{
-  "per_repo": {
-    "$repo_id": {
-      "draft_push": $draft_push,
-      "public_push": $public_push
-    }
-  }
-}
-EOF
-
-  enable_pushredirect_xdb "$repo_id" "$draft_push" "$public_push"
-}
-
-function enable_pushredirect_xdb {
   local repo_id=$1
   local draft_push=${2:-false}
   local public_push=${3:-true}
@@ -785,13 +767,6 @@ function enable_pushredirect_xdb {
 
 function reset_pushredirect {
   local repo_id=$1
-
-  cat > "$PUSHREDIRECT_CONF/enable" <<EOF
-{
-  "per_repo": {
-  }
-}
-EOF
 
   sqlite3 "$TESTTMP/monsql/sqlite_dbs" <<EOF
     DELETE from pushredirect;

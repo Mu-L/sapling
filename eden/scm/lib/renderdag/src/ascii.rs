@@ -7,8 +7,6 @@
 
 use std::marker::PhantomData;
 
-use itertools::Itertools;
-
 use super::output::OutputRendererOptions;
 use super::render::Ancestor;
 use super::render::GraphRow;
@@ -16,6 +14,7 @@ use super::render::LinkLine;
 use super::render::NodeLine;
 use super::render::PadLine;
 use super::render::Renderer;
+use crate::pad::pad_lines;
 
 pub struct AsciiRenderer<N, R>
 where
@@ -68,10 +67,7 @@ where
     ) -> String {
         let line = self.inner.next_row(node, parents, glyph, message);
         let mut out = String::new();
-        let mut message_lines = line
-            .message
-            .lines()
-            .pad_using(self.options.min_row_height, |_| "");
+        let mut message_lines = pad_lines(line.message.lines(), self.options.min_row_height);
         let mut need_extra_pad_line = false;
 
         // Render the previous extra pad line
@@ -106,11 +102,16 @@ where
             let any_horizontal = link_row
                 .iter()
                 .any(|cur| cur.intersects(LinkLine::HORIZONTAL));
-            for (cur, next) in link_row
+            let mut iter = link_row
                 .iter()
-                .chain(Some(LinkLine::empty()).iter())
-                .tuple_windows()
-            {
+                .copied()
+                .chain(std::iter::once(LinkLine::empty()))
+                .peekable();
+            while let Some(cur) = iter.next() {
+                let next = match iter.peek() {
+                    Some(&v) => v,
+                    None => break,
+                };
                 // Draw the parent/ancestor line.
                 if cur.intersects(LinkLine::HORIZONTAL) {
                     if cur.intersects(LinkLine::CHILD | LinkLine::ANY_FORK_OR_MERGE) {

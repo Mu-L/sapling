@@ -8,9 +8,11 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use anyhow::Error;
 use async_trait::async_trait;
 use basename_suffix_skeleton_manifest_v3::RootBssmV3DirectoryId;
 use blame::RootBlameV2;
+use case_conflict_skeleton_manifest::RootCaseConflictSkeletonManifestId;
 use changeset_info::ChangesetInfo;
 use cloned::cloned;
 use context::CoreContext;
@@ -22,6 +24,7 @@ use derived_data_manager::DerivedDataManager;
 use derived_data_manager::Rederivation;
 use derived_data_manager::SharedDerivationError;
 use derived_data_manager::VisitedDerivableTypesMap;
+use derived_data_manager::VisitedDerivableTypesMapStatic;
 use fastlog::RootFastlog;
 use filenodes_derivation::FilenodesOnlyPublic;
 use fsnodes::RootFsnodeId;
@@ -35,6 +38,7 @@ use mercurial_derivation::MappedHgChangesetId;
 use mercurial_derivation::RootHgAugmentedManifestId;
 use mononoke_types::ChangesetId;
 use skeleton_manifest::RootSkeletonManifestId;
+use skeleton_manifest_v2::RootSkeletonManifestV2Id;
 use test_manifest::RootTestManifestDirectory;
 use test_sharded_manifest::RootTestShardedManifestDirectory;
 use unodes::RootUnodeManifestId;
@@ -138,13 +142,13 @@ impl<T: BonsaiDerivable> SingleTypeManager<T> {
 
 #[async_trait]
 trait SingleTypeDerivation: Send + Sync {
-    async fn derive_heads_with_visited<'a>(
+    async fn derive_heads_with_visited(
         &self,
-        ctx: &'a CoreContext,
-        csids: &'a [ChangesetId],
+        ctx: CoreContext,
+        csids: Vec<ChangesetId>,
         override_batch_size: Option<u64>,
         rederivation: Option<Arc<dyn Rederivation>>,
-        visited: VisitedDerivableTypesMap<'a, u64, SharedDerivationError>,
+        visited: VisitedDerivableTypesMapStatic<u64, SharedDerivationError>,
     ) -> Result<(), SharedDerivationError>;
 
     async fn derive_exactly_batch(
@@ -193,13 +197,13 @@ trait SingleTypeDerivation: Send + Sync {
 
 #[async_trait]
 impl<T: BonsaiDerivable> SingleTypeDerivation for SingleTypeManager<T> {
-    async fn derive_heads_with_visited<'a>(
+    async fn derive_heads_with_visited(
         &self,
-        ctx: &'a CoreContext,
-        csids: &'a [ChangesetId],
+        ctx: CoreContext,
+        csids: Vec<ChangesetId>,
         override_batch_size: Option<u64>,
         rederivation: Option<Arc<dyn Rederivation>>,
-        visited: VisitedDerivableTypesMap<'a, u64, SharedDerivationError>,
+        visited: VisitedDerivableTypesMapStatic<u64, SharedDerivationError>,
     ) -> Result<(), SharedDerivationError> {
         self.manager
             .clone()
@@ -312,6 +316,12 @@ fn manager_for_type(
         DerivableType::SkeletonManifests => {
             Arc::new(SingleTypeManager::<RootSkeletonManifestId>::new(manager))
         }
+        DerivableType::SkeletonManifestsV2 => {
+            Arc::new(SingleTypeManager::<RootSkeletonManifestV2Id>::new(manager))
+        }
+        DerivableType::Ccsm => {
+            Arc::new(SingleTypeManager::<RootCaseConflictSkeletonManifestId>::new(manager))
+        }
         DerivableType::ChangesetInfo => Arc::new(SingleTypeManager::<ChangesetInfo>::new(manager)),
         DerivableType::GitTrees => Arc::new(SingleTypeManager::<TreeHandle>::new(manager)),
         DerivableType::GitCommits => Arc::new(SingleTypeManager::<MappedGitCommitId>::new(manager)),
@@ -344,17 +354,25 @@ impl BulkDerivation for DerivedDataManager {
         let visited = VisitedDerivableTypesMap::default();
         stream::iter(derived_data_types)
             .map(move |derived_data_type| {
-                cloned!(rederivation, visited);
+                cloned!(rederivation, visited, ctx);
+                let csids = csids.to_vec();
+                let manager = manager_for_type(self, *derived_data_type);
                 async move {
-                    manager_for_type(self, *derived_data_type)
-                        .derive_heads_with_visited(
-                            ctx,
-                            csids,
-                            override_batch_size,
-                            rederivation,
-                            visited,
-                        )
-                        .await
+                    tokio::spawn(async move {
+                        manager
+                            .derive_heads_with_visited(
+                                ctx,
+                                csids,
+                                override_batch_size,
+                                rederivation,
+                                visited,
+                            )
+                            .await
+                    })
+                    .await
+                    .map_err(|err| {
+                        SharedDerivationError::from(DerivationError::from(Error::from(err)))
+                    })?
                 }
             })
             .boxed()

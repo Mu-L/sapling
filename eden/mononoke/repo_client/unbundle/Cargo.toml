@@ -8,18 +8,17 @@ edition = "2021"
 license = "GPLv2+"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 ascii = "1.0"
 backsyncer = { version = "0.1.0", path = "../../commit_rewriting/backsyncer" }
-blobrepo = { version = "0.1.0", path = "../../blobrepo" }
 blobrepo_hg = { version = "0.1.0", path = "../../blobrepo/blobrepo_hg" }
 blobstore = { version = "0.1.0", path = "../../blobstore" }
 bonsai_hg_mapping = { version = "0.1.0", path = "../../bonsai_hg_mapping" }
 bookmarks = { version = "0.1.0", path = "../../bookmarks" }
 bookmarks_movement = { version = "0.1.0", path = "../../bookmarks/bookmarks_movement" }
 bytes = { version = "1.6.0", features = ["serde"] }
-cacheblob = { version = "0.1.0", path = "../../blobstore/cacheblob" }
 cloned = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+commit_graph = { version = "0.1.0", path = "../../repo_attributes/commit_graph/commit_graph" }
 context = { version = "0.1.0", path = "../../server/context" }
 cross_repo_sync = { version = "0.1.0", path = "../../commit_rewriting/cross_repo_sync" }
 filestore = { version = "0.1.0", path = "../../filestore" }
@@ -43,6 +42,7 @@ mercurial_types = { version = "0.1.0", path = "../../mercurial/types" }
 metaconfig_types = { version = "0.1.0", path = "../../metaconfig/types" }
 mononoke_types = { version = "0.1.0", path = "../../mononoke_types" }
 obsolete = { version = "0.1.0", path = "../obsolete" }
+phases = { version = "0.1.0", path = "../../phases" }
 pin-project = "0.4.30"
 pushrebase = { version = "0.1.0", path = "../../pushrebase" }
 pushrebase_client = { version = "0.1.0", path = "../../pushrebase/client" }
@@ -51,6 +51,7 @@ rate_limiting = { version = "0.1.0", path = "../../rate_limiting" }
 remotefilelog = { version = "0.1.0", path = "../remotefilelog" }
 repo_authorization = { version = "0.1.0", path = "../../repo_authorization" }
 repo_blobstore = { version = "0.1.0", path = "../../blobrepo/repo_blobstore" }
+repo_derived_data = { version = "0.1.0", path = "../../repo_attributes/repo_derived_data" }
 repo_identity = { version = "0.1.0", path = "../../repo_attributes/repo_identity" }
 repo_update_logger = { version = "0.1.0", path = "../../features/repo_update_logger" }
 scuba_ext = { version = "0.1.0", path = "../../common/scuba_ext" }
@@ -58,7 +59,7 @@ sha2 = "0.10.6"
 slog = { version = "2.7", features = ["max_level_trace", "nested-values"] }
 stats = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 synced_commit_mapping = { version = "0.1.0", path = "../../commit_rewriting/synced_commit_mapping" }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 time_window_counter = { version = "0.1.0", path = "../../time_window_counter" }
 tokio = { version = "1.37.0", features = ["full", "test-util", "tracing"] }
 topo_sort = { version = "0.1.0", path = "../../common/topo_sort" }
@@ -66,10 +67,12 @@ wirepack = { version = "0.1.0", path = "../wirepack" }
 wireproto_handler = { version = "0.1.0", path = "../../wireproto_handler" }
 
 [dev-dependencies]
-fbinit = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+facet = { version = "0.1.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
+fbinit = { version = "0.2.0", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 fbinit-tokio = { version = "0.1.2", git = "https://github.com/facebookexperimental/rust-shed.git", branch = "main" }
 itertools = "0.11.0"
 mercurial_types-mocks = { version = "0.1.0", path = "../../mercurial/types/mocks" }
+mononoke_macros = { version = "0.1.0", path = "../../mononoke_macros" }
 quickcheck_async = "0.1.1"
 quickcheck_macros = "1.0"
 test_repo_factory = { version = "0.1.0", path = "../../repo_factory/test_repo_factory" }

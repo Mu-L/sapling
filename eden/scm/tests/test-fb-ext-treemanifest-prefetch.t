@@ -3,7 +3,6 @@
 #require no-eden
 
 
-  $ setconfig experimental.allowfilepeer=True
 
   $ CACHEDIR=`pwd`/hgcache
 
@@ -13,10 +12,6 @@
   $ hginit master
   $ cd master
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
-  > [treemanifest]
-  > server=True
   > [remotefilelog]
   > server=True
   > EOF

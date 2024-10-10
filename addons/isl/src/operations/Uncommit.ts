@@ -10,15 +10,16 @@ import type {
   Dag,
   UncommittedChangesPreviewContext,
 } from '../previews';
-import type {CommitInfo, UncommittedChanges} from '../types';
+import type {ChangedFile, CommitInfo, UncommittedChanges} from '../types';
 
 import {Operation} from './Operation';
 
 export class UncommitOperation extends Operation {
   /**
-   * @param originalHeadCommit the current head commit, needed to track when optimistic state is resolved and get the list of files that will be uncommitted
+   * @param originalDotCommit the current dot commit, needed to track when optimistic state is resolved
+   * @param changedFiles the files that are in the commit to be uncommitted. Must be fetched before running, as the CommitInfo object itself does not have file statuses.
    */
-  constructor(private originalHeadCommit: CommitInfo) {
+  constructor(private originalDotCommit: CommitInfo, private changedFiles: Array<ChangedFile>) {
     super('UncommitOperation');
   }
 
@@ -30,30 +31,39 @@ export class UncommitOperation extends Operation {
   }
 
   optimisticDag(dag: Dag): Dag {
-    const {hash, parents} = this.originalHeadCommit;
+    const {hash, parents} = this.originalDotCommit;
     const p1 = parents.at(0);
-    // If `hash` disappears and `p1` still exists, then uncommit is completed.
-    // We assume uncommit is always run from the stack top.
-    if (dag.get(hash) == null || p1 == null || dag.get(p1) == null) {
+    const commitHasChildren = (dag.children(hash)?.size ?? 0) > 0;
+    if (
+      p1 == null || commitHasChildren
+        ? // If the commit has children, then we know the uncommit is done when it's no longer the dot commit
+          dag.get(hash)?.isDot !== true
+        : // If the commit does not have children, if `hash` disappears and `p1` still exists, then uncommit is completed.
+          dag.get(hash) == null || dag.get(p1) == null
+    ) {
       return dag;
     }
-    // Hide `hash` and set `isDot` on `p1`.
-    return dag.replaceWith([p1, hash], (h, c) => {
-      if (h === hash) {
-        return undefined;
-      } else {
-        return c?.set('isDot', true);
-      }
-    });
+    return commitHasChildren
+      ? // Set `isDot` on `p1` and not `hash`
+        dag.replaceWith([p1 as string, hash], (h, c) => {
+          return c?.set('isDot', h === p1);
+        })
+      : // Hide `hash` and set `isDot` on `p1`.
+        dag.replaceWith([p1 as string, hash], (h, c) => {
+          if (h === hash) {
+            return undefined;
+          } else {
+            return c?.set('isDot', true);
+          }
+        });
   }
 
   makeOptimisticUncommittedChangesApplier?(
     context: UncommittedChangesPreviewContext,
   ): ApplyUncommittedChangesPreviewsFuncType | undefined {
-    const uncommittedChangesAfterUncommit = this.originalHeadCommit.filesSample;
     const preexistingChanges = new Set(context.uncommittedChanges.map(change => change.path));
 
-    if (uncommittedChangesAfterUncommit.every(file => preexistingChanges.has(file.path))) {
+    if (this.changedFiles.every(file => preexistingChanges.has(file.path))) {
       // once every file to uncommit appears in the output, the uncommit has reflected in the latest fetch.
       // TODO: we'll eventually limit how many uncommitted changes we pull in. When this happens, it's
       // possible the list of files won't include any of the changes being uncommitted (though this would be rare).
@@ -65,9 +75,7 @@ export class UncommitOperation extends Operation {
       // You could have uncommitted changes before uncommitting, so we need to include
       // files from the commit AND the existing uncommitted changes.
       // But it's also possible to have changed a file changed by the commit, so we need to de-dupe.
-      const newChanges = uncommittedChangesAfterUncommit.filter(
-        file => !preexistingChanges.has(file.path),
-      );
+      const newChanges = this.changedFiles.filter(file => !preexistingChanges.has(file.path));
       return [...changes, ...newChanges];
     };
     return func;

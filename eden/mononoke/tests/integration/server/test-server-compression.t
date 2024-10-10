@@ -11,8 +11,8 @@ setup configuration
   $ cd $TESTTMP
 
 setup repo with 1MB file, which is larger then zstd stream buffer size
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ printf '=%.0s' {1..1048576} > a
   $ hg add a
   $ hg ci -ma
@@ -20,8 +20,8 @@ setup repo with 1MB file, which is larger then zstd stream buffer size
 setup master bookmarks
   $ hg bookmark master_bookmark -r 'tip'
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo
-  $ rm -rf repo-hg
+  $ blobimport repo/.hg repo
+  $ rm -rf repo
 
 Setup the right configuration
   $ merge_just_knobs <<EOF
@@ -35,14 +35,12 @@ Setup the right configuration
 start mononoke
   $ start_and_wait_for_mononoke_server
 clone and checkout the repository with compression enabled
-  $ hg clone -U --shallow --debug "mononoke://$(mononoke_address)/repo" --config mononokepeer.compression=true 2>&1 | grep zstd
+  $ hg clone -U --debug mono:repo --config mononokepeer.compression=true 2>&1 | grep zstd
   zstd compression on the wire is enabled
   $ cd repo
-  $ hgmn checkout master_bookmark --config mononokepeer.compression=true
+  $ hg checkout master_bookmark --config mononokepeer.compression=true
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
-  (activating bookmark master_bookmark)
 
 without compression again, no zstd indicator that compression is used
-  $ hgmn pull --debug 2>&1 | grep -P "(zstd|pulling|checking)"
-  pulling from mononoke://* (glob)
-  checking for updated bookmarks
+  $ hg pull --debug 2>&1 | grep -P "(zstd|pulling|checking)"
+  pulling from mono:* (glob)

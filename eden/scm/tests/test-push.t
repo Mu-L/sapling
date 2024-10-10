@@ -4,9 +4,6 @@
 
 #chg-compatible
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
-
-  $ disable treemanifest
 
 ==================================
 Basic testing for the push command
@@ -118,11 +115,11 @@ Test push hook locking
   adding foo
 
   $ hg clone 1 2
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ hg clone 2 3
-  updating to branch default
+  updating to tip
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ cat <<EOF > $TESTTMP/debuglocks-pretxn-hook.sh
@@ -136,16 +133,14 @@ Test push hook locking
   $ echo bar >> 3/foo
   $ hg --cwd 3 ci -m bar
 
-  $ hg --cwd 3 push ../2 --config devel.legacy.exchange=bundle1
+  $ hg --cwd 3 push ../2
   pushing to ../2
   searching for changes
-  devel-warn: using deprecated bundlev1 format
-   at: *changegroup* (makechangegroup) (glob)
   adding changesets
   adding manifests
   adding file changes
   lock:          user *, process * (*s) (glob)
-  wlock:         free
+  wlock:         user *, process * (*s) (glob)
   undolog/lock:  absent
   prefetchlock:  free
   infinitepushbackup.lock: free

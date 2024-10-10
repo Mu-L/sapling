@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -22,20 +23,18 @@ use anyhow::Error;
 use backsyncer::backsync_latest;
 use backsyncer::open_backsyncer_dbs;
 use backsyncer::BacksyncLimit;
-use blobrepo::save_bonsai_changesets;
-use blobrepo::AsBlobRepo;
 use blobstore::Loadable;
 use bookmarks::BookmarkKey;
 use bookmarks::BookmarkUpdateReason;
 use bookmarks::BookmarksRef;
 use borrowed::borrowed;
 use bulk_derivation::BulkDerivation;
+use changesets_creation::save_changesets;
 use cmdlib_cross_repo::repo_provider_from_mononoke_app;
 use context::CoreContext;
-use cross_repo_sync::create_commit_syncer_lease;
 use cross_repo_sync::create_commit_syncers;
 use cross_repo_sync::find_toposorted_unsynced_ancestors;
-use cross_repo_sync::get_all_submodule_deps;
+use cross_repo_sync::get_all_submodule_deps_from_repo_pair;
 use cross_repo_sync::rewrite_commit;
 use cross_repo_sync::CandidateSelectionHint;
 use cross_repo_sync::CommitSyncContext;
@@ -84,9 +83,6 @@ use pushredirect::PushRedirectionConfigArc;
 use serde::Deserialize;
 use serde::Serialize;
 use slog::info;
-use sql_construct::SqlConstructFromMetadataDatabaseConfig;
-use synced_commit_mapping::SqlSyncedCommitMapping;
-use synced_commit_mapping::SyncedCommitMapping;
 use synced_commit_mapping::SyncedCommitMappingRef;
 use tokio::fs;
 use tokio::io::AsyncBufReadExt;
@@ -150,7 +146,7 @@ struct RepoImportSetting {
 
 #[derive(Clone)]
 struct SmallRepoBackSyncVars {
-    large_to_small_syncer: CommitSyncer<SqlSyncedCommitMapping, Repo>,
+    large_to_small_syncer: CommitSyncer<Repo>,
     target_repo_dbs: TargetRepoDbs,
     small_repo_bookmark: BookmarkKey,
     small_repo: Repo,
@@ -263,14 +259,14 @@ async fn rewrite_file_paths(
     bonsai_changesets = sort_bcs(&bonsai_changesets)?;
     let bcs_ids = get_cs_ids(&bonsai_changesets);
     info!(ctx.logger(), "Saving shifted bonsai changesets");
-    save_bonsai_changesets(bonsai_changesets, ctx.clone(), repo).await?;
+    save_changesets(ctx, repo, bonsai_changesets).await?;
     info!(ctx.logger(), "Saved shifted bonsai changesets");
     Ok((bcs_ids, git_merge_shifted_bcs_id))
 }
 
 async fn find_mapping_version(
     ctx: &CoreContext,
-    large_to_small_syncer: &CommitSyncer<SqlSyncedCommitMapping, Repo>,
+    large_to_small_syncer: &CommitSyncer<Repo>,
     dest_bookmark: &BookmarkKey,
 ) -> Result<Option<CommitSyncConfigVersion>, Error> {
     let bookmark_val = large_to_small_syncer
@@ -286,7 +282,7 @@ async fn find_mapping_version(
 async fn back_sync_commits_to_small_repo(
     ctx: &CoreContext,
     small_repo: &Repo,
-    large_to_small_syncer: &CommitSyncer<SqlSyncedCommitMapping, Repo>,
+    large_to_small_syncer: &CommitSyncer<Repo>,
     bcs_ids: &[ChangesetId],
     version: &CommitSyncConfigVersion,
 ) -> Result<Vec<ChangesetId>, Error> {
@@ -332,7 +328,7 @@ async fn back_sync_commits_to_small_repo(
 
 async fn wait_until_backsynced_and_return_version(
     ctx: &CoreContext,
-    large_to_small_syncer: &CommitSyncer<SqlSyncedCommitMapping, Repo>,
+    large_to_small_syncer: &CommitSyncer<Repo>,
     cs_id: ChangesetId,
 ) -> Result<Option<CommitSyncConfigVersion>, Error> {
     let sleep_time_secs = 10;
@@ -477,10 +473,7 @@ async fn move_bookmark(
         recovery_fields.move_bookmark_commits_done = commits_done + shifted_index;
 
         let check_repo = async move {
-            let hg_csid = repo
-                .as_blob_repo()
-                .derive_hg_changeset(ctx, curr_csid.clone())
-                .await?;
+            let hg_csid = repo.derive_hg_changeset(ctx, curr_csid.clone()).await?;
             check_dependent_systems(
                 ctx,
                 repo,
@@ -526,7 +519,6 @@ async fn move_bookmark(
 
             let small_repo_hg_csid = small_repo_back_sync_vars
                 .small_repo
-                .as_blob_repo()
                 .derive_hg_changeset(ctx, small_repo_cs_id)
                 .await?;
 
@@ -611,12 +603,7 @@ async fn merge_imported_commit(
         committer: Some(author.to_string()),
         committer_date: Some(datetime),
         message: message.to_string(),
-        hg_extra: Default::default(),
-        git_extra_headers: None,
-        git_tree_hash: None,
-        file_changes: Default::default(),
-        is_snapshot: false,
-        git_annotated_tag: None,
+        ..Default::default()
     }
     .freeze()?;
 
@@ -626,7 +613,7 @@ async fn merge_imported_commit(
         "Created merge bonsai: {} and changeset: {:?}", merged_cs_id, merged_cs
     );
 
-    save_bonsai_changesets(vec![merged_cs], ctx.clone(), repo).await?;
+    save_changesets(ctx, repo, vec![merged_cs]).await?;
     info!(ctx.logger(), "Finished merging");
     Ok(merged_cs_id)
 }
@@ -653,7 +640,7 @@ async fn push_merge_commit(
 
     let pushrebase_res = do_pushrebase_bonsai(
         ctx,
-        repo.as_blob_repo(),
+        repo,
         pushrebase_flags,
         bookmark_to_merge_into,
         &hashset![merged_cs],
@@ -674,7 +661,7 @@ async fn get_leaf_entries(
     repo: &Repo,
     cs_id: ChangesetId,
 ) -> Result<HashSet<NonRootMPath>, Error> {
-    let hg_cs_id = repo.as_blob_repo().derive_hg_changeset(ctx, cs_id).await?;
+    let hg_cs_id = repo.derive_hg_changeset(ctx, cs_id).await?;
     let hg_cs = hg_cs_id.load(ctx, repo.repo_blobstore()).await?;
     hg_cs
         .manifestid()
@@ -844,13 +831,12 @@ async fn get_large_repo_config_if_pushredirected<'a>(
     Ok(None)
 }
 
-async fn get_large_repo_setting<M, R>(
+async fn get_large_repo_setting<R>(
     ctx: &CoreContext,
     small_repo_setting: &RepoImportSetting,
-    commit_syncer: &CommitSyncer<M, R>,
+    commit_syncer: &CommitSyncer<R>,
 ) -> Result<RepoImportSetting, Error>
 where
-    M: SyncedCommitMapping + Clone + 'static,
     R: CrossRepo,
 {
     info!(
@@ -907,44 +893,14 @@ fn get_config_by_repoid(
         .map(|(name, config)| (name.clone(), config.clone()))
 }
 
-async fn open_sql<T>(
-    fb: FacebookInit,
-    repo_id: RepositoryId,
-    configs: &RepoConfigs,
-    env: &MononokeEnvironment,
-) -> Result<T, Error>
-where
-    T: SqlConstructFromMetadataDatabaseConfig,
-{
-    let (_, config) = get_config_by_repoid(configs, repo_id)?;
-    T::with_metadata_database_config(
-        fb,
-        &config.storage_config.metadata,
-        &env.mysql_options.clone(),
-        env.readonly_storage.clone().0,
-    )
-    .await
-}
-
 async fn get_pushredirected_vars(
     app: &MononokeApp,
     ctx: &CoreContext,
     repo: &Repo,
     repo_import_setting: &RepoImportSetting,
     large_repo_config: &RepoConfig,
-    configs: &RepoConfigs,
-    env: &MononokeEnvironment,
     live_commit_sync_config: CfgrLiveCommitSyncConfig,
-) -> Result<
-    (
-        Repo,
-        RepoImportSetting,
-        Syncers<SqlSyncedCommitMapping, Repo>,
-    ),
-    Error,
-> {
-    let x_repo_syncer_lease = create_commit_syncer_lease(ctx.fb, env.caching)?;
-
+) -> Result<(Repo, RepoImportSetting, Syncers<Repo>), Error> {
     let large_repo_id = large_repo_config.repoid;
 
     let repo_args = RepoArgs::from_repo_id(large_repo_id.id());
@@ -967,24 +923,15 @@ async fn get_pushredirected_vars(
     let repo_arc = Arc::new(repo.clone());
     let large_repo_arc = Arc::new(large_repo.clone());
 
-    let submodule_deps = get_all_submodule_deps(
-        ctx,
-        repo_arc,
-        large_repo_arc,
-        repo_provider,
-        live_commit_sync_config.clone(),
-    )
-    .await?;
+    let submodule_deps =
+        get_all_submodule_deps_from_repo_pair(ctx, repo_arc, large_repo_arc, repo_provider).await?;
 
-    let mapping = open_sql::<SqlSyncedCommitMapping>(ctx.fb, repo.repo_id(), configs, env).await?;
     let syncers = create_commit_syncers(
         ctx,
         repo.clone(),
         large_repo.clone(),
         submodule_deps,
-        mapping.clone(),
         live_commit_sync_config,
-        x_repo_syncer_lease,
     )?;
 
     let large_repo_import_setting =
@@ -1026,6 +973,7 @@ async fn repo_import(
     configs: &RepoConfigs,
     env: &MononokeEnvironment,
     no_merge: bool,
+    git_command_path: Option<String>,
 ) -> Result<(), Error> {
     let arg_git_repo_path = recovery_fields.git_repo_path.clone();
     let path = Path::new(&arg_git_repo_path);
@@ -1066,11 +1014,8 @@ async fn repo_import(
         hg_sync_check_disabled: recovery_fields.hg_sync_check_disabled,
     };
 
-    let live_commit_sync_config = CfgrLiveCommitSyncConfig::new_with_xdb(
-        ctx.logger(),
-        &env.config_store,
-        repo.push_redirection_config_arc(),
-    )?;
+    let live_commit_sync_config =
+        CfgrLiveCommitSyncConfig::new(&env.config_store, repo.push_redirection_config_arc())?;
 
     check_megarepo_large_repo_import_requirements(
         &ctx,
@@ -1110,8 +1055,6 @@ async fn repo_import(
             &repo,
             &repo_import_setting,
             &large_repo_config,
-            configs,
-            env,
             live_commit_sync_config.clone(),
         )
         .await?;
@@ -1181,14 +1124,18 @@ async fn repo_import(
     // Importing process starts here
     if recovery_fields.import_stage == ImportStage::GitImport {
         // Import without submodules.
-        let prefs = GitimportPreferences {
+        let mut prefs = GitimportPreferences {
             submodules: false,
             ..Default::default()
         };
+
+        if let Some(ref p) = git_command_path {
+            prefs.git_command_path = PathBuf::from(p);
+        }
+
         let target = GitimportTarget::full();
         info!(ctx.logger(), "Started importing git commits to Mononoke");
-        let uploader =
-            import_direct::DirectUploader::new(repo.as_blob_repo().clone(), ReuploadCommits::Never);
+        let uploader = import_direct::DirectUploader::new(repo.clone(), ReuploadCommits::Never);
         let import_map =
             import_tools::gitimport(&ctx, path, Arc::new(uploader), &target, &prefs).await?;
         info!(ctx.logger(), "Added commits to Mononoke");
@@ -1467,11 +1414,8 @@ async fn check_additional_setup_steps(
         ));
     }
 
-    let live_commit_sync_config = CfgrLiveCommitSyncConfig::new_with_xdb(
-        ctx.logger(),
-        &env.config_store,
-        repo.push_redirection_config_arc(),
-    )?;
+    let live_commit_sync_config =
+        CfgrLiveCommitSyncConfig::new(&env.config_store, repo.push_redirection_config_arc())?;
 
     let maybe_large_repo_config = get_large_repo_config_if_pushredirected(
         &ctx,
@@ -1487,8 +1431,6 @@ async fn check_additional_setup_steps(
             &repo,
             &repo_import_setting,
             &large_repo_config,
-            configs,
-            env,
             live_commit_sync_config,
         )
         .await?;
@@ -1659,6 +1601,7 @@ async fn async_main(app: MononokeApp) -> Result<(), Error> {
         &configs,
         env,
         args.no_merge,
+        args.git_command_path,
     )
     .await
     {

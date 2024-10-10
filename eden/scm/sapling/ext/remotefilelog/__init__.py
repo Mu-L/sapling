@@ -78,8 +78,6 @@ Configs:
     requires flat manifests, despite blocksendflat being set. This is primarily
     used for mirroring infrastructure.
 
-    ``remotefilelog.simplecacheserverstore`` use simplecache as cache implementation.
-
     ``remotefilelog.indexedlogdatastore`` use an IndexedLog content store.
 
     ``remotefilelog.indexedloghistorystore`` use an IndexedLog history store.
@@ -90,6 +88,7 @@ Configs:
 
     ``remotefilelog.http`` use HTTP (EdenAPI) instead of SSH to fetch data.
 """
+
 from __future__ import absolute_import
 
 import os
@@ -140,7 +139,6 @@ from . import (
     shallowstore,
 )
 
-
 # ensures debug commands are registered
 hgdebugcommands.command
 
@@ -161,7 +159,6 @@ configitem = registrar.configitem(configtable)
 configitem("remotefilelog", "descendantrevfastpath", default=False)
 configitem("remotefilelog", "updatesharedcache", default=True)
 configitem("remotefilelog", "servercachepath", default=None)
-configitem("remotefilelog", "simplecacheserverstore", default=False)
 configitem("remotefilelog", "server", default=None)
 configitem("remotefilelog", "getpackversion", default=1)
 configitem("remotefilelog", "http", default=True)
@@ -188,28 +185,6 @@ def uisetup(ui):
     extensions.wrapcommand(commands.table, "log", log)
     extensions.wrapcommand(commands.table, "pull", pull)
     extensions.wrapfunction(bundle2, "getrepocaps", getrepocaps)
-
-    # Prevent 'hg manifest --all'
-    def _manifest(orig, ui, repo, *args, **opts):
-        if shallowrepo.requirement in repo.requirements and opts.get("all"):
-            raise error.Abort(_("--all is not supported in a shallow repo"))
-
-        return orig(ui, repo, *args, **opts)
-
-    extensions.wrapcommand(commands.table, "manifest", _manifest)
-
-    # Wrap remotefilelog with lfs code
-    def _lfsloaded(loaded=False):
-        lfsmod = None
-        try:
-            lfsmod = extensions.find("lfs")
-        except KeyError:
-            pass
-        if lfsmod:
-            lfsmod.wrapfilelog(ui, remotefilelog.remotefilelog)
-            fileserverclient._lfsmod = lfsmod
-
-    extensions.afterloaded("lfs", _lfsloaded)
 
     # debugdata needs remotefilelog.len to work
     extensions.wrapcommand(commands.table, "debugdata", debugdatashallow)
@@ -281,7 +256,7 @@ def uploadblobs(repo, nodes):
 
             fctx = ctx[f]
             toupload.append((fctx.path(), fctx.filenode()))
-    repo.fileslog.filestore.upload(toupload)
+    repo.fileslog.filestore.upload_lfs(toupload)
 
 
 def prepush(pushop):
@@ -352,7 +327,7 @@ def onetimeclientsetup(ui):
         if shallowrepo.requirement in repo.requirements:
             files = []
             sparsematch = repo.maybesparsematch(mctx.rev())
-            for f, (m, actionargs, msg) in pycompat.iteritems(actions):
+            for f, (m, actionargs, msg) in actions.items():
                 if sparsematch and not sparsematch(f):
                     continue
                 if m == "c":
@@ -852,20 +827,6 @@ def verifyremotefilelog(ui, path, **opts):
 
 
 @command(
-    "debugdatapack",
-    [
-        ("", "long", None, _("print the long hashes")),
-        ("", "node", "", _("dump the contents of node"), "NODE"),
-        ("", "node-delta", "", _("dump the delta chain info of node"), "NODE"),
-    ],
-    _("@prog@ debugdatapack <paths>"),
-    norepo=True,
-)
-def debugdatapack(ui, *paths, **opts):
-    return debugcommands.debugdatapack(ui, *paths, **opts)
-
-
-@command(
     "debugindexedlogdatastore",
     [
         ("", "long", None, _("print the long hashes")),
@@ -877,16 +838,6 @@ def debugdatapack(ui, *paths, **opts):
 )
 def debugindexedlogdatastore(ui, *paths, **opts):
     return debugcommands.debugindexedlogdatastore(ui, *paths, **opts)
-
-
-@command(
-    "debughistorypack",
-    [("", "long", None, _("print the long hashes"))],
-    _("@prog@ debughistorypack <path>"),
-    norepo=True,
-)
-def debughistorypack(ui, *paths, **opts):
-    return debugcommands.debughistorypack(ui, paths, **opts)
 
 
 @command(

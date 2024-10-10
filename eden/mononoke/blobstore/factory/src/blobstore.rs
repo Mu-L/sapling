@@ -381,11 +381,46 @@ pub async fn make_packblob<'a>(
 }
 
 #[cfg(fbcode_build)]
-pub async fn make_manifold_blobstore(
+pub async fn make_manifold_blobstore_enumerable_with_unlink(
     fb: FacebookInit,
     blobconfig: BlobConfig,
     blobstore_options: &BlobstoreOptions,
 ) -> Result<Arc<dyn BlobstoreEnumerableWithUnlink>, Error> {
+    use BlobConfig::*;
+    let (bucket, prefix, ttl) = match blobconfig {
+        Manifold { bucket, prefix } => (bucket, prefix, None),
+        ManifoldWithTtl {
+            bucket,
+            prefix,
+            ttl,
+        } => (bucket, prefix, Some(ttl)),
+        _ => bail!("Not a Manifold blobstore"),
+    };
+    crate::facebook::make_manifold_blobstore_enumerable_with_unlink(
+        fb,
+        &prefix,
+        &bucket,
+        ttl,
+        &blobstore_options.manifold_options,
+        blobstore_options.put_behaviour,
+    )
+}
+
+#[cfg(not(fbcode_build))]
+pub async fn make_manifold_blobstore_enumerable_with_unlink(
+    _fb: FacebookInit,
+    _blobconfig: BlobConfig,
+    _blobstore_options: &BlobstoreOptions,
+) -> Result<Arc<dyn BlobstoreEnumerableWithUnlink>, Error> {
+    unimplemented!("This is implemented only for fbcode_build")
+}
+
+#[cfg(fbcode_build)]
+pub async fn make_manifold_blobstore(
+    fb: FacebookInit,
+    blobconfig: BlobConfig,
+    blobstore_options: &BlobstoreOptions,
+) -> Result<Arc<dyn Blobstore>, Error> {
     use BlobConfig::*;
     let (bucket, prefix, ttl) = match blobconfig {
         Manifold { bucket, prefix } => (bucket, prefix, None),
@@ -411,7 +446,7 @@ pub async fn make_manifold_blobstore(
     _fb: FacebookInit,
     _blobconfig: BlobConfig,
     _blobstore_options: &BlobstoreOptions,
-) -> Result<Arc<dyn BlobstoreEnumerableWithUnlink>, Error> {
+) -> Result<Arc<dyn Blobstore>, Error> {
     unimplemented!("This is implemented only for fbcode_build")
 }
 
@@ -448,7 +483,7 @@ async fn make_physical_blobstore_unlink_ops<'a>(
         .await
         .map(|store| Arc::new(store) as Arc<dyn BlobstoreUnlinkOps>),
         Manifold { .. } | ManifoldWithTtl { .. } => {
-            make_manifold_blobstore(fb, blobconfig, blobstore_options)
+            make_manifold_blobstore_enumerable_with_unlink(fb, blobconfig, blobstore_options)
                 .watched(logger)
                 .await
                 .map(|store| Arc::new(store) as Arc<dyn BlobstoreUnlinkOps>)
@@ -456,6 +491,20 @@ async fn make_physical_blobstore_unlink_ops<'a>(
         Files { .. } => make_files_blobstore(blobconfig, blobstore_options)
             .await
             .map(|store| Arc::new(store) as Arc<dyn BlobstoreUnlinkOps>),
+        AwsS3 {
+            bucket,
+            region,
+            num_concurrent_operations,
+            ..
+        } => {
+            let client_backend = AwsS3ClientPool::new(region, num_concurrent_operations).await?;
+
+            S3Blob::new(bucket, client_backend, blobstore_options.put_behaviour)
+                .watched(logger)
+                .await
+                .context(ErrorKind::StateOpen)
+                .map(|store| Arc::new(store) as Arc<dyn BlobstoreUnlinkOps>)
+        }
         _ => bail!("Not a physical blobstore"),
     }
 }
@@ -498,7 +547,7 @@ pub async fn raw_blobstore_enumerable_with_unlink<'a>(
     use BlobConfig::*;
     match blobconfig {
         Manifold { .. } | ManifoldWithTtl { .. } => {
-            make_manifold_blobstore(fb, blobconfig, blobstore_options)
+            make_manifold_blobstore_enumerable_with_unlink(fb, blobconfig, blobstore_options)
                 .watched(logger)
                 .await
         }

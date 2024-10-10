@@ -11,7 +11,7 @@ license = "GPLv2+"
 path = "lib.rs"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 bonsai_git_mapping = { version = "0.1.0", path = "../../bonsai_git_mapping" }
 bonsai_globalrev_mapping = { version = "0.1.0", path = "../../bonsai_globalrev_mapping" }
 bookmarks_types = { version = "0.1.0", path = "../../bookmarks/bookmarks_types" }
@@ -25,4 +25,4 @@ repo_bookmark_attrs = { version = "0.1.0", path = "../../repo_attributes/repo_bo
 repo_cross_repo = { version = "0.1.0", path = "../../repo_attributes/repo_cross_repo" }
 repo_identity = { version = "0.1.0", path = "../../repo_attributes/repo_identity" }
 synced_commit_mapping_pushrebase_hook = { version = "0.1.0", path = "../../commit_rewriting/synced_commit_mapping/pushrebase_hook" }
-thiserror = "1.0.49"
+thiserror = "1.0.64"

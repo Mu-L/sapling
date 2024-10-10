@@ -5,33 +5,25 @@
 # directory of this source tree.
 
   $ . "${TEST_FIXTURES}/library.sh"
-  $ BLOB_TYPE="blob_files" default_setup
-  hg repo
-  o  C [draft;rev=2;26805aba1e60]
-  │
-  o  B [draft;rev=1;112478962961]
-  │
-  o  A [draft;rev=0;426bada5c675]
-  $
-  blobimporting
-  starting Mononoke
-  cloning repo in hg client 'repo2'
+  $ default_setup_drawdag
+  A=aa53d24251ff3f54b1b2c29ae02826701b2abeb0079f1bb13b8434b54cd87675
+  B=f8c75e41a0c4d29281df765f39de47bca1dcadfdc55ada4ccc2f6df567201658
+  C=e32a1e342cdb1e38e88466b4c1a01ae9f410024017aa21dc0a1c5da6b3963bf2
 
 
 Creating a merge commit
-  $ cd "$TESTTMP/repo2"
-  $ hgmn up -q null
+  $ hg up -q null
   $ echo 1 > tomerge
   $ hg -q addremove
   $ hg ci -m 'tomerge'
   $ NODE="$(hg log -r . -T '{node}')"
-  $ hgmn up -q master_bookmark
-  $ hgmn merge -q -r "$NODE"
+  $ hg up -q master_bookmark
+  $ hg merge -q -r "$NODE"
   $ hg ci -m 'merge'
 
 Pushing a merge
-  $ hgmn push -r . --to master_bookmark
-  pushing rev 7d332475050d to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark
+  pushing rev 7f168f25ab51 to destination mono:repo bookmark master_bookmark
   searching for changes
   adding changesets
   adding manifests

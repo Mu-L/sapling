@@ -3,7 +3,6 @@
 #require no-eden
 
 #chg-compatible
-  $ setconfig experimental.allowfilepeer=True
 
   $ . "$TESTDIR/library.sh"
 
@@ -11,11 +10,7 @@
   $ hginit master
   $ cd master
   $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=$TESTDIR/../sapling/ext/treemanifestserver.py
   > [remotefilelog]
-  > server=True
-  > [treemanifest]
   > server=True
   > EOF
   $ echo x > x

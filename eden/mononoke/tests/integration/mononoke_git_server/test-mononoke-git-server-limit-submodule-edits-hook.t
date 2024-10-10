@@ -11,10 +11,6 @@
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO_SUBMODULE="${TESTTMP}/origin/repo-submodule-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
 
   $ cat >> repos/repo/server.toml <<EOF
   > [[bookmarks]]
@@ -26,14 +22,6 @@
   > config_json='''{
   > "allow_edits_with_marker": "@update-submodule"
   > }'''
-  > EOF
-
-  $ merge_just_knobs <<EOF
-  > {
-  >   "bools": {
-  >     "scm/mononoke:run_hooks_on_additional_changesets": true
-  >   }
-  > }
   > EOF
 
 # Setup git repository
@@ -89,7 +77,9 @@
   $ git_client push origin --all
   To https://localhost:$LOCAL_PORT/repos/git/ro/repo.git
    ! [remote rejected] master -> master (hooks failed:
-    limit_submodule_edits for *: Commit creates or edits a submodule at path submodule_path. If you did mean to do this, add "@update-submodule: submodule_path" to your commit message) (glob)
+    limit_submodule_edits for *: Commit creates or edits a submodule at path submodule_path. If you did mean to do this, add "@update-submodule: submodule_path" to your commit message (glob)
+  
+  For more information about hooks and bypassing, refer https://fburl.com/wiki/mb4wtk1j)
   error: failed to push some refs to 'https://localhost:$LOCAL_PORT/repos/git/ro/repo.git'
   [1]
 
@@ -103,7 +93,9 @@
   $ git_client push origin --all
   To https://localhost:$LOCAL_PORT/repos/git/ro/repo.git
    ! [remote rejected] master -> master (hooks failed:
-    limit_submodule_edits for *: Commit creates or edits a submodule at path submodule_path. The content of the "@update-submodule" marker, do not match the path of the submodule: "wrong_path" != "submodule_path") (glob)
+    limit_submodule_edits for *: Commit creates or edits a submodule at path submodule_path. The content of the "@update-submodule" marker, do not match the path of the submodule: "wrong_path" != "submodule_path" (glob)
+  
+  For more information about hooks and bypassing, refer https://fburl.com/wiki/mb4wtk1j)
   error: failed to push some refs to 'https://localhost:$LOCAL_PORT/repos/git/ro/repo.git'
   [1]
 

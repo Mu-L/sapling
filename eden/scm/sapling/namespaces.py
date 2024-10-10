@@ -49,21 +49,6 @@ def bookmarks(repo):
     )
 
 
-@builtinnamespace("branches", priority=30)
-def branches(repo):
-    bnames = lambda repo: repo.branchmap().keys()
-    bnamemap = lambda repo, name: tolist(repo.branchtip(name, True))
-    bnodemap = lambda repo, node: [repo[node].branch()]
-    return namespace(
-        templatename="branch",
-        logfmt=templatekw.getlogcolumns()["branch"],
-        listnames=bnames,
-        namemap=bnamemap,
-        nodemap=bnodemap,
-        builtin=True,
-    )
-
-
 @builtinnamespace("remotebookmarks", priority=55)
 def remotebookmarks(repo):
     namemap = lambda repo, name: repo._remotenames.mark2nodes().get(name, [])
@@ -209,7 +194,7 @@ class namespaces:
         return self._names.__iter__()
 
     def items(self):
-        return pycompat.iteritems(self._names)
+        return self._names.items()
 
     iteritems = items
 
@@ -241,10 +226,7 @@ class namespaces:
         namespaces, otherwise, namespaces with 'user_only=False' will be used,
         if 'self.included' is 'False'.
         """
-        for ns, v in pycompat.iteritems(self._names):
-            # Fast path: do not consider branches unless it's "default".
-            if ns == "branches" and name != "default":
-                continue
+        for ns, v in self._names.items():
             if namespaces is not None:
                 if ns not in namespaces:
                     continue
@@ -373,7 +355,7 @@ class namespace:
 
 
 def loadpredicate(ui, extname, registrarobj):
-    for name, ns in pycompat.iteritems(registrarobj._table):
+    for name, ns in registrarobj._table.items():
         if name in namespacetable:
             raise error.ProgrammingError("namespace '%s' is already registered", name)
         namespacetable[name] = ns

@@ -5,6 +5,8 @@
 
 from __future__ import absolute_import
 
+import time
+
 from bindings import clientinfo as clientinfomod
 
 # Standard Library
@@ -76,7 +78,8 @@ class SaplingRemoteAPIService(baseservice.BaseService):
         if "data" in response:
             response = response["data"]["Ok"]
 
-        return self._makereferences(self._castreferences(response))
+        refs = self._castreferences(response)
+        return self._makereferences(refs)
 
     def updatereferences(
         self,
@@ -164,14 +167,76 @@ class SaplingRemoteAPIService(baseservice.BaseService):
         )
 
     def getsmartlog(self, reponame, workspace, repo, limit, flags=[]):
-        return self.fallback.getsmartlog(reponame, workspace, repo, limit, flags)
+        self.ui.debug(
+            "sending 'get_smartlog' request on SaplingRemoteAPI\n",
+            component="commitcloud",
+        )
+
+        data = {
+            "reponame": reponame,
+            "workspace": workspace,
+            "flags": self._map_legacy_flags(flags),
+        }
+        response = self.repo.edenapi.cloudsmartlog(data)
+
+        smartlog = self._getdatafromresponse(response)
+        if limit != 0:
+            cutoff = int(time.time()) - limit
+            smartlog["nodes"] = list(
+                filter(lambda x: x["date"] >= cutoff, smartlog["nodes"])
+            )
+        self.ui.debug(
+            "'get_smartlog' returns %d entries\n" % len(smartlog["nodes"]),
+            component="commitcloud",
+        )
+
+        smartlog["nodes"] = self._decode_smartlog_nodes(smartlog["nodes"])
+        try:
+            return self._makesmartloginfo(smartlog)
+        except Exception as e:
+            raise error.UnexpectedError(self.ui, e)
 
     def getsmartlogbyversion(
         self, reponame, workspace, repo, date, version, limit, flags=[]
     ):
-        return self.fallback.getsmartlogbyversion(
-            reponame, workspace, repo, date, version, limit, flags=[]
+        self.ui.debug(
+            "sending 'get_old_smartlog' request on SaplingRemoteAPI\n",
+            component="commitcloud",
         )
+        if date:
+            data = {
+                "reponame": reponame,
+                "workspace": workspace,
+                "filter": {"Timestamp": date[0]},
+                "flags": self._map_legacy_flags(flags),
+            }
+        else:
+            data = {
+                "reponame": reponame,
+                "workspace": workspace,
+                "filter": {"Version": int(version)},
+                "flags": self._map_legacy_flags(flags),
+            }
+
+        response = self.repo.edenapi.cloudsmartlogbyversion(data)
+
+        smartlog = self._getdatafromresponse(response)
+        if limit != 0:
+            cutoff = smartlog["timestamp"] - limit
+            smartlog["nodes"] = list(
+                filter(lambda x: x["date"] >= cutoff, smartlog["nodes"])
+            )
+
+        smartlog["nodes"] = self._decode_smartlog_nodes(smartlog["nodes"])
+        self.ui.debug(
+            "'get_smartlog' returns %d entries\n" % len(smartlog["nodes"]),
+            component="commitcloud",
+        )
+
+        try:
+            return self._makesmartloginfo(smartlog)
+        except Exception as e:
+            raise error.UnexpectedError(self.ui, e)
 
     def updatecheckoutlocations(
         self, reponame, workspace, hostname, commit, checkoutpath, sharedpath, unixname
@@ -213,15 +278,40 @@ class SaplingRemoteAPIService(baseservice.BaseService):
 
     def updateworkspacearchive(self, reponame, workspace, archived):
         """Archive or Restore the given workspace"""
-        return self.fallback.updateworkspacearchive(reponame, workspace, archived)
+        self.ui.debug(
+            "sending 'update_workspace_archive' request on SaplingRemoteAPI\n",
+            component="commitcloud",
+        )
+
+        data = {"reponame": reponame, "workspace": workspace, "archived": archived}
+        self.repo.edenapi.cloudupdatearchive(data)
 
     def renameworkspace(self, reponame, workspace, new_workspace):
         """Rename the given workspace"""
-        return self.fallback.renameworkspace(reponame, workspace, new_workspace)
+        self.ui.debug(
+            "sending 'rename_workspace' request on SaplingRemoteAPI\n",
+            component="commitcloud",
+        )
+
+        data = {
+            "reponame": reponame,
+            "workspace": workspace,
+            "new_workspace": new_workspace,
+        }
+        self._getdatafromresponse(self.repo.edenapi.cloudrenameworkspace(data))
 
     def shareworkspace(self, reponame, workspace):
         """Enable sharing for the given workspace"""
-        return self.fallback.shareworkspace(reponame, workspace)
+        self.ui.debug(
+            "sending 'share_workspace' request through Sapling Remote API\n",
+            component="commitcloud",
+        )
+        data = {
+            "reponame": reponame,
+            "workspace": workspace,
+        }
+        response = self.repo.edenapi.cloudshareworkspace(data)
+        return self._getdatafromresponse(response)
 
     def rollbackworkspace(self, reponame, workspace, version):
         """Rollback the given workspace to a specific version"""
@@ -230,6 +320,24 @@ class SaplingRemoteAPIService(baseservice.BaseService):
     def cleanupworkspace(self, reponame, workspace):
         """Cleanup unnecessary remote bookmarks from the given workspace"""
         return self.fallback.cleanupworkspace(reponame, workspace)
+
+    def gethistoricalversions(self, reponame, workspace):
+        self.ui.debug(
+            "sending 'get_historical_versions' request on SaplingRemoteAPI\n",
+            component="commitcloud",
+        )
+
+        data = {"reponame": reponame, "workspace": workspace}
+
+        response = self.repo.edenapi.cloudhistoricalversions(data)
+        versions = self._getdatafromresponse(response)["versions"]
+
+        self.ui.debug(
+            "'get_historical_versions' returns %d entries\n" % len(versions),
+            component="commitcloud",
+        )
+
+        return versions
 
     def _castreferences(self, refs):
         """
@@ -255,7 +363,7 @@ class SaplingRemoteAPIService(baseservice.BaseService):
 
         refs["remote_bookmarks"] = remote_bookmarks
         refs["bookmarks"] = local_bookmarks
-        refs["heads_date"] = heads_dates
+        refs["head_dates"] = heads_dates
         refs["snapshots"] = snapshots
         refs["heads"] = heads
         return refs
@@ -277,4 +385,21 @@ class SaplingRemoteAPIService(baseservice.BaseService):
             else:
                 raise error.Abort(response["data"]["Err"]["message"])
 
-        raise error.Abort("No data received from server")
+        raise error.Abort("No data revceived from server")
+
+    def _map_legacy_flags(self, strings):
+        mapping = {
+            "ADD_REMOTE_BOOKMARKS": "AddRemoteBookmarks",
+            "ADD_ALL_BOOKMARKS": "AddAllBookmarks",
+            "SKIP_PUBLIC_COMMITS_METADATA": "SkipPublicCommitsMetadata",
+        }
+        return [mapping[s] for s in strings]
+
+    def _decode_smartlog_nodes(self, nodes):
+        for nodeinfo in nodes:
+            nodeinfo["node"] = nodeinfo["node"].hex()
+            nodeinfo["parents"] = list(map(lambda x: x.hex(), nodeinfo["parents"]))
+            if nodeinfo["remote_bookmarks"] is not None:
+                for bookmark in nodeinfo["remote_bookmarks"]:
+                    bookmark["node"] = bookmark["node"].hex()
+        return nodes

@@ -20,6 +20,7 @@ import {latestHeadCommit} from '../serverAPIState';
 import {GeneratedStatus} from '../types';
 import {SplitDiffView} from './SplitDiffView';
 import {currentComparisonMode} from './atoms';
+import {parsePatchAndFilter, sortFilesByType} from './utils';
 import {Button} from 'isl-components/Button';
 import {Dropdown} from 'isl-components/Dropdown';
 import {ErrorBoundary, ErrorNotice} from 'isl-components/ErrorNotice';
@@ -27,7 +28,7 @@ import {Icon} from 'isl-components/Icon';
 import {RadioGroup} from 'isl-components/Radio';
 import {Subtle} from 'isl-components/Subtle';
 import {Tooltip} from 'isl-components/Tooltip';
-import {useAtom, useAtomValue, useSetAtom} from 'jotai';
+import {atom, useAtom, useAtomValue, useSetAtom} from 'jotai';
 import {useEffect, useMemo, useState} from 'react';
 import {
   comparisonIsAgainstHead,
@@ -35,7 +36,6 @@ import {
   ComparisonType,
   comparisonStringKey,
 } from 'shared/Comparison';
-import {parsePatch} from 'shared/patch/parse';
 import {group, notEmpty} from 'shared/utils';
 
 import './ComparisonView.css';
@@ -46,14 +46,6 @@ import './ComparisonView.css';
  */
 function mapResult<T, U>(result: Result<T>, fn: (t: T) => U): Result<U> {
   return result.error == null ? {value: fn(result.value)} : result;
-}
-
-function parsePatchAndFilter(patch: string): ReturnType<typeof parsePatch> {
-  const result = parsePatch(patch);
-  return result.filter(
-    // empty patches and other weird situations can cause invalid files to get parsed, ignore these entirely
-    diff => diff.hunks.length > 0 || diff.newFileName != null || diff.oldFileName != null,
-  );
 }
 
 const currentComparisonData = atomFamilyWeak((comparison: Comparison) =>
@@ -70,43 +62,6 @@ const currentComparisonData = atomFamilyWeak((comparison: Comparison) =>
 type LineRangeKey = string;
 export function keyForLineRange(param: {path: string; comparison: Comparison}): LineRangeKey {
   return `${param.path}:${comparisonStringKey(param.comparison)}`;
-}
-
-/** Fetches context lines */
-export function useFetchLines(ctx: Context, numLines: number, start: number) {
-  const [fetchedLines, setFetchedLines] = useState<Result<Array<string>> | undefined>(undefined);
-
-  // We must ensure this lineRange gets invalidated when the underlying file's context lines
-  // have changed.
-  // This depends on the comparison:
-  // for Committed: the commit hash is included in the Comparison, thus the cached data will always be accurate.
-  // for Uncommitted, Head, and Stack:
-  // by referencing the latest head commit atom, we ensure this selector reloads when the head commit changes.
-  // These comparisons are all against the working copy (not exactly head),
-  // but there's no change that could be made that would affect the context lines without
-  // also changing the head commit's hash.
-  // Note: we use latestHeadCommit WITHOUT previews, so we don't accidentally cache the file content
-  // AGAIN on the same data while waiting for some new operation to finish.
-  const dotCommit = useAtomValue(latestHeadCommit);
-
-  const comparisonKey = comparisonStringKey(ctx.id.comparison);
-  useEffect(() => {
-    serverAPI.postMessage({
-      type: 'requestComparisonContextLines',
-      numLines,
-      start,
-      id: ctx.id,
-    });
-
-    serverAPI
-      .nextMessageMatching('comparisonContextLines', msg => msg.path === ctx.id.path)
-      .then(result => {
-        setFetchedLines(result.lines);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dotCommit?.hash, ctx.id.path, comparisonKey, numLines, start]);
-
-  return fetchedLines;
 }
 
 type ComparisonDisplayMode = 'unified' | 'split';
@@ -161,6 +116,7 @@ export default function ComparisonView({
       );
   } else {
     const files = data.value ?? [];
+    sortFilesByType(files);
     const fileGroups = group(files, file => generatedStatuses[file.newFileName ?? '']);
     content = (
       <>
@@ -462,9 +418,36 @@ function ComparisonViewFile({
     openFileToLine: comparisonIsAgainstHead(comparison)
       ? (line: number) => platform.openFile(path, {line})
       : undefined,
+
+    async fetchAdditionalLines(id, start, numLines) {
+      serverAPI.postMessage({
+        type: 'requestComparisonContextLines',
+        numLines,
+        start,
+        id,
+      });
+
+      const result = await serverAPI.nextMessageMatching(
+        'comparisonContextLines',
+        msg => msg.path === id.path,
+      );
+
+      return result.lines;
+    },
+    // We must ensure the lineRange gets invalidated when the underlying file's context lines
+    // have changed.
+    // This depends on the comparison:
+    // for Committed: the commit hash is included in the Comparison, thus the cached data will always be accurate.
+    // for Uncommitted, Head, and Stack:
+    // by referencing the latest head commit's hash, we ensure this selector reloads when the head commit changes.
+    // These comparisons are all against the working copy (not exactly head),
+    // but there's no change that could be made that would affect the context lines without
+    // also changing the head commit's hash.
+    // Note: we use latestHeadCommit WITHOUT previews, so we don't accidentally cache the file content
+    // AGAIN on the same data while waiting for some new operation to finish.
+    comparisonInvalidatedAtom: atom(get => get(latestHeadCommit)?.hash),
     collapsed,
     setCollapsed,
-    supportsExpandingContext: true,
     display: displayMode,
   };
   return (

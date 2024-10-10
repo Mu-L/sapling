@@ -34,7 +34,7 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
   label = t('GitHub');
 
   constructor(
-    private system: CodeReviewSystem & {type: 'github'},
+    public system: CodeReviewSystem & {type: 'github'},
     private preferredSubmitCommand: PreferredSubmitCommand,
   ) {}
   cliName?: string | undefined;
@@ -86,14 +86,26 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
       </span>
     );
   };
+
+  getRemoteTrackingBranch(): string | null {
+    return null;
+  }
+
+  getRemoteTrackingBranchFromDiffSummary(): string | null {
+    return null;
+  }
+
   isSplitSuggestionSupported(): boolean {
     return false;
   }
   submitOperation(_commits: [], options: {draft?: boolean; updateMessage?: string}): Operation {
     if (this.preferredSubmitCommand === 'ghstack') {
       return new GhStackSubmitOperation(options);
+    } else if (this.preferredSubmitCommand === 'pr') {
+      return new PrSubmitOperation(options);
+    } else {
+      throw new Error('Not yet implemented');
     }
-    return new PrSubmitOperation(options);
   }
 
   submitCommandName() {
@@ -116,6 +128,10 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
     return diff.state === PullRequestState.Closed;
   }
 
+  getUpdateDiffActions(_summary: DiffSummary) {
+    return [];
+  }
+
   commitMessageFieldsSchema =
     Internal.CommitMessageFieldSchemaForGitHub ?? OSSCommitMessageFieldSchema;
 
@@ -123,6 +139,16 @@ export class GithubUICodeReviewProvider implements UICodeReviewProvider {
   supportsUpdateMessage = false;
   submitDisabledReason = () =>
     Internal.submitForGitHubDisabledReason?.(this.preferredSubmitCommand);
+  supportBranchingPrs = true;
+
+  branchNameForRemoteBookmark(bookmark: string) {
+    // TODO: is "origin" really always the prefix for remote bookmarks in git?
+    const originPrefix = 'origin/';
+    const branchName = bookmark.startsWith(originPrefix)
+      ? bookmark.slice(originPrefix.length)
+      : bookmark;
+    return branchName;
+  }
 
   enableMessageSyncing = false;
 

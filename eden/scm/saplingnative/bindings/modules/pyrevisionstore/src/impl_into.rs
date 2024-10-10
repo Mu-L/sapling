@@ -14,9 +14,7 @@ use cpython::*;
 use cpython_ext::convert::register_into;
 use cpython_ext::ExtractInner;
 use revisionstore::trait_impls::ArcFileStore;
-use revisionstore::trait_impls::ArcRemoteDataStore;
 use revisionstore::HgIdDataStore;
-use revisionstore::LegacyStore;
 use revisionstore::RemoteDataStore;
 use revisionstore::StoreKey;
 use revisionstore::StoreResult;
@@ -27,33 +25,15 @@ use storemodel::TreeStore;
 use types::Key;
 use types::RepoPath;
 
-use crate::contentstore;
 use crate::filescmstore;
-use crate::pyfilescmstore;
 use crate::treescmstore;
 use crate::PythonHgIdDataStore;
 
 pub(crate) fn register(py: Python) {
-    register_into(py, |py, c: contentstore| c.to_dyn_treestore(py));
     register_into(py, |py, t: treescmstore| t.to_dyn_treestore(py));
     register_into(py, py_to_dyn_treestore);
 
-    register_into(py, |py, c: contentstore| c.to_read_file_contents(py));
     register_into(py, |py, f: filescmstore| f.to_read_file_contents(py));
-    register_into(py, |py, p: pyfilescmstore| p.to_read_file_contents(py));
-}
-
-impl contentstore {
-    fn to_dyn_treestore(&self, py: Python) -> Arc<dyn TreeStore> {
-        let store = self.extract_inner(py) as Arc<dyn LegacyStore>;
-        Arc::new(ManifestStore::new(store))
-    }
-
-    fn to_read_file_contents(&self, py: Python) -> Arc<dyn FileStore> {
-        let store = self.extract_inner(py) as Arc<dyn LegacyStore>;
-        let store = ArcRemoteDataStore(store as Arc<_>);
-        Arc::new(store)
-    }
 }
 
 impl filescmstore {
@@ -64,24 +44,19 @@ impl filescmstore {
     }
 }
 
-impl pyfilescmstore {
-    fn to_read_file_contents(&self, py: Python) -> Arc<dyn FileStore> {
-        self.extract_inner(py)
-    }
-}
-
 impl treescmstore {
     fn to_dyn_treestore(&self, py: Python) -> Arc<dyn TreeStore> {
-        let store = self.extract_inner(py) as Arc<dyn LegacyStore>;
-        Arc::new(ManifestStore::new(store))
+        match &self.caching_store(py) {
+            Some(caching_store) => caching_store.clone(),
+            None => self.store(py).clone(),
+        }
     }
 }
 
 // Legacy support for store in Python.
-// XXX: Check if it's used and drop support for it.
+// Used at least by unioncontentstore.
 fn py_to_dyn_treestore(_py: Python, obj: PyObject) -> Arc<dyn TreeStore> {
-    let store = Arc::new(PythonHgIdDataStore::new(obj)) as Arc<dyn LegacyStore>;
-    Arc::new(ManifestStore::new(store))
+    Arc::new(ManifestStore::new(PythonHgIdDataStore::new(obj)))
 }
 
 struct ManifestStore<T> {

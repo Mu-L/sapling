@@ -8,21 +8,10 @@
 
 setup repo
 
-  $ hg init repo-hg
+  $ hginit_treemanifest repo
 
 Init treemanifest and remotefilelog
-  $ cd repo-hg
-  $ cat >> .hg/hgrc <<EOF
-  > [extensions]
-  > treemanifest=!
-  > treemanifestserver=
-  > remotefilelog=
-  > [treemanifest]
-  > server=True
-  > [remotefilelog]
-  > server=True
-  > shallowtrees=True
-  > EOF
+  $ cd repo
 
   $ touch a
   $ hg add a
@@ -46,5 +35,5 @@ Init treemanifest and remotefilelog
 blobimport with missing first commit, it should fail
   $ setup_mononoke_config
   $ cd $TESTTMP
-  $ blobimport repo-hg/.hg repo --skip 1 --panic-fate=exit > /dev/null
+  $ blobimport repo/.hg repo --skip 1 --panic-fate=exit > /dev/null
   [1]

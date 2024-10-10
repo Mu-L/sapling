@@ -18,6 +18,7 @@ use gotham::handler::HandlerFuture;
 use gotham::handler::IntoResponse;
 use gotham::handler::NewHandler;
 use gotham::state::State;
+use gotham_derive::StateData;
 use hyper::service::Service;
 use hyper::Body;
 use hyper::Request;
@@ -26,6 +27,12 @@ use hyper::Response;
 use crate::middleware::Middleware;
 use crate::socket_data::TlsSocketData;
 
+#[derive(StateData, Clone, PartialEq, Copy, Debug)]
+pub enum SlapiCommitIdentityScheme {
+    Hg,
+    Git,
+}
+
 #[derive(Clone)]
 pub struct MononokeHttpHandler<H> {
     inner: H,
@@ -33,15 +40,30 @@ pub struct MononokeHttpHandler<H> {
 }
 
 impl<H> MononokeHttpHandler<H> {
-    pub fn into_service(
+    pub fn into_service<T>(
         self,
         addr: SocketAddr,
         tls_socket_data: Option<TlsSocketData>,
-    ) -> MononokeHttpHandlerAsService<H> {
+    ) -> MononokeHttpHandlerAsService<H, T> {
         MononokeHttpHandlerAsService {
             handler: self,
             addr,
             tls_socket_data,
+            state: None,
+        }
+    }
+
+    pub fn into_service_with_state<T: gotham::state::StateData>(
+        self,
+        addr: SocketAddr,
+        tls_socket_data: Option<TlsSocketData>,
+        state: T,
+    ) -> MononokeHttpHandlerAsService<H, T> {
+        MononokeHttpHandlerAsService {
+            handler: self,
+            addr,
+            tls_socket_data,
+            state: Some(state),
         }
     }
 }
@@ -146,17 +168,26 @@ impl MononokeHttpHandlerBuilder {
 /// This is an instance of MononokeHttpHandlerAsService that is connected to a client. We can use
 /// it to call into Gotham explicitly, or use it as a Hyper service.
 #[derive(Clone)]
-pub struct MononokeHttpHandlerAsService<H> {
+pub struct MononokeHttpHandlerAsService<H, T> {
     handler: MononokeHttpHandler<H>,
     addr: SocketAddr,
     tls_socket_data: Option<TlsSocketData>,
+    state: Option<T>,
 }
 
-impl<H: Handler + Clone + Send + Sync + 'static + RefUnwindSafe> MononokeHttpHandlerAsService<H> {
+impl<
+    H: Handler + Clone + Send + Sync + 'static + RefUnwindSafe,
+    T: gotham::state::StateData + Clone,
+> MononokeHttpHandlerAsService<H, T>
+{
     pub async fn call_gotham(self, req: Request<Body>) -> Response<Body> {
         let mut state = State::from_request(req, self.addr);
         if let Some(tls_socket_data) = self.tls_socket_data {
             tls_socket_data.populate_state(&mut state);
+        }
+
+        if let Some(s) = self.state {
+            state.put(s);
         }
 
         match self.handler.handle(state).await {
@@ -166,8 +197,10 @@ impl<H: Handler + Clone + Send + Sync + 'static + RefUnwindSafe> MononokeHttpHan
     }
 }
 
-impl<H: Handler + Clone + Send + Sync + 'static + RefUnwindSafe> Service<Request<Body>>
-    for MononokeHttpHandlerAsService<H>
+impl<
+    H: Handler + Clone + Send + Sync + 'static + RefUnwindSafe,
+    T: gotham::state::StateData + Clone,
+> Service<Request<Body>> for MononokeHttpHandlerAsService<H, T>
 {
     type Response = Response<Body>;
     type Error = anyhow::Error;
@@ -195,6 +228,7 @@ mod test {
     use gotham_derive::StateData;
     use hyper::http::StatusCode;
     use hyper::Body;
+    use mononoke_macros::mononoke;
 
     use super::*;
 
@@ -291,7 +325,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_empty() -> Result<(), anyhow::Error> {
         let handler = MononokeHttpHandler::builder().build(TestHandler);
         let server = TestServer::new(handler)?;
@@ -300,7 +334,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_noop() -> Result<(), anyhow::Error> {
         let handler = MononokeHttpHandler::builder()
             .add(NoopMiddleware)
@@ -312,7 +346,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_chain() -> Result<(), anyhow::Error> {
         let handler = MononokeHttpHandler::builder()
             .add(MiddlewareValueMiddleware(None, 1))
@@ -324,7 +358,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_intercept_alone() -> Result<(), anyhow::Error> {
         let handler = MononokeHttpHandler::builder()
             .add(InterceptMiddleware)
@@ -335,7 +369,7 @@ mod test {
         Ok(())
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_intercept_chain() -> Result<(), anyhow::Error> {
         let handler = MononokeHttpHandler::builder()
             .add(MiddlewareValueMiddleware(None, 1))

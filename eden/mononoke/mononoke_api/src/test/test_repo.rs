@@ -7,16 +7,12 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::Error;
 use anyhow::Result;
-use blobrepo::AsBlobRepo;
 use blobstore::Loadable;
 use bookmarks::BookmarkKey;
 use bytes::Bytes;
-use cacheblob::InProcessLease;
 use chrono::FixedOffset;
 use chrono::TimeZone;
 use cross_repo_sync::update_mapping_with_version;
@@ -33,6 +29,7 @@ use live_commit_sync_config::TestLiveCommitSyncConfigSource;
 use maplit::hashmap;
 use metaconfig_types::CommitSyncConfigVersion;
 use metaconfig_types::DefaultSmallToLargeCommitSyncPathAction;
+use mononoke_macros::mononoke;
 use mononoke_types::hash::Blake3;
 use mononoke_types::hash::GitSha1;
 use mononoke_types::hash::RichGitSha1;
@@ -42,7 +39,6 @@ use mononoke_types::NonRootMPath;
 use repo_blobstore::RepoBlobstoreRef;
 use repo_identity::RepoIdentityRef;
 use slog::info;
-use synced_commit_mapping::ArcSyncedCommitMapping;
 use tests_utils::bookmark;
 use tests_utils::resolve_cs_id;
 use tests_utils::CreateCommitContext;
@@ -61,18 +57,16 @@ use crate::FileType;
 use crate::HgChangesetId;
 use crate::HgChangesetIdPrefix;
 use crate::Mononoke;
+use crate::Repo;
 use crate::TreeEntry;
 use crate::TreeId;
 use crate::XRepoLookupSyncBehaviour;
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_info_by_hash(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx, "test")
         .await?
@@ -97,14 +91,11 @@ async fn commit_info_by_hash(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_info_by_hg_hash(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx, "test")
         .await?
@@ -131,14 +122,11 @@ async fn commit_info_by_hg_hash(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_info_by_bookmark(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx, "test")
         .await?
@@ -167,14 +155,11 @@ async fn commit_info_by_bookmark(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_hg_changeset_ids(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx, "test")
         .await?
@@ -205,14 +190,11 @@ async fn commit_hg_changeset_ids(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_is_ancestor_of(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        BranchUneven::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), BranchUneven::get_repo(fb).await)]).await?;
     let repo = mononoke
         .repo(ctx, "test")
         .await?
@@ -266,12 +248,12 @@ async fn commit_is_ancestor_of(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_path_exists_and_type(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -306,12 +288,12 @@ async fn commit_path_exists_and_type(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn tree_list(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -428,12 +410,12 @@ async fn tree_list(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn file_metadata(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -521,12 +503,12 @@ async fn file_metadata(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn file_contents(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let mononoke = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -551,7 +533,7 @@ async fn file_contents(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn xrepo_commit_lookup_simple(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let (mononoke, _cfg_src) = init_x_repo(&ctx).await?;
@@ -569,7 +551,7 @@ async fn xrepo_commit_lookup_simple(fb: FacebookInit) -> Result<(), Error> {
         .build()
         .await?;
 
-    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.blob_repo(), "master").await?;
+    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.repo(), "master").await?;
 
     info!(
         ctx.logger(),
@@ -586,7 +568,7 @@ async fn xrepo_commit_lookup_simple(fb: FacebookInit) -> Result<(), Error> {
         )
         .await?
         .expect("changeset should exist");
-    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.blob_repo(), "master").await?;
+    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.repo(), "master").await?;
     assert_eq!(cs.id(), large_master_cs_id);
 
     info!(
@@ -607,7 +589,7 @@ async fn xrepo_commit_lookup_simple(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn xrepo_commit_lookup_draft(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let (mononoke, _cfg_src) = init_x_repo(&ctx).await?;
@@ -618,17 +600,17 @@ async fn xrepo_commit_lookup_draft(fb: FacebookInit) -> Result<(), Error> {
         .expect("repo exists")
         .build()
         .await?;
-    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.blob_repo(), "master").await?;
+    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.repo(), "master").await?;
     let largerepo = mononoke
         .repo(ctx.clone(), "largerepo")
         .await?
         .expect("repo exists")
         .build()
         .await?;
-    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.blob_repo(), "master").await?;
+    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.repo(), "master").await?;
 
     let new_large_draft =
-        CreateCommitContext::new(&ctx, largerepo.blob_repo(), vec![large_master_cs_id])
+        CreateCommitContext::new(&ctx, largerepo.repo(), vec![large_master_cs_id])
             .add_file("prefix/remapped", "content1")
             .add_file("not_remapped", "content2")
             .commit()
@@ -647,14 +629,14 @@ async fn xrepo_commit_lookup_draft(fb: FacebookInit) -> Result<(), Error> {
     let bcs = cs
         .unwrap()
         .id()
-        .load(&ctx, smallrepo.blob_repo().repo_blobstore())
+        .load(&ctx, smallrepo.repo().repo_blobstore())
         .await?;
     let file_changes: Vec<_> = bcs.file_changes().map(|(path, _)| path).cloned().collect();
     assert_eq!(file_changes, vec![NonRootMPath::new("remapped")?]);
 
     // Now in another direction
     let new_small_draft =
-        CreateCommitContext::new(&ctx, smallrepo.blob_repo(), vec![small_master_cs_id])
+        CreateCommitContext::new(&ctx, smallrepo.repo(), vec![small_master_cs_id])
             .add_file("remapped2", "content2")
             .commit()
             .await?;
@@ -671,7 +653,7 @@ async fn xrepo_commit_lookup_draft(fb: FacebookInit) -> Result<(), Error> {
     let bcs = cs
         .unwrap()
         .id()
-        .load(&ctx, largerepo.blob_repo().repo_blobstore())
+        .load(&ctx, largerepo.repo().repo_blobstore())
         .await?;
     let file_changes: Vec<_> = bcs.file_changes().map(|(path, _)| path).cloned().collect();
     assert_eq!(file_changes, vec![NonRootMPath::new("prefix/remapped2")?]);
@@ -679,7 +661,7 @@ async fn xrepo_commit_lookup_draft(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn xrepo_commit_lookup_public(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let (mononoke, _cfg_src) = init_x_repo(&ctx).await?;
@@ -690,23 +672,23 @@ async fn xrepo_commit_lookup_public(fb: FacebookInit) -> Result<(), Error> {
         .expect("repo exists")
         .build()
         .await?;
-    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.blob_repo(), "master").await?;
+    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.repo(), "master").await?;
     let largerepo = mononoke
         .repo(ctx.clone(), "largerepo")
         .await?
         .expect("repo exists")
         .build()
         .await?;
-    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.blob_repo(), "master").await?;
+    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.repo(), "master").await?;
 
     let new_large_public =
-        CreateCommitContext::new(&ctx, largerepo.blob_repo(), vec![large_master_cs_id])
+        CreateCommitContext::new(&ctx, largerepo.repo(), vec![large_master_cs_id])
             .add_file("prefix/remapped", "content1")
             .add_file("not_remapped", "content2")
             .commit()
             .await?;
 
-    bookmark(&ctx, largerepo.blob_repo(), "publicbook")
+    bookmark(&ctx, largerepo.repo(), "publicbook")
         .set_to(new_large_public)
         .await?;
 
@@ -723,18 +705,18 @@ async fn xrepo_commit_lookup_public(fb: FacebookInit) -> Result<(), Error> {
     let bcs = cs
         .unwrap()
         .id()
-        .load(&ctx, smallrepo.blob_repo().repo_blobstore())
+        .load(&ctx, smallrepo.repo().repo_blobstore())
         .await?;
     let file_changes: Vec<_> = bcs.file_changes().map(|(path, _)| path).cloned().collect();
     assert_eq!(file_changes, vec![NonRootMPath::new("remapped")?]);
 
     // Now in another direction - it should fail
     let new_small_public =
-        CreateCommitContext::new(&ctx, smallrepo.blob_repo(), vec![small_master_cs_id])
+        CreateCommitContext::new(&ctx, smallrepo.repo(), vec![small_master_cs_id])
             .add_file("remapped2", "content2")
             .commit()
             .await?;
-    bookmark(&ctx, smallrepo.blob_repo(), "newsmallpublicbook")
+    bookmark(&ctx, smallrepo.repo(), "newsmallpublicbook")
         .set_to(new_small_public)
         .await?;
     let res = smallrepo
@@ -751,7 +733,7 @@ async fn xrepo_commit_lookup_public(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
     let (mononoke, cfg_src) = init_x_repo(&ctx).await?;
@@ -768,16 +750,15 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
         .expect("repo exists")
         .build()
         .await?;
-    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.blob_repo(), "master").await?;
-    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.blob_repo(), "master").await?;
+    let small_master_cs_id = resolve_cs_id(&ctx, smallrepo.repo(), "master").await?;
+    let large_master_cs_id = resolve_cs_id(&ctx, largerepo.repo(), "master").await?;
 
     // Before config change
-    let first_large =
-        CreateCommitContext::new(&ctx, largerepo.blob_repo(), vec![large_master_cs_id])
-            .add_file("prefix/remapped_before", "content1")
-            .add_file("not_remapped", "content2")
-            .commit()
-            .await?;
+    let first_large = CreateCommitContext::new(&ctx, largerepo.repo(), vec![large_master_cs_id])
+        .add_file("prefix/remapped_before", "content1")
+        .add_file("not_remapped", "content2")
+        .commit()
+        .await?;
 
     let first_small = largerepo
         .xrepo_commit_lookup(
@@ -791,7 +772,7 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
     let file_changes: Vec<_> = first_small
         .unwrap()
         .id()
-        .load(&ctx, smallrepo.blob_repo().repo_blobstore())
+        .load(&ctx, smallrepo.repo().repo_blobstore())
         .await?
         .file_changes()
         .map(|(path, _)| path)
@@ -801,17 +782,14 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
     assert_eq!(file_changes, vec![NonRootMPath::new("remapped_before")?]);
 
     // Config change: new config remaps prefix2 instead of prefix
-    let large_repo_id = largerepo.blob_repo().repo_identity().id();
-    let small_repo_id = smallrepo.blob_repo().repo_identity().id();
+    let large_repo_id = largerepo.repo().repo_identity().id();
+    let small_repo_id = smallrepo.repo().repo_identity().id();
     let mut cfg = cfg_src
         .get_commit_sync_config_by_version_if_exists(
             large_repo_id,
             &CommitSyncConfigVersion("TEST_VERSION_NAME".to_string()),
         )?
         .unwrap();
-    let common_config = cfg_src
-        .get_common_config_if_exists(large_repo_id)?
-        .ok_or_else(|| anyhow!("common config doesn't exist"))?;
     cfg.small_repos
         .get_mut(&small_repo_id)
         .unwrap()
@@ -823,28 +801,22 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
     cfg_src.add_config(cfg.clone());
 
     let change_mapping_small =
-        CreateCommitContext::new(&ctx, smallrepo.blob_repo(), vec![small_master_cs_id])
+        CreateCommitContext::new(&ctx, smallrepo.repo(), vec![small_master_cs_id])
             .commit()
             .await?;
     let change_mapping_large =
-        CreateCommitContext::new(&ctx, largerepo.blob_repo(), vec![large_master_cs_id])
+        CreateCommitContext::new(&ctx, largerepo.repo(), vec![large_master_cs_id])
             .commit()
             .await?;
 
     let commit_sync_repos = CommitSyncRepos::new(
-        largerepo.inner_repo().clone(),
-        smallrepo.inner_repo().clone(),
+        largerepo.repo().clone(),
+        smallrepo.repo().clone(),
         SubmoduleDeps::ForSync(HashMap::new()),
-        &common_config,
     )?;
 
-    let commit_syncer = CommitSyncer::new(
-        &ctx,
-        largerepo.synced_commit_mapping().clone(),
-        commit_sync_repos,
-        largerepo.live_commit_sync_config(),
-        Arc::new(InProcessLease::new()),
-    );
+    let commit_syncer =
+        CommitSyncer::new(&ctx, commit_sync_repos, largerepo.live_commit_sync_config());
 
     update_mapping_with_version(
         &ctx,
@@ -855,12 +827,11 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
     .await?;
 
     // After config change
-    let second_large =
-        CreateCommitContext::new(&ctx, largerepo.blob_repo(), vec![change_mapping_large])
-            .add_file("prefix2/remapped_after", "content1")
-            .add_file("not_remapped", "content2")
-            .commit()
-            .await?;
+    let second_large = CreateCommitContext::new(&ctx, largerepo.repo(), vec![change_mapping_large])
+        .add_file("prefix2/remapped_after", "content1")
+        .add_file("not_remapped", "content2")
+        .commit()
+        .await?;
 
     let second_small = largerepo
         .xrepo_commit_lookup(
@@ -874,7 +845,7 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
     let file_changes: Vec<_> = second_small
         .unwrap()
         .id()
-        .load(&ctx, smallrepo.blob_repo().repo_blobstore())
+        .load(&ctx, smallrepo.repo().repo_blobstore())
         .await?
         .file_changes()
         .map(|(path, _)| path)
@@ -887,38 +858,25 @@ async fn xrepo_commit_lookup_config_changing_live(fb: FacebookInit) -> Result<()
 
 async fn init_x_repo(
     ctx: &CoreContext,
-) -> Result<(Mononoke, TestLiveCommitSyncConfigSource), Error> {
-    let (syncers, commit_sync_config, lv_cfg, lv_cfg_src) = init_small_large_repo(ctx).await?;
+) -> Result<(Mononoke<Repo>, TestLiveCommitSyncConfigSource), Error> {
+    let (syncers, commit_sync_config, _lv_cfg, lv_cfg_src) =
+        init_small_large_repo::<crate::Repo>(ctx).await?;
 
     let small_to_large = syncers.small_to_large;
-    let mapping: ArcSyncedCommitMapping = Arc::new(small_to_large.get_mapping().clone());
     let mononoke = Mononoke::new_test_xrepo(
-        ctx.clone(),
-        (
-            "smallrepo".to_string(),
-            small_to_large.get_small_repo().as_blob_repo().clone(),
-        ),
-        (
-            "largerepo".to_string(),
-            small_to_large.get_large_repo().as_blob_repo().clone(),
-        ),
-        commit_sync_config.clone(),
-        mapping.clone(),
-        lv_cfg,
+        small_to_large.get_small_repo().clone(),
+        small_to_large.get_large_repo().clone(),
     )
     .await?;
     lv_cfg_src.add_config(commit_sync_config);
     Ok((mononoke, lv_cfg_src))
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn resolve_changeset_id_prefix(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
-        "test".to_string(),
-        Linear::get_custom_test_repo(fb).await,
-    )])
-    .await?;
+    let mononoke =
+        Mononoke::new_test(vec![("test".to_string(), Linear::get_repo(fb).await)]).await?;
 
     let repo = mononoke
         .repo(ctx, "test")

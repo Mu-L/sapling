@@ -310,9 +310,14 @@ impl MegarepoMapping {
         connection: &Connection,
     ) -> Result<Option<MegarepoMappingEntry>, Error> {
         ctx.perf_counters().increment_counter(sql_perf_counter);
-        let mut rows =
-            GetMappingEntry::query(connection, &target.repo_id, &target.bookmark, &target_cs_id)
-                .await?;
+        let mut rows = GetMappingEntry::maybe_traced_query(
+            connection,
+            ctx.client_request_info(),
+            &target.repo_id,
+            &target.bookmark,
+            &target_cs_id,
+        )
+        .await?;
 
         if rows.len() > 1 {
             return Err(anyhow!(
@@ -371,8 +376,9 @@ impl MegarepoMapping {
         connection: &Connection,
     ) -> Result<Vec<MegarepoMappingEntry>, Error> {
         ctx.perf_counters().increment_counter(sql_perf_counter);
-        let rows = GetReverseMappingEntry::query(
+        let rows = GetReverseMappingEntry::maybe_traced_query(
             connection,
+            ctx.client_request_info(),
             &target.repo_id,
             &target.bookmark,
             &source_cs_id,
@@ -405,8 +411,9 @@ impl MegarepoMapping {
         ctx.perf_counters()
             .increment_counter(PerfCounterType::SqlWrites);
 
-        let res = InsertMapping::query(
+        let res = InsertMapping::maybe_traced_query(
             &self.connections.write_connection,
+            ctx.client_request_info(),
             &[(
                 source_name.as_str(),
                 &target.repo_id,
@@ -457,13 +464,14 @@ impl SqlConstructFromMetadataDatabaseConfig for MegarepoMapping {}
 mod test {
     use fbinit::FacebookInit;
     use maplit::btreemap;
+    use mononoke_macros::mononoke;
     use mononoke_types_mocks::changesetid::ONES_CSID;
     use mononoke_types_mocks::changesetid::THREES_CSID;
     use mononoke_types_mocks::changesetid::TWOS_CSID;
 
     use super::*;
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_simple_mapping(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let mapping = MegarepoMapping::with_sqlite_in_memory()?;
@@ -511,7 +519,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_reverse_mapping(fb: FacebookInit) -> Result<(), Error> {
         let ctx = CoreContext::test_mock(fb);
         let mapping = MegarepoMapping::with_sqlite_in_memory()?;
@@ -555,7 +563,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_serialize(_fb: FacebookInit) -> Result<(), Error> {
         let state = CommitRemappingState::new(
             btreemap! {
@@ -583,7 +591,7 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_deserialization_ignores_extra_fields(_fb: FacebookInit) -> Result<(), Error> {
         let s = r#"{
   "latest_synced_changesets": {

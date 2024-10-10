@@ -17,6 +17,11 @@ buck_command_alias(
     ],
     env = get_dev_edenfsctl_env(),
     exe = ":edenfsctl",
+    metadata = {
+        "buck.cfg_modifiers": [
+            "fbcode//eden/scm/lib/backingstore:edenfs-include-cas",
+        ],
+    },
 )
 
 buck_command_alias(
@@ -40,6 +45,11 @@ buck_command_alias(
     ],
     env = get_dev_edenfsctl_env({"EDENFS_PRIVHELPER_PATH": "$(location //eden/fs/service:edenfs_privhelper)"}),
     exe = ":edenfsctl-with-privhelper",
+    metadata = {
+        "buck.cfg_modifiers": [
+            "fbcode//eden/scm/lib/backingstore:edenfs-include-cas",
+        ],
+    },
 )
 
 python_binary(
@@ -124,7 +134,6 @@ python_library(
         "doctor/__init__.py",
         "doctor/check_filesystems.py",
         "doctor/check_hg.py",
-        "doctor/check_kerberos.py",
         "doctor/check_network.py",
         "doctor/check_os.py",
         "doctor/check_recent_writes.py",
@@ -134,7 +143,6 @@ python_library(
         "doctor/check_watchman.py",
         "doctor/facebook/__init__.py",
         "doctor/facebook/check_backing_repos.py",
-        "doctor/facebook/check_connectivity.py",
         "doctor/facebook/check_mdatp.py",
         "doctor/facebook/check_vscode_extensions.py",
         "doctor/facebook/check_x509.py",

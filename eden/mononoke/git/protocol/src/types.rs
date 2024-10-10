@@ -12,20 +12,29 @@ use std::fmt::Formatter;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::marker::Unpin;
+use std::sync::Arc;
 
+use anyhow::anyhow;
 use anyhow::Result;
+use context::CoreContext;
 use futures::stream::BoxStream;
 use git_types::DeltaObjectKind;
 use git_types::GDMV2Entry;
 use git_types::GDMV2ObjectEntry;
 use gix_hash::ObjectId;
+use metaconfig_types::GitDeltaManifestVersion;
 use mononoke_types::hash::RichGitSha1;
 use mononoke_types::path::MPath;
 use mononoke_types::ChangesetId;
 use packetline::encode::write_binary_packetline;
 use packfile::pack::DeltaForm;
 use packfile::types::PackfileItem;
+use repo_blobstore::RepoBlobstore;
+use repo_derived_data::RepoDerivedData;
+use rustc_hash::FxHashSet;
 use tokio::io::AsyncWrite;
+
+use crate::Repo;
 
 const SYMREF_HEAD: &str = "HEAD";
 // The upper bound on the RSS bytes beyond which we will pause executing futures until the process
@@ -224,6 +233,18 @@ pub enum PackfileItemInclusion {
     FetchAndStore,
 }
 
+/// Enum defining the source to be used to fetch the refs
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefsSource {
+    /// Fetch the refs from the in-memory WBC. Note due to very nature of WBC
+    /// these bookmarks can be stale
+    #[default]
+    WarmBookmarksCache,
+    /// Fetch refs from the master instance of the bookmarks DB. This will always
+    /// show the latest state of refs
+    DatabaseMaster,
+}
+
 /// The request parameters used to specify the constraints that need to be
 /// honored while generating the input PackfileItem stream
 #[derive(Debug, Clone)]
@@ -242,6 +263,8 @@ pub struct PackItemStreamRequest {
     pub packfile_item_inclusion: PackfileItemInclusion,
     /// The concurrency setting to be used while generating the packfile
     pub concurrency: PackfileConcurrency,
+    /// The source to be used to fetch the refs
+    pub refs_source: RefsSource,
 }
 
 impl PackItemStreamRequest {
@@ -261,6 +284,8 @@ impl PackItemStreamRequest {
             tag_inclusion,
             packfile_item_inclusion,
             concurrency: PackfileConcurrency::standard(),
+            // Packfile generation should always use the latest state of refs
+            refs_source: RefsSource::DatabaseMaster,
         }
     }
 
@@ -277,6 +302,8 @@ impl PackItemStreamRequest {
             tag_inclusion,
             packfile_item_inclusion,
             concurrency: PackfileConcurrency::standard(),
+            // Packfile generation should always use the latest state of refs
+            refs_source: RefsSource::DatabaseMaster,
         }
     }
 }
@@ -292,6 +319,8 @@ pub struct LsRefsRequest {
     pub requested_refs: RequestedRefs,
     /// How annotated tags should be included in the output
     pub tag_inclusion: TagInclusion,
+    /// The source to be used to fetch the refs
+    pub refs_source: RefsSource,
 }
 
 impl LsRefsRequest {
@@ -304,14 +333,17 @@ impl LsRefsRequest {
             requested_symrefs,
             requested_refs,
             tag_inclusion,
+            refs_source: RefsSource::WarmBookmarksCache,
         }
     }
 
-    pub fn advertisement() -> Self {
+    pub fn write_advertisement() -> Self {
         Self {
             requested_symrefs: RequestedSymrefs::ExcludeAll,
             requested_refs: RequestedRefs::all(),
             tag_inclusion: TagInclusion::Peeled,
+            // For write advertisement, we need to use the latest state of refs
+            refs_source: RefsSource::DatabaseMaster,
         }
     }
 }
@@ -425,7 +457,9 @@ impl LsRefsResponse {
         if let Some(target) = self.included_refs.get(SYMREF_HEAD) {
             write_binary_packetline(ref_line(SYMREF_HEAD, target).as_bytes(), writer).await?;
         }
-        for (name, target) in &self.included_refs {
+        let mut sorted_refs = self.included_refs.iter().collect::<Vec<_>>();
+        sorted_refs.sort_by(|(ref_a_name, _), (ref_b_name, _)| ref_a_name.cmp(ref_b_name));
+        for (name, target) in sorted_refs {
             if name.as_str() != SYMREF_HEAD {
                 write_binary_packetline(ref_line(name, target).as_bytes(), writer).await?;
             }
@@ -585,3 +619,73 @@ impl PartialEq for FullObjectEntry {
 }
 
 impl Eq for FullObjectEntry {}
+
+/// Set of parameters that are needed by the generators used for constructing
+/// response for fetch request
+#[derive(Clone)]
+pub(crate) struct FetchContainer {
+    pub(crate) ctx: Arc<CoreContext>,
+    pub(crate) blobstore: Arc<RepoBlobstore>,
+    pub(crate) derived_data: Arc<RepoDerivedData>,
+    pub(crate) git_delta_manifest_version: GitDeltaManifestVersion,
+    pub(crate) delta_inclusion: DeltaInclusion,
+    pub(crate) filter: Arc<Option<FetchFilter>>,
+    pub(crate) concurrency: PackfileConcurrency,
+    pub(crate) packfile_item_inclusion: PackfileItemInclusion,
+    pub(crate) shallow_info: Arc<Option<ShallowInfoResponse>>,
+}
+
+impl FetchContainer {
+    pub(crate) fn new(
+        ctx: Arc<CoreContext>,
+        repo: &impl Repo,
+        delta_inclusion: DeltaInclusion,
+        filter: Arc<Option<FetchFilter>>,
+        concurrency: PackfileConcurrency,
+        packfile_item_inclusion: PackfileItemInclusion,
+        shallow_info: Arc<Option<ShallowInfoResponse>>,
+    ) -> Result<Self> {
+        let git_delta_manifest_version = repo
+            .repo_config()
+            .derived_data_config
+            .get_active_config()
+            .ok_or_else(|| anyhow!("No enabled derived data types config"))?
+            .git_delta_manifest_version;
+        Ok(Self {
+            ctx,
+            git_delta_manifest_version,
+            delta_inclusion,
+            filter,
+            concurrency,
+            packfile_item_inclusion,
+            shallow_info,
+            blobstore: repo.repo_blobstore_arc(),
+            derived_data: repo.repo_derived_data_arc(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CommitTagMappings {
+    pub(crate) tagged_commits: Vec<ChangesetId>,
+    pub(crate) tag_names: Arc<FxHashSet<String>>,
+    pub(crate) non_tag_oids: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TranslatedShas {
+    pub(crate) bonsais: Vec<ChangesetId>,
+    pub(crate) tag_names: Arc<FxHashSet<String>>,
+    pub(crate) non_tag_non_commit_oids: Vec<ObjectId>,
+}
+
+impl TranslatedShas {
+    pub(crate) fn new(mut commit_bonsais: Vec<ChangesetId>, mappings: CommitTagMappings) -> Self {
+        commit_bonsais.extend(mappings.tagged_commits);
+        Self {
+            bonsais: commit_bonsais,
+            tag_names: mappings.tag_names,
+            non_tag_non_commit_oids: mappings.non_tag_oids,
+        }
+    }
+}

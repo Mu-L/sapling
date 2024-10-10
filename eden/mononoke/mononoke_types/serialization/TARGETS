@@ -1,7 +1,6 @@
 load("@fbcode_macros//build_defs:thrift_library.bzl", "thrift_library")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 thrift_library(
     name = "mononoke_types_serialization",
@@ -22,11 +21,14 @@ thrift_library(
     # thrift services -- do not allow other code to use them, except for other private Thrift code.
     # THIS IS NOT A PUBLIC SOURCE CONTROL API AND THERE IS NO GUARANTEE OF BACKWARDS COMPATIBLITY.
     visibility = [
+        "//eden/mononoke/async_requests:",
+        "//eden/mononoke/async_requests/if:",
         "//eden/mononoke/bonsai_git_mapping/if:",
         "//eden/mononoke/bonsai_globalrev_mapping/if:",
         "//eden/mononoke/bonsai_hg_mapping/if:",
         "//eden/mononoke/bonsai_svnrev_mapping/if:",
         "//eden/mononoke/changesets/if:",
+        "//eden/mononoke/commit_rewriting/synced_commit_mapping/if:",
         "//eden/mononoke/derived_data:changeset_info",
         "//eden/mononoke/derived_data:changeset_info-unittest",
         "//eden/mononoke/derived_data/remote/if:",

@@ -10,15 +10,13 @@ import errno
 import os
 import struct
 import typing
-from collections import defaultdict
 from typing import Dict, IO, Mapping
 
-from sapling import error, filelog, pycompat, revlog, util
+from sapling import error, filelog, pycompat, util
 from sapling.i18n import _
 from sapling.node import hex
 from sapling.pycompat import decodeutf8, encodeutf8
 
-from ..lfs import pointer
 from . import constants
 
 
@@ -107,22 +105,17 @@ def createrevlogtext(text, copyfrom=None, copyrev=None):
 
 def parsemeta(text, flags=0):
     """parse mercurial filelog metadata"""
-    if flags == revlog.REVIDX_EXTSTORED:
-        # LFS stores copy metadata differently
-        p = pointer.deserialize(text)
-        meta = p.hgmeta()
-    else:
-        meta, size = filelog.parsemeta(text)
-        if text.startswith(b"\1\n"):
-            s = text.index(b"\1\n", 2)
-            text = text[s + 2 :]
+    meta, size = filelog.parsemeta(text)
+    if text.startswith(b"\1\n"):
+        s = text.index(b"\1\n", 2)
+        text = text[s + 2 :]
     return meta or {}, text
 
 
 def prefixkeys(dict, prefix):
     """Returns ``dict`` with ``prefix`` prepended to all its keys."""
     result = {}
-    for k, v in pycompat.iteritems(dict):
+    for k, v in dict.items():
         result[prefix + k] = v
     return result
 
@@ -165,7 +158,7 @@ def _buildpackmeta(metadict: "Mapping[str, bytes]") -> bytes:
     length limit is exceeded
     """
     metabuf = b""
-    for k, v in sorted(pycompat.iteritems((metadict or {}))):
+    for k, v in sorted((metadict or {}).items()):
         if len(k) != 1:
             raise error.ProgrammingError("packmeta: illegal key: %s" % k)
         if len(v) > 0xFFFE:
@@ -190,7 +183,7 @@ def buildpackmeta(metadict: "Mapping[str, int]") -> bytes:
     and METAKEYFLAG will be dropped if its value is 0.
     """
     newmeta = {}
-    for k, v in pycompat.iteritems((metadict or {})):
+    for k, v in (metadict or {}).items():
         expectedtype = _metaitemtypes.get(k, (bytes,))
         if not isinstance(v, expectedtype):
             raise error.ProgrammingError("packmeta: wrong type of key %s" % k)
@@ -211,7 +204,7 @@ def parsepackmeta(metabuf: bytes) -> "Dict[str, int]":
     integers.
     """
     metadict = _parsepackmeta(metabuf)
-    for k, v in pycompat.iteritems(metadict):
+    for k, v in metadict.items():
         if k in _metaitemtypes and int in _metaitemtypes[k]:
             metadict[k] = bin2int(v)
     return typing.cast("Dict[str, int]", metadict)

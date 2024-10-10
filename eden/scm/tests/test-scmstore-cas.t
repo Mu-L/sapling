@@ -87,7 +87,7 @@ Empty shared caches.
 
 scmstore can fetch trees from CAS:
 
-First fetch root tree to trigger fetching "dir" aux data":
+First fetch root tree to trigger fetching "dir" aux data:
   $ hg debugscmstore -r $A --mode tree "" >/dev/null
 
 Then fetch "dir" from CAS:
@@ -135,3 +135,25 @@ Then fetch "dir" from CAS:
           aux_data: None,
       },
   )
+
+Empty the caches
+  $ setconfig remotefilelog.cachepath=$TESTTMP/cache4
+
+Make sure prefetch uses CAS:
+  $ LOG=cas=debug,eagerepo=debug hg prefetch -r $A .
+  DEBUG cas: creating eager remote client
+  DEBUG cas: created client
+  DEBUG cas: EagerRepoStore fetching 1 tree(s)
+  DEBUG cas: EagerRepoStore fetching 1 tree(s)
+  DEBUG cas: EagerRepoStore fetching 2 file(s)
+
+Don't rewrite aux data to cache:
+  $ LOG=revisionstore=trace hg prefetch -r $A . 2>&1 | grep "writing to"
+  [1]
+
+
+FIXME - we try fetching from local cache unnecessarily
+  $ hg debugscmstore -r $A --mode tree "dir" --config devel.print-metrics=scmstore.tree.fetch.indexedlog.cache.keys >/dev/null
+  scmstore.tree.fetch.indexedlog.cache.keys: 1
+  $ hg debugscmstore -r $A --mode file "dir/file" --config devel.print-metrics=scmstore.file.fetch.indexedlog.cache.keys >/dev/null
+  scmstore.file.fetch.indexedlog.cache.keys: 1

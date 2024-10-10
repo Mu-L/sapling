@@ -7,7 +7,7 @@
   $ . "${TEST_FIXTURES}/library.sh"
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 BLOB_TYPE="blob_sqlite" default_setup
+  $ BLOB_TYPE="blob_sqlite" default_setup
   hg repo
   o  C [draft;rev=2;26805aba1e60]
   │
@@ -33,7 +33,7 @@ Push single empty commit
   
   
   
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev 4d5799789652 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 1 commit for upload
   edenapi: queue 0 files for upload
@@ -49,7 +49,7 @@ Push empty and non-empty commit in a stack
   $ echo 2 > 2 && hg add 2 && hg ci -m 2
   $ hg revert -r .^ 2
   $ hg commit --amend
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev 22c3c2036561 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 2 commits for upload
   edenapi: queue 1 file for upload
@@ -62,14 +62,14 @@ Push empty and non-empty commit in a stack
   updated remote bookmark master_bookmark to e16fec5713c0
 
 Push stack of empty commits
-  $ hgmn up -q tip
+  $ hg up -q tip
   $ echo 1 > 11 && hg add 11 && hg ci -m emptystack1
   $ hg revert -r .^ 11
   $ hg commit --amend
   $ echo 1 > 111 && hg add 111 && hg ci -m emptystack2
   $ hg revert -r .^ 111
   $ hg commit --amend
-  $ sl push -r . --to master_bookmark
+  $ hg push -r . --to master_bookmark
   pushing rev aeb4783bffb3 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark master_bookmark
   edenapi: queue 2 commits for upload
   edenapi: queue 0 files for upload

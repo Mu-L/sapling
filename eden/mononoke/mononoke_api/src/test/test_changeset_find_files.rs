@@ -18,18 +18,20 @@ use justknobs::test_helpers::with_just_knobs_async;
 use justknobs::test_helpers::JustKnobsInMemory;
 use justknobs::test_helpers::KnobVal;
 use maplit::hashmap;
+use mononoke_macros::mononoke;
 use mononoke_types::path::MPath;
 
 use crate::ChangesetFileOrdering;
 use crate::ChangesetId;
 use crate::CoreContext;
 use crate::Mononoke;
+use crate::Repo;
 
 async fn commit_find_files_impl(fb: FacebookInit) -> Result<(), Error> {
     let ctx = CoreContext::test_mock(fb);
-    let mononoke = Mononoke::new_test(vec![(
+    let mononoke: Mononoke<Repo> = Mononoke::new_test(vec![(
         "test".to_string(),
-        ManyFilesDirs::get_custom_test_repo(fb).await,
+        ManyFilesDirs::get_repo(fb).await,
     )])
     .await?;
     let repo = mononoke
@@ -538,7 +540,7 @@ async fn commit_find_files_impl(fb: FacebookInit) -> Result<(), Error> {
     Ok(())
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_find_files_with_bssm_v3(fb: FacebookInit) {
     let justknobs = JustKnobsInMemory::new(hashmap! {
         "scm/mononoke:enable_bssm_v3".to_string() => KnobVal::Bool(true),
@@ -550,7 +552,7 @@ async fn commit_find_files_with_bssm_v3(fb: FacebookInit) {
         .unwrap();
 }
 
-#[fbinit::test]
+#[mononoke::fbinit_test]
 async fn commit_find_files_without_bssm(fb: FacebookInit) {
     let justknobs = JustKnobsInMemory::new(hashmap! {
         "scm/mononoke:enable_bssm_v3".to_string() => KnobVal::Bool(false),

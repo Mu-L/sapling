@@ -5,38 +5,49 @@
  * GNU General Public License version 2.
  */
 
-use std::collections::HashMap;
+use std::str::FromStr;
 
+use anyhow::ensure;
 use clientinfo::ClientRequestInfo;
+use commit_cloud_types::WorkspaceRemoteBookmark;
 use mercurial_types::HgChangesetId;
-use serde::Deserialize;
-use serde::Serialize;
 use sql::Transaction;
 
-use crate::references::RemoteBookmark;
 use crate::sql::ops::Delete;
 use crate::sql::ops::Insert;
 use crate::sql::ops::SqlCommitCloud;
 use crate::sql::remote_bookmarks_ops::DeleteArgs;
 use crate::CommitCloudContext;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WorkspaceRemoteBookmark {
-    pub name: String,
-    pub commit: HgChangesetId,
-    pub remote: String,
+// This must stay as-is to work with serde
+#[allow(clippy::ptr_arg)]
+pub fn rbs_from_list(bookmarks: &Vec<Vec<String>>) -> anyhow::Result<Vec<WorkspaceRemoteBookmark>> {
+    let bookmarks: anyhow::Result<Vec<WorkspaceRemoteBookmark>> = bookmarks
+        .iter()
+        .map(|bookmark| {
+            ensure!(
+                bookmark.len() == 3,
+                "'commit cloud' failed: Invalid remote bookmark format for {}",
+                bookmark.join(" ")
+            );
+            HgChangesetId::from_str(&bookmark[2]).and_then(|commit_id| {
+                WorkspaceRemoteBookmark::new(bookmark[0].clone(), bookmark[1].clone(), commit_id)
+            })
+        })
+        .collect();
+    bookmarks
 }
 
-pub type RemoteBookmarksMap = HashMap<HgChangesetId, Vec<RemoteBookmark>>;
-
-impl From<RemoteBookmark> for WorkspaceRemoteBookmark {
-    fn from(bookmark: RemoteBookmark) -> Self {
-        Self {
-            name: bookmark.name,
-            commit: bookmark.node.unwrap_or_default().into(),
-            remote: bookmark.remote,
-        }
-    }
+pub fn rbs_to_list(lbs: Vec<WorkspaceRemoteBookmark>) -> Vec<Vec<String>> {
+    lbs.into_iter()
+        .map(|lb| {
+            vec![
+                lb.remote().clone(),
+                lb.name().clone(),
+                lb.commit().to_string(),
+            ]
+        })
+        .collect()
 }
 
 pub async fn update_remote_bookmarks(
@@ -44,8 +55,8 @@ pub async fn update_remote_bookmarks(
     mut txn: Transaction,
     cri: Option<&ClientRequestInfo>,
     ctx: &CommitCloudContext,
-    updated_remote_bookmarks: Option<Vec<RemoteBookmark>>,
-    removed_remote_bookmarks: Option<Vec<RemoteBookmark>>,
+    updated_remote_bookmarks: Option<Vec<WorkspaceRemoteBookmark>>,
+    removed_remote_bookmarks: Option<Vec<WorkspaceRemoteBookmark>>,
 ) -> anyhow::Result<Transaction> {
     if removed_remote_bookmarks
         .clone()
@@ -78,11 +89,7 @@ pub async fn update_remote_bookmarks(
             cri,
             ctx.reponame.clone(),
             ctx.workspace.clone(),
-            WorkspaceRemoteBookmark {
-                name: book.name,
-                commit: book.node.unwrap_or_default().into(),
-                remote: book.remote,
-            },
+            book,
         )
         .await?;
     }

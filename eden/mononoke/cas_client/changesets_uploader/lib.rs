@@ -27,10 +27,9 @@ use futures::stream::TryStreamExt;
 use futures::try_join;
 use futures::FutureExt;
 use futures_watchdog::WatchdogExt;
-use manifest::find_intersection_of_diffs;
-use manifest::AsyncManifest;
 use manifest::Diff;
 use manifest::Entry;
+use manifest::Manifest;
 use manifest::ManifestOps;
 use mercurial_types::HgAugmentedManifestId;
 use mercurial_types::HgChangesetId;
@@ -216,31 +215,17 @@ where
             .await
             .map_err(|e| CasChangesetUploaderErrorKind::Error(e.into()))?;
 
+        let hg_root_manifest_id = HgAugmentedManifestId::new(hg_cs.manifestid().into_nodehash());
+
         // Diff hg manifest with parents
         let diff_stream = match (
             hg_cs.p1().map(HgChangesetId::new),
             hg_cs.p2().map(HgChangesetId::new),
         ) {
-            (Some(p1), Some(p2)) => {
-                let p1_hg_cs = p1.load(ctx, &blobstore);
-                let p2_hg_cs = p2.load(ctx, &blobstore);
-                let hg_cs = hg_cs_id.load(ctx, &blobstore);
-                let (p1_hg_cs, p2_hg_cs, hg_cs) = future::try_join3(p1_hg_cs, p2_hg_cs, hg_cs)
-                    .await
-                    .map_err(|e| CasChangesetUploaderErrorKind::Error(e.into()))?;
-
-                find_intersection_of_diffs(
-                    ctx.clone(),
-                    blobstore,
-                    hg_cs.manifestid(),
-                    vec![p1_hg_cs.manifestid(), p2_hg_cs.manifestid()],
-                )
-                .map_ok(move |(_, entry)| entry)
-                .map_err(CasChangesetUploaderErrorKind::DiffChangesetFailed)
-                .boxed()
-            }
-
-            (Some(p), None) | (None, Some(p)) => {
+            // If there is a merge commit, there is no guarantee that the p2 parent is uploaded to CAS
+            // (since the sync follows p1 chain)
+            // Therefore, we need to diff fully with the p1 parent only.
+            (Some(p), None) | (None, Some(p)) | (Some(p), Some(_)) => {
                 let blobstore = repo.repo_blobstore();
                 let parent_hg_cs = p.load(ctx, &blobstore);
                 let hg_cs = hg_cs_id.load(ctx, &blobstore);
@@ -340,12 +325,15 @@ where
                     });
             }
             UploadPolicy::All => {
+                // Ensure the root manifest is uploaded last, so that we can use it to derive if entire changeset is already present in CAS
                 let (outcomes_trees, outcomes_files) = try_join!(
                     self.client
                         .ensure_upload_augmented_trees(
                             ctx,
                             &blobstore,
-                            manifests_list,
+                            manifests_list
+                                .into_iter()
+                                .filter(|(treeid, _)| *treeid != hg_root_manifest_id),
                             trees_lookup
                         )
                         .watched(ctx.logger()),
@@ -361,6 +349,20 @@ where
                 outcomes_files.into_iter().for_each(|(_, outcome)| {
                     upload_counter.tick(ctx, outcome);
                 });
+
+                // Upload the root manifest last
+                let outcome_root = self
+                    .client
+                    .upload_augmented_tree(
+                        ctx,
+                        &blobstore,
+                        &hg_root_manifest_id,
+                        None,
+                        trees_lookup,
+                    )
+                    .watched(ctx.logger())
+                    .await?;
+                upload_counter.tick(ctx, outcome_root);
             }
         }
 
@@ -399,7 +401,7 @@ where
             HgAugmentedManifestId::new(hg_manifest_id.into_nodehash());
 
         // We will traverse over Mercurial manifests for now, as augmented manifests haven't been
-        // derived yet and don't yet implement AsyncManifest.  This will be trivial to swap in later.
+        // derived yet and don't yet implement Manifest.  This will be trivial to swap in later.
         let max_concurrent_manifests = if matches!(upload_policy, UploadPolicy::TreesOnly) {
             MAX_CONCURRENT_MANIFESTS_TREES_ONLY
         } else {
@@ -572,5 +574,27 @@ where
         );
         STATS::uploaded_changesets_recursive.add_value(1);
         Ok(final_upload_counter)
+    }
+
+    /// Check if a given Changeset is already uploaded to a CAS backend by validating the presence of the hg root augmented manifest.
+    /// This is not full scan check but the best approximation we can do.
+    /// The lookup shouldn't be relied on if a changeset was uploaded with TreeOnly policy, the mode that isn't used in production.
+    pub async fn is_changeset_uploaded<'a>(
+        &self,
+        ctx: &'a CoreContext,
+        repo: &impl Repo,
+        changeset_id: &ChangesetId,
+    ) -> Result<bool, CasChangesetUploaderErrorKind> {
+        let (_, hg_root_manifest_id) = self
+            .get_manifest_id_from_changeset(ctx, repo, changeset_id)
+            .await?;
+
+        let hg_root_augmented_manifest_id: HgAugmentedManifestId =
+            HgAugmentedManifestId::new(hg_root_manifest_id.into_nodehash());
+
+        self.client
+            .is_augmented_tree_uploaded(ctx, repo.repo_blobstore(), &hg_root_augmented_manifest_id)
+            .await
+            .map_err(CasChangesetUploaderErrorKind::Error)
     }
 }

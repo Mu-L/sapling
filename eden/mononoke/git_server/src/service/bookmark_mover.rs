@@ -25,6 +25,7 @@ use mononoke_api::repo::RepoContextBuilder;
 use mononoke_api::BookmarkKey;
 use mononoke_api::MononokeError;
 use mononoke_types::ChangesetId;
+use protocol::bookmarks_provider::wait_for_bookmark_move;
 use repo_authorization::AuthorizationContext;
 
 use super::GitMappingsStore;
@@ -32,21 +33,18 @@ use super::GitObjectStore;
 use crate::command::RefUpdate;
 use crate::model::RepositoryRequestContext;
 use crate::service::uploader::peel_tag_target;
+use crate::util::mononoke_source_of_truth;
 
-const DEFAULT_ADDITIONAL_CHANGESETS_LIMIT: usize = 200_000;
+const HOOK_WIKI_LINK: &str = "https://fburl.com/wiki/mb4wtk1j";
 
 /// Struct representing a ref update (create, move, delete) operation
 pub struct RefUpdateOperation {
     ref_update: RefUpdate,
-    affected_changesets: usize,
 }
 
 impl RefUpdateOperation {
-    pub fn new(ref_update: RefUpdate, affected_changesets: usize) -> Self {
-        Self {
-            ref_update,
-            affected_changesets,
-        }
+    pub fn new(ref_update: RefUpdate) -> Self {
+        Self { ref_update }
     }
 }
 
@@ -75,9 +73,6 @@ pub async fn set_refs(
         request_context.repo.clone(),
         request_context.mononoke_repos.clone(),
     );
-    let affected_changesets = ref_update_ops
-        .first()
-        .map(|op| std::cmp::max(op.affected_changesets, DEFAULT_ADDITIONAL_CHANGESETS_LIMIT));
     // Create the repo context which is the pre-requisite for moving bookmarks
     let repo_context = RepoContextBuilder::new(ctx.clone(), repo.clone(), repos)
         .await
@@ -126,6 +121,12 @@ pub async fn set_refs(
             }
         })
         .collect::<Vec<_>>();
+    // Do one final check of SoT to ensure that we don't update the bookmark if the repo is locked or sourced in Metagit
+    if !mononoke_source_of_truth(&ctx, repo.clone()).await? {
+        return Err(anyhow::anyhow!(
+            "Mononoke is not the source of truth for this repo"
+        ));
+    }
     // Flag for client side expectation of allow non fast forward updates. Git clients by default
     // prevent users from pushing non-ffwd updates. If the request reaches the server, then that
     // means the client has explicitly requested for a non-ffwd update and the final result will be
@@ -138,7 +139,6 @@ pub async fn set_refs(
         bookmark_operations,
         Some(request_context.pushvars.as_ref()),
         allow_non_fast_forward,
-        affected_changesets,
         BookmarkOperationErrorReporting::Plain,
     )
     .await;
@@ -146,8 +146,7 @@ pub async fn set_refs(
         return Err(update_error(&mappings_store, e).await);
     }
     if !tags_to_delete.is_empty() {
-        repo.inner_repo()
-            .bonsai_tag_mapping()
+        repo.bonsai_tag_mapping()
             .delete_mappings_by_name(tags_to_delete)
             .await?;
     }
@@ -192,10 +191,12 @@ async fn set_ref_inner(
     )?;
     let bookmark_operation =
         BookmarkOperation::new(bookmark_key.clone(), old_changeset, new_changeset)?;
-    let affected_changesets = Some(std::cmp::max(
-        ref_update_op.affected_changesets,
-        DEFAULT_ADDITIONAL_CHANGESETS_LIMIT,
-    ));
+    // Do one final check of SoT to ensure that we don't update the bookmark if the repo is locked or sourced in Metagit
+    if !mononoke_source_of_truth(&ctx, repo.clone()).await? {
+        return Err(anyhow::anyhow!(
+            "Mononoke is not the source of truth for this repo"
+        ));
+    }
     // Flag for client side expectation of allow non fast forward updates. Git clients by default
     // prevent users from pushing non-ffwd updates. If the request reaches the server, then that
     // means the client has explicitly requested for a non-ffwd update and the final result will be
@@ -208,7 +209,6 @@ async fn set_ref_inner(
         &bookmark_operation,
         Some(request_context.pushvars.as_ref()),
         allow_non_fast_forward,
-        affected_changesets,
         BookmarkOperationErrorReporting::Plain,
     )
     .await;
@@ -218,10 +218,13 @@ async fn set_ref_inner(
     // If the bookmark is a tag and the operation is a delete, then we need to remove the tag entry
     // from bonsai_tag_mapping table in addition to removing the bookmark entry from bookmarks table
     if bookmark_key.is_tag() && bookmark_operation.is_delete() {
-        repo.inner_repo()
-            .bonsai_tag_mapping()
+        repo.bonsai_tag_mapping()
             .delete_mappings_by_name(vec![bookmark_key.name().to_string()])
             .await?;
+    }
+    // If requested, let's wait for the bookmark move to get reflected in WBC
+    if request_context.pushvars.wait_for_wbc_update() {
+        wait_for_bookmark_move(&ctx, &repo, &bookmark_key, old_changeset).await?;
     }
     Ok(())
 }
@@ -265,7 +268,11 @@ async fn update_error(mappings_store: &GitMappingsStore, err: MononokeError) -> 
                     hook_rejection.hook_name, git_sha, hook_rejection.reason.long_description
                 ));
             }
-            anyhow::anyhow!("hooks failed:\n{}", hook_msgs.join("\n"))
+            anyhow::anyhow!(
+                "hooks failed:\n{}\n\nFor more information about hooks and bypassing, refer {}",
+                hook_msgs.join("\n"),
+                HOOK_WIKI_LINK
+            )
         }
         e => e.into(),
     }

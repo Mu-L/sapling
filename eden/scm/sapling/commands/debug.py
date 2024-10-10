@@ -82,7 +82,6 @@ from .. import (
 from ..i18n import _, _n, _x
 from ..node import bin, hex, nullhex, nullid, nullrev, short
 from ..pycompat import decodeutf8, range
-
 from . import migratesymlinks
 from .cmdtable import command
 
@@ -152,10 +151,10 @@ def _flattenresponse(response: Sized, sort: bool = False):
         ("f", "input-file", [], _("input file in Python literal format")),
         ("", "sort", False, _("sort list to stabilize output")),
     ],
-    _(""),
+    _("[SERVER]"),
     optionalrepo=True,
 )
-def debugapi(ui, repo=None, **opts) -> None:
+def debugapi(ui, repo, serverpath=None, **opts) -> None:
     """send an SaplingRemoteAPI request and print its output
 
     The endpoint name is the method name defined on the edenapi object.
@@ -176,7 +175,11 @@ def debugapi(ui, repo=None, **opts) -> None:
     # [str] -> [obj]
     params = [ast.literal_eval(s) for s in inputs]
 
-    client = repo and repo.edenapi or edenapi.getclient(ui)
+    if repo and not serverpath:
+        client = repo.edenapi
+    else:
+        client = edenapi.getclient(ui, serverpath)
+
     func = getattr(client, endpoint)
     try:
         response = func(*params)
@@ -699,7 +702,7 @@ def debugcapabilities(ui, path, **opts) -> None:
     b2caps = bundle2.bundle2caps(peer)
     if b2caps:
         ui.write(_x("Bundle2 capabilities:\n"))
-        for key, values in sorted(pycompat.iteritems(b2caps)):
+        for key, values in sorted(b2caps.items()):
             ui.write(_x("  %s\n") % key)
             for v in values:
                 ui.write(_x("    %s\n") % v)
@@ -1169,7 +1172,7 @@ def debugstate(ui, repo, **opts) -> Optional[int]:
     # pyre-fixme[6]: For 2nd param expected `None` but got
     #  `Optional[typing.Callable[[Named(x, typing.Any)], Tuple[typing.Any,
     #  typing.Any]]]`.
-    for path, ent in sorted(pycompat.iteritems(dmap), key=keyfunc):
+    for path, ent in sorted(dmap.items(), key=keyfunc):
         if ent[3] == -1:
             timestr = "unset               "
         elif nodates:
@@ -1280,14 +1283,14 @@ def debugdiffdirs(ui, repo, *pats, **opts) -> None:
 )
 def debugdiscovery(ui, repo, remoteurl: str = "default", **opts) -> None:
     """runs the changeset discovery protocol in isolation"""
-    remoteurl, branches = hg.parseurl(ui.expandpath(remoteurl))
+    remoteurl = hg.parseurl(ui.expandpath(remoteurl))
     remote = hg.peer(repo, opts, remoteurl)
     ui.status(_("comparing with %s\n") % util.hidepassword(remoteurl))
 
     # make sure tests are repeatable
     random.seed(12323)
 
-    def doit(pushedrevs, remoteheads, remote=remote):
+    def doit(pushedrevs, remote=remote):
         nodes = None
         if pushedrevs:
             revs = scmutil.revrange(repo, pushedrevs)
@@ -1304,9 +1307,8 @@ def debugdiscovery(ui, repo, remoteurl: str = "default", **opts) -> None:
         elif rheads <= common:
             ui.write(_x("remote is subset\n"))
 
-    remoterevs, _checkout = hg.addbranchrevs(repo, remote, branches, revs=None)
     localrevs = opts["rev"]
-    doit(localrevs, remoterevs)
+    doit(localrevs)
 
 
 @command(
@@ -2298,11 +2300,11 @@ def debugnamecomplete(ui, repo, *args, **opts) -> None:
     names = set()
     # since we previously only listed open branches, we will handle that
     # specially (after this for loop)
-    for name, ns in pycompat.iteritems(repo.names):
+    for name, ns in repo.names.items():
         # arc uses debugnamecomplete for doing some really wacky things, but
         # luckily it does so by setting HGPLAIN=1, hence the ui.plain()
         # check below
-        if name != "branches" and (ui.plain() or name != "remotebookmarks"):
+        if ui.plain() or name != "remotebookmarks":
             names.update(ns.listnames(repo))
 
     age = ui.configint("zsh", "completion-age")
@@ -2433,9 +2435,6 @@ def debugpreviewbindag(ui, repo, path):
             return False
 
         def obsolete(self):
-            return False
-
-        def closesbranch(self):
             return False
 
     opts = {"template": "{rev}", "graph": True}
@@ -2724,7 +2723,7 @@ def debugpushkey(ui, repopath, namespace, *keyinfo, **opts) -> Optional[bool]:
         ui.status(str(r) + "\n")
         return not r
     else:
-        for k, v in sorted(pycompat.iteritems(target.listkeys(namespace))):
+        for k, v in sorted(target.listkeys(namespace).items()):
             ui.write("%s\t%s\n" % (util.escapestr(k), util.escapestr(v)))
 
 
@@ -2831,12 +2830,6 @@ def debugrebuilddirstate(ui, repo, rev, **opts) -> None:
             changedfiles = manifestonly | dsnotadded
 
         dirstate.rebuild(ctx.node(), ctx.manifest(), changedfiles)
-
-
-@command("debugrebuildfncache", [], "")
-def debugrebuildfncache(ui, repo: Sized) -> None:
-    """rebuild the fncache file"""
-    repair.rebuildfncache(ui, repo)
 
 
 @command(
@@ -3102,7 +3095,7 @@ def debugssl(ui, repo, source=None, **opts) -> None:
             )
         source = "default"
 
-    source, branches = hg.parseurl(ui.expandpath(source))
+    source = hg.parseurl(ui.expandpath(source))
     url = util.url(source)
     addr = None
 
@@ -3315,7 +3308,7 @@ def debugwalk(ui, repo, *pats, **opts) -> None:
 def debugwireargs(ui, repopath, *vals, **opts) -> None:
     repo = hg.peer(ui, opts, repopath)
     args = {}
-    for k, v in pycompat.iteritems(opts):
+    for k, v in opts.items():
         if v:
             args[k] = v
     args = args
@@ -3336,7 +3329,7 @@ def debugwireargs(ui, repopath, *vals, **opts) -> None:
         ("", "write-env", "", _("write NAME=HEX per line to a given file (ADVANCED)")),
     ],
 )
-def debugdrawdag(ui, repo, **opts) -> None:
+def debugdrawdag(ui, repo, *args, **opts) -> None:
     r"""read an ASCII graph from stdin and create changesets
 
     Create commits to match the graph described using the drawdag language.
@@ -3345,7 +3338,11 @@ def debugdrawdag(ui, repo, **opts) -> None:
     This command can execute Python logic from input. Therefore, never feed
     it with untrusted input!
     """
-    text = decodeutf8(ui.fin.read())
+    if args:
+        data = b"".join(open(path, "rb").read() for path in args)
+    else:
+        data = ui.fin.read()
+    text = decodeutf8(data)
     return drawdag.drawdag(repo, text, **opts)
 
 
@@ -3530,7 +3527,7 @@ def debugexistingcasecollisions(ui, repo, *basepaths, **opts) -> None:
             dirlistmap = {}
             for entry in dirlist:
                 dirlistmap.setdefault(entry.lower(), []).append(entry)
-            for _lowername, entries in sorted(pycompat.iteritems(dirlistmap)):
+            for _lowername, entries in sorted(dirlistmap.items()):
                 if len(entries) > 1:
                     ui.write(
                         _("%s contains collisions: %s\n")
@@ -3606,7 +3603,7 @@ def debugreadauthforuri(ui, _repo, uri, user=None) -> None:
     auth = httpconnection.readauthforuri(ui, uri, user)
     if auth is not None:
         auth, items = auth
-        for k, v in sorted(pycompat.iteritems(items)):
+        for k, v in sorted(items.items()):
             ui.write(_x("auth.%s.%s=%s\n") % (auth, k, v))
     else:
         ui.warn(_("no match found\n"))
@@ -3667,7 +3664,6 @@ def debugruntest(ui, *paths, **opts) -> int:
     current configuration.
     """
     import textwrap
-
     from multiprocessing import util as mputil
     from unittest import SkipTest
 
@@ -3981,7 +3977,6 @@ def debugcommitmessage(ui, repo, *args):
     ctx = context.workingcommitctx(repo, status, text, user, date, extra)
 
     editform = form or "commit.normal.normal"
-    extramsg = _("Leave message empty to abort commit.")
 
     forms = [e for e in editform.split(".") if e]
     forms.insert(0, "changeset")
@@ -3989,11 +3984,11 @@ def debugcommitmessage(ui, repo, *args):
         ref = ".".join(forms)
         tmpl = repo.ui.config("committemplate", ref)
         if tmpl:
-            committext = cmdutil.buildcommittemplate(repo, ctx, extramsg, ref)
+            committext = cmdutil.buildcommittemplate(repo, ctx, ref)
             break
         forms.pop()
     else:
-        committext = cmdutil.buildcommittext(repo, ctx, extramsg)
+        committext = cmdutil.buildcommittext(repo, ctx)
 
     ui.status(committext)
 

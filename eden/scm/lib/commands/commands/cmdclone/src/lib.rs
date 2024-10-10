@@ -25,16 +25,17 @@ use cmdpy::HgPython;
 use cmdutil::define_flags;
 use cmdutil::ConfigSet;
 use cmdutil::Result;
-use configloader::hg::resolve_custom_scheme;
 use configloader::hg::PinnedConfig;
+use configloader::hg::RepoInfo;
 use configmodel::Config;
 use configmodel::ConfigExt;
 use configmodel::ValueSource;
-use eagerepo::is_eager_repo;
+use eagerepo::EagerRepo;
 use exchange::convert_to_remote;
 use migration::feature::deprecate;
 use repo::repo::Repo;
-use repo_name::encode_repo_name;
+use repourl::encode_repo_name;
+use repourl::RepoUrl;
 use tracing::instrument;
 use types::HgId;
 use url::Url;
@@ -68,7 +69,7 @@ define_flags! {
         stream: bool,
 
         /// "use remotefilelog (only turn it off in legacy tests) (ADVANCED)"
-        shallow: Option<bool>,
+        shallow: bool = true,
 
         /// "use git protocol (EXPERIMENTAL)"
         git: bool,
@@ -96,54 +97,21 @@ define_flags! {
     }
 }
 
-struct CloneSource {
-    // Effective scheme, taking into account "schemes" config.
-    scheme: String,
-    // What should be used as paths.default.
-    path: String,
-    // Default bookmark (inferred from url fragment).
-    default_bookmark: Option<String>,
-}
-
-impl CloneSource {
-    fn is_eager(&self) -> bool {
-        self.scheme == "eager" || self.scheme == "test"
-    }
-}
-
 impl CloneOpts {
-    fn source(&self, config: &dyn Config) -> Result<CloneSource> {
-        if let Some(local_path) = local_path(&self.source)? {
-            let scheme = if is_eager_repo(&local_path) {
-                "eager"
-            } else {
-                "file"
-            };
-            return Ok(CloneSource {
-                scheme: scheme.to_string(),
-                // Came from self.source, so should be UTF-8.
-                path: local_path.into_os_string().into_string().unwrap(),
-                default_bookmark: None,
-            });
+    fn source(&self, config: &dyn Config) -> Result<RepoUrl> {
+        if let Ok(Some(abs_path)) = local_path(&self.source) {
+            RepoUrl::from_str(
+                config,
+                abs_path
+                    .to_str()
+                    .ok_or_else(|| anyhow!("invalid source path {}", self.source))?,
+            )
+        } else {
+            RepoUrl::from_str(config, &self.source)
         }
-
-        let mut url = Url::parse(&self.source)?;
-
-        // Fragment is only used for choosing default bookmark during clone - we
-        // don't want to persist it.
-        let frag = url.fragment().map(|f| f.to_string());
-        url.set_fragment(None);
-
-        Ok(CloneSource {
-            scheme: resolve_custom_scheme(config, url.clone())?
-                .scheme()
-                .to_string(),
-            path: url.to_string(),
-            default_bookmark: frag,
-        })
     }
 
-    fn eden(&self, config: &ConfigSet) -> Result<bool> {
+    fn eden(&self, config: &dyn Config) -> Result<bool> {
         if let Some(eden) = self.eden {
             return Ok(eden);
         }
@@ -176,10 +144,146 @@ fn looks_like_windows_path(s: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
+fn log_clone_info(clone_type_str: &str, reponame: &str, ctx: &ReqCtx<CloneOpts>) {
+    tracing::debug!(target: "clone_info", rust_clone="true", repo=reponame, clone_type=clone_type_str, is_update_clone=!ctx.opts.noupdate);
+    if !ctx.opts.enable_profile.is_empty() {
+        tracing::debug!(target: "clone_info", cloned_sparse_profiles=ctx.opts.enable_profile.join(" "));
+    }
+}
+
+fn run_eden(
+    reponame: &str,
+    destination: &Path,
+    ctx: &ReqCtx<CloneOpts>,
+    mut config: ConfigSet,
+) -> Result<()> {
+    let logger = ctx.logger();
+
+    // We don't return an error immediately because we need to log the clone
+    // type before that, yet we might need to log something different if we
+    // were able to clone a backing repo.
+    let backing_clone_result = || -> Result<(PathBuf, Repo)> {
+        let backing_path = if !ctx.opts.eden_backing_repo.is_empty() {
+            PathBuf::from(&ctx.opts.eden_backing_repo)
+        } else if let Some(dir) = clone::get_default_eden_backing_directory(&config)? {
+            dir.join(encode_repo_name(reponame))
+        } else {
+            abort!("please specify --eden-backing-repo");
+        };
+
+        let backing_repo = if identity::sniff_dir(&backing_path)?.is_none() {
+            logger.verbose(|| {
+                format!(
+                    "Cloning {} backing repo to {}",
+                    reponame,
+                    backing_path.display(),
+                )
+            });
+            try_clone_metadata(ctx, &logger, &mut config, reponame, &backing_path)?
+        } else {
+            Repo::load(
+                &backing_path,
+                &PinnedConfig::from_cli_opts(
+                    &ctx.global_opts().config,
+                    &ctx.global_opts().configfile,
+                ),
+            )?
+        };
+
+        Ok((backing_path, backing_repo))
+    }();
+
+    let config_filter = if let Ok((_, ref backing_repo)) = backing_clone_result {
+        backing_repo.config().get("clone", "eden-sparse-filter")
+    } else {
+        config.get("clone", "eden-sparse-filter")
+    };
+
+    let edenfs_filter = match (ctx.opts.enable_profile.len(), config_filter) {
+        (0, config_filter) => config_filter,
+        (1, config_filter) => {
+            if config_filter.is_some() {
+                logger.info(
+                    "Ignoring clone.eden-sparse-filter because --enable-profile was specified",
+                );
+            }
+            Some(ctx.opts.enable_profile[0].clone().into())
+        }
+        _ => None,
+    };
+    let clone_type_str = if edenfs_filter.is_some() {
+        "eden_sparse"
+    } else {
+        "eden_fs"
+    };
+    log_clone_info(clone_type_str, reponame, ctx);
+
+    let (backing_path, backing_repo) = backing_clone_result?;
+
+    let target_rev = get_update_target(&logger, &backing_repo, &ctx.opts)?.map(|(rev, _)| rev);
+    logger.verbose(|| {
+        format!(
+            "Performing EdenFS clone {}@{} from {} to {}",
+            reponame,
+            target_rev.map_or(String::new(), |t| t.to_hex()),
+            backing_path.display(),
+            destination.display(),
+        )
+    });
+    clone::eden_clone(&backing_repo, destination, target_rev, edenfs_filter)?;
+    Ok(())
+}
+
+fn run_non_eden(
+    reponame: &str,
+    destination: &Path,
+    ctx: &ReqCtx<CloneOpts>,
+    mut config: ConfigSet,
+) -> Result<()> {
+    let logger = ctx.logger();
+
+    let clone_type_str = if !ctx.opts.enable_profile.is_empty() {
+        "sparse"
+    } else {
+        "full"
+    };
+    log_clone_info(clone_type_str, reponame, ctx);
+
+    let mut repo = try_clone_metadata(ctx, &logger, &mut config, reponame, destination)?;
+
+    let target_rev = match get_update_target(&logger, &repo, &ctx.opts)? {
+        Some((id, name)) => {
+            logger.info(format!("Checking out '{}'", name));
+
+            logger.verbose(|| {
+                format!(
+                    "Initializing non-EdenFS working copy to commit {}",
+                    id.to_hex(),
+                )
+            });
+
+            Some(id)
+        }
+        None => {
+            logger.verbose("Initializing empty non-EdenFS working copy");
+            None
+        }
+    };
+
+    clone::init_working_copy(
+        &ctx.core,
+        &mut repo,
+        target_rev,
+        ctx.opts.enable_profile.clone(),
+    )?;
+
+    Ok(())
+}
+
 pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
     let logger = ctx.logger();
 
-    let mut config = ConfigSet::wrap(ctx.config().clone());
+    let config = ctx.config();
 
     let deprecated_options = [
         ("--rev", "rev-option", ctx.opts.rev.is_empty()),
@@ -204,16 +308,11 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
         }
     }
 
-    let use_eden = ctx.opts.eden(&config)?;
+    let use_eden = ctx.opts.eden(config)?;
 
     abort_if!(
         !use_eden && !ctx.opts.eden_backing_repo.is_empty(),
         "--eden-backing-repo requires --eden",
-    );
-
-    abort_if!(
-        !ctx.opts.enable_profile.is_empty() && use_eden,
-        "--enable-profile is not compatible with --eden",
     );
 
     abort_if!(
@@ -222,7 +321,7 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
     );
 
     abort_if!(
-        use_eden && ctx.opts.shallow == Some(false),
+        use_eden && !ctx.opts.shallow,
         "--shallow is required with --eden",
     );
 
@@ -237,13 +336,29 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
         fallback!("clone.use-rust not set to True");
     }
 
-    let source = match ctx.opts.source(&config) {
+    let source = match ctx.opts.source(config) {
         Err(_) => fallback!("invalid URL"),
-        Ok(source) => match source.scheme.as_ref() {
-            "mononoke" | "eager" | "test" => source,
-            _ => fallback!("unsupported URL scheme"),
-        },
+        Ok(source) => {
+            // Basically testing whether remote implements SaplingRemoteAPI.
+            if source.scheme() == "mononoke" || EagerRepo::url_to_dir(&source).is_some() {
+                source
+            } else {
+                fallback!("unsupported URL scheme");
+            }
+        }
     };
+
+    if let Some(name) = source.repo_name() {
+        // Re-load config now that we have repo name. This will include any per-repo
+        // remote configs. Re-assign to ctx.core.config to make extra sure future code
+        // does not get the "wrong" config when using ctx.config().
+        ctx.core.config = Arc::new(configloader::hg::load(
+            RepoInfo::Ephemeral(name),
+            &PinnedConfig::from_cli_opts(&ctx.global_opts().config, &ctx.global_opts().configfile),
+        )?);
+    }
+
+    let mut config = ConfigSet::wrap(ctx.config().clone());
 
     if !ctx.opts.rev.is_empty()
         || ctx.opts.pull
@@ -261,7 +376,7 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
         fallback!("one or more unsupported options in Rust clone");
     }
 
-    config.set("paths", "default", Some(&source.path), &"arg".into());
+    config.set("paths", "default", Some(source.clean_str()), &"arg".into());
 
     let reponame = match config.get_opt::<String>("remotefilelog", "reponame")? {
         // This gets the reponame from the --configfile config.
@@ -269,16 +384,16 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
             logger.verbose(|| format!("Repo name is {} from config", c));
             c
         }
-        None => match configloader::hg::repo_name_from_url(&config, &ctx.opts.source) {
+        None => match source.repo_name() {
             Some(name) => {
                 logger.verbose(|| format!("Repo name is {} via URL {}", name, ctx.opts.source));
                 config.set(
                     "remotefilelog",
                     "reponame",
-                    Some(&name),
+                    Some(name),
                     &"clone source".into(),
                 );
-                name
+                name.to_string()
             }
             None => abort!("could not determine repo name"),
         },
@@ -311,26 +426,11 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
         destination.display(),
     ));
 
-    let clone_type_str = if use_eden {
-        if config.get_or_default::<bool>("clone", "use-eden-sparse")?
-            || config
-                .must_get::<String>("clone", "eden-sparse-filter")
-                .is_ok()
-        {
-            "eden_sparse"
-        } else {
-            "eden_fs"
-        }
-    } else if !ctx.opts.enable_profile.is_empty() {
-        "sparse"
-    } else {
-        "full"
-    };
-    tracing::trace!("performing rust clone");
-    tracing::debug!(target: "clone_info", rust_clone="true", repo=reponame, clone_type=clone_type_str, is_update_clone=!ctx.opts.noupdate);
-    if !ctx.opts.enable_profile.is_empty() {
-        tracing::debug!(target: "clone_info", cloned_sparse_profiles=ctx.opts.enable_profile.join(" "));
+    if ctx.opts.enable_profile.len() > 1 {
+        abort!("EdenFS only supports a single profile");
     }
+
+    tracing::trace!("performing rust clone");
 
     if let Some(ident) = identity::sniff_dir(&destination)? {
         abort!(
@@ -341,72 +441,9 @@ pub fn run(mut ctx: ReqCtx<CloneOpts>) -> Result<u8> {
     }
 
     if use_eden {
-        let backing_path = if !ctx.opts.eden_backing_repo.is_empty() {
-            PathBuf::from(&ctx.opts.eden_backing_repo)
-        } else if let Some(dir) = clone::get_default_eden_backing_directory(&config)? {
-            dir.join(encode_repo_name(&reponame))
-        } else {
-            abort!("please specify --eden-backing-repo");
-        };
-
-        let mut backing_repo = if identity::sniff_dir(&backing_path)?.is_none() {
-            logger.verbose(|| {
-                format!(
-                    "Cloning {} backing repo to {}",
-                    reponame,
-                    backing_path.display(),
-                )
-            });
-            try_clone_metadata(&ctx, &logger, &mut config, &reponame, &backing_path)?
-        } else {
-            Repo::load(
-                &backing_path,
-                &PinnedConfig::from_cli_opts(
-                    &ctx.global_opts().config,
-                    &ctx.global_opts().configfile,
-                ),
-            )?
-        };
-        let target_rev =
-            get_update_target(&logger, &mut backing_repo, &ctx.opts)?.map(|(rev, _)| rev);
-        logger.verbose(|| {
-            format!(
-                "Performing EdenFS clone {}@{} from {} to {}",
-                reponame,
-                target_rev.map_or(String::new(), |t| t.to_hex()),
-                backing_path.display(),
-                destination.display(),
-            )
-        });
-        clone::eden_clone(&backing_repo, &destination, target_rev)?;
+        run_eden(reponame.as_str(), destination.as_path(), &ctx, config)?;
     } else {
-        let mut repo = try_clone_metadata(&ctx, &logger, &mut config, &reponame, &destination)?;
-
-        let target_rev = match get_update_target(&logger, &mut repo, &ctx.opts)? {
-            Some((id, name)) => {
-                logger.info(format!("Checking out '{}'", name));
-
-                logger.verbose(|| {
-                    format!(
-                        "Initializing non-EdenFS working copy to commit {}",
-                        id.to_hex(),
-                    )
-                });
-
-                Some(id)
-            }
-            None => {
-                logger.verbose("Initializing empty non-EdenFS working copy");
-                None
-            }
-        };
-
-        clone::init_working_copy(
-            &ctx.core,
-            &mut repo,
-            target_rev,
-            ctx.opts.enable_profile.clone(),
-        )?;
+        run_non_eden(reponame.as_str(), destination.as_path(), &ctx, config)?;
     }
 
     Ok(0)
@@ -421,17 +458,18 @@ fn try_clone_metadata(
 ) -> Result<Repo> {
     let dest_preexists = destination.exists();
     match clone_metadata(ctx, logger, config, reponame, destination) {
-        Err(e) => {
+        Err(err) => {
             let removal_dir = if dest_preexists {
                 let ident = identity::sniff_dir(destination)?.unwrap_or_else(identity::default);
                 destination.join(ident.dot_dir())
             } else {
                 destination.to_path_buf()
             };
+
             if !ctx.global_opts().debug {
                 fs::remove_dir_all(removal_dir)?;
             }
-            Err(e)
+            Err(err)
         }
         Ok(repo) => Ok(repo),
     }
@@ -456,17 +494,19 @@ fn clone_metadata(
         }
     }
 
-    let mut repo_config_file_content = includes
-        .into_iter()
-        .map(|file| format!("%include {}\n", file))
-        .collect::<String>();
+    let mut repo_config_file_content = includes.into_iter().fold(String::new(), |mut out, file| {
+        use std::fmt::Write;
+
+        let _ = write!(out, "%include {}\n", file);
+        out
+    });
 
     if !repo_config_file_content.is_empty() {
         repo_config_file_content.push('\n');
     }
 
     let source = ctx.opts.source(config)?;
-    if let Some(bm) = &source.default_bookmark {
+    if let Some(bm) = source.default_bookmark() {
         config.set(
             "remotenames",
             "selectivepulldefault",
@@ -475,7 +515,8 @@ fn clone_metadata(
         );
     }
 
-    repo_config_file_content.push_str(format!("[paths]\ndefault = {}\n", source.path).as_str());
+    repo_config_file_content
+        .push_str(format!("[paths]\ndefault = {}\n", source.clean_str()).as_str());
 
     // Some config values are inherent to the repo and should be persisted if passed to clone.
     // This is analagous to persisting the --configfile args above.
@@ -493,27 +534,26 @@ fn clone_metadata(
     }
 
     let eager_format: bool = config.get_or_default("format", "use-eager-repo")?;
+    let remote_eager_path = EagerRepo::url_to_dir(&source);
 
-    let shallow = match ctx.opts.shallow {
-        Some(shallow) => shallow,
-        // Infer non-shallow for eager->eager clone.
-        None => !eager_format || !source.is_eager(),
-    };
-
-    if shallow {
+    if ctx.opts.shallow {
         config.set("format", "use-remotefilelog", Some("true"), &"clone".into());
     } else {
         if !eager_format {
             fallback!("non-shallow && non-eagerepo");
         }
 
-        abort_if!(
-            !source.is_eager(),
-            "don't know how to clone {} into eagerepo",
-            source.path,
-        );
-
-        return eager_clone(ctx, config, source, destination);
+        return match remote_eager_path {
+            None => {
+                abort!(
+                    "don't know how to clone {} into eagerepo",
+                    source.clean_str(),
+                );
+            }
+            Some(remote_eager_path) => {
+                eager_clone(ctx, config, source, remote_eager_path, destination)
+            }
+        };
     }
 
     // Enabling segmented changelog too early breaks the revlog_clone that is needed below
@@ -597,12 +637,11 @@ fn clone_metadata(
 fn eager_clone(
     ctx: &ReqCtx<CloneOpts>,
     config: &ConfigSet,
-    source: CloneSource,
+    source: RepoUrl,
+    eager_path: PathBuf,
     dest: &Path,
 ) -> Result<Repo> {
-    let source_path = eagerepo::EagerRepo::url_to_dir(&source.path)
-        .ok_or_else(|| anyhow!("no eagerepo at {}", source.path))?;
-    let source_dot_dir = source_path.join(identity::must_sniff_dir(&source_path)?.dot_dir());
+    let source_dot_dir = eager_path.join(identity::must_sniff_dir(&eager_path)?.dot_dir());
 
     let dest_ident = identity::default();
     let dest_dot_dir = dest.join(dest_ident.dot_dir());
@@ -614,7 +653,7 @@ fn eager_clone(
 
     let config_path = dest_dot_dir.join(dest_ident.config_repo_file());
     atomic_write(&config_path, |f| {
-        f.write_all(format!("[paths]\ndefault = {}\n", source.path).as_bytes())
+        f.write_all(format!("[paths]\ndefault = {}\n", source.clean_str()).as_bytes())
     })?;
 
     let repo = Repo::load(
@@ -665,7 +704,7 @@ pub fn revlog_clone(
     let mut args = vec![
         identity::cli_name().to_string(),
         "debugrevlogclone".to_string(),
-        ctx.opts.source(config)?.path,
+        ctx.opts.source(config)?.clean_str().to_string(),
         "-R".to_string(),
         root.to_string_lossy().to_string(),
     ];
@@ -727,7 +766,7 @@ fn get_selective_bookmarks(repo: &Repo) -> Result<Vec<String>> {
 #[instrument(skip_all, err, ret)]
 fn get_update_target(
     logger: &TermLogger,
-    repo: &mut Repo,
+    repo: &Repo,
     clone_opts: &CloneOpts,
 ) -> Result<Option<(HgId, String)>> {
     if clone_opts.noupdate {

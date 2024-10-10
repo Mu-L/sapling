@@ -34,13 +34,13 @@ import {Checkbox} from 'isl-components/Checkbox';
 import {InlineErrorBadge} from 'isl-components/ErrorNotice';
 import {Icon} from 'isl-components/Icon';
 import {Kbd} from 'isl-components/Kbd';
+import {KeyCode, Modifier} from 'isl-components/KeyboardShortcuts';
 import {Subtle} from 'isl-components/Subtle';
 import {extractTokens} from 'isl-components/Tokens';
 import {Tooltip} from 'isl-components/Tooltip';
 import {Typeahead} from 'isl-components/Typeahead';
 import {atom, useAtom, useAtomValue} from 'jotai';
 import React, {useState} from 'react';
-import {KeyCode, Modifier} from 'shared/KeyboardShortcuts';
 import {firstLine, notEmpty} from 'shared/utils';
 
 const styles = stylex.create({
@@ -78,7 +78,7 @@ export function BookmarksManagerMenu() {
           Bookmarks Manager ($shortcut)
         </T>
       }
-      additionalToggles={additionalToggles}>
+      additionalToggles={additionalToggles.asEventTarget()}>
       <Button icon data-testid="bookmarks-manager-button">
         <Icon icon="bookmark" />
       </Button>

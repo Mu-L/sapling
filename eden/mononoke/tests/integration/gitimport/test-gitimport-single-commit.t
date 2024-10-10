@@ -7,7 +7,7 @@
   $ . "${TEST_FIXTURES}/library.sh"
   $ ENABLED_DERIVED_DATA='["git_trees", "filenodes", "hgchangesets", "git_delta_manifests_v2"]' setup_common_config
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ HG_REPO="${TESTTMP}/repo-hg"
+  $ HG_REPO="${TESTTMP}/repo"
   $ REPOTYPE="blob_files"
   $ setup_common_config $REPOTYPE
 
@@ -52,9 +52,9 @@
   $ start_and_wait_for_mononoke_server
 # Clone the repository
   $ cd "$TESTTMP"
-  $ hgmn_clone mononoke://$(mononoke_address)/repo "$HG_REPO"
+  $ hg clone -q mono:repo "$HG_REPO"
   $ cd "$HG_REPO"
-  $ hgmn up -q master
+  $ hg up -q master
   $ cat file1
   this is file1
   $ cat dir/file2

@@ -30,8 +30,6 @@ use bookmarks::ArcBookmarks;
 use bookmarks_cache::ArcBookmarksCache;
 use cacheblob::InProcessLease;
 use cacheblob::LeaseOps;
-use changesets::ArcChangesets;
-use changesets_impl::SqlChangesetsBuilder;
 use commit_cloud::sql::builder::SqlCommitCloudBuilder;
 use commit_cloud::ArcCommitCloud;
 use commit_cloud::CommitCloud;
@@ -39,7 +37,6 @@ use commit_graph::ArcCommitGraph;
 use commit_graph::ArcCommitGraphWriter;
 use commit_graph::BaseCommitGraphWriter;
 use commit_graph::CommitGraph;
-use commit_graph::CompatCommitGraphWriter;
 use context::CoreContext;
 use dbbookmarks::ArcSqlBookmarks;
 use dbbookmarks::SqlBookmarksBuilder;
@@ -49,8 +46,8 @@ use fbinit::FacebookInit;
 use filenodes::ArcFilenodes;
 use filestore::ArcFilestoreConfig;
 use filestore::FilestoreConfig;
-use git_push_redirect::ArcGitPushRedirectConfig;
-use git_push_redirect::SqlGitPushRedirectConfigBuilder;
+use git_source_of_truth::ArcGitSourceOfTruthConfig;
+use git_source_of_truth::SqlGitSourceOfTruthConfigBuilder;
 use git_symbolic_refs::ArcGitSymbolicRefs;
 use git_symbolic_refs::SqlGitSymbolicRefsBuilder;
 use hook_manager::manager::ArcHookManager;
@@ -113,7 +110,6 @@ use repo_sparse_profiles::RepoSparseProfiles;
 use repo_sparse_profiles::SqlSparseProfilesSizes;
 use repo_stats_logger::ArcRepoStatsLogger;
 use repo_stats_logger::RepoStatsLogger;
-use requests_table::SqlLongRunningRequestsQueue;
 use scuba_ext::MononokeScubaSampleBuilder;
 use sql::rusqlite::Connection as SqliteConnection;
 use sql::sqlite::SqliteCallbacks;
@@ -130,7 +126,7 @@ use streaming_clone::ArcStreamingClone;
 use streaming_clone::StreamingCloneBuilder;
 use strum::IntoEnumIterator;
 use synced_commit_mapping::ArcSyncedCommitMapping;
-use synced_commit_mapping::SqlSyncedCommitMapping;
+use synced_commit_mapping::SqlSyncedCommitMappingBuilder;
 use warm_bookmarks_cache::WarmBookmarksCacheBuilder;
 use wireproto_handler::ArcRepoHandlerBase;
 use wireproto_handler::PushRedirectorBase;
@@ -162,11 +158,11 @@ pub struct TestRepoFactory {
     filenodes_override: Option<Box<dyn Fn(ArcFilenodes) -> ArcFilenodes + Send + Sync>>,
 }
 
-/// The default configuration for test repositories.
+/// The default derived data types configuration for test repositories.
 ///
 /// This configuration enables all derived data types at the latest version.
-pub fn default_test_repo_config() -> RepoConfig {
-    let derived_data_types_config = DerivedDataTypesConfig {
+pub fn default_test_repo_derived_data_types_config() -> DerivedDataTypesConfig {
+    DerivedDataTypesConfig {
         types: DerivableType::iter().collect(),
         unode_version: UnodeVersion::V2,
         blame_version: BlameVersion::V2,
@@ -176,7 +172,14 @@ pub fn default_test_repo_config() -> RepoConfig {
             delta_chunk_size: 1000,
         }),
         ..Default::default()
-    };
+    }
+}
+
+/// The default configuration for test repositories.
+///
+/// This configuration enables all derived data types at the latest version.
+pub fn default_test_repo_config() -> RepoConfig {
+    let derived_data_types_config = default_test_repo_derived_data_types_config();
     RepoConfig {
         derived_data_config: DerivedDataConfig {
             scuba_table: None,
@@ -185,6 +188,7 @@ pub fn default_test_repo_config() -> RepoConfig {
                 "default".to_string() => derived_data_types_config.clone(),
                 "backfilling".to_string() => derived_data_types_config
             ],
+            derivation_queue_scuba_table: None,
         },
         infinitepush: InfinitepushParams {
             namespace: Some(InfinitepushNamespace::new(
@@ -246,7 +250,6 @@ impl TestRepoFactory {
         metadata_con.execute_batch(MegarepoMapping::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlMutableCountersBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBookmarksBuilder::CREATION_QUERY)?;
-        metadata_con.execute_batch(SqlChangesetsBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBonsaiGitMappingBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBonsaiGlobalrevMappingBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlBonsaiSvnrevMappingBuilder::CREATION_QUERY)?;
@@ -255,9 +258,8 @@ impl TestRepoFactory {
         metadata_con.execute_batch(SqlGitSymbolicRefsBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlPhasesBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlPushrebaseMutationMappingConnection::CREATION_QUERY)?;
-        metadata_con.execute_batch(SqlLongRunningRequestsQueue::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlMutableRenamesStore::CREATION_QUERY)?;
-        metadata_con.execute_batch(SqlSyncedCommitMapping::CREATION_QUERY)?;
+        metadata_con.execute_batch(SqlSyncedCommitMappingBuilder::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlRepoLock::CREATION_QUERY)?;
         metadata_con.execute_batch(SqlSparseProfilesSizes::CREATION_QUERY)?;
         metadata_con.execute_batch(StreamingCloneBuilder::CREATION_QUERY)?;
@@ -401,14 +403,6 @@ impl TestRepoFactory {
         Arc::new(RepoIdentity::new(repo_config.repoid, self.name.clone()))
     }
 
-    /// Construct Changesets using the in-memory metadata database.
-    pub fn changesets(&self, repo_identity: &ArcRepoIdentity) -> Result<ArcChangesets> {
-        Ok(Arc::new(
-            SqlChangesetsBuilder::from_sql_connections(self.metadata_db.clone())
-                .build(RendezVousOptions::for_test(), repo_identity.id()),
-        ))
-    }
-
     /// Construct SQL bookmarks using the in-memory metadata database.
     pub fn sql_bookmarks(&self, repo_identity: &ArcRepoIdentity) -> Result<ArcSqlBookmarks> {
         Ok(Arc::new(
@@ -516,9 +510,10 @@ impl TestRepoFactory {
 
     /// Construct Git Push Redirect Config using the in-memory metadata
     /// database.
-    pub fn git_push_redirect_config(&self) -> Result<ArcGitPushRedirectConfig> {
+    pub fn git_source_of_truth_config(&self) -> Result<ArcGitSourceOfTruthConfig> {
         Ok(Arc::new(
-            SqlGitPushRedirectConfigBuilder::from_sql_connections(self.metadata_db.clone()).build(),
+            SqlGitSourceOfTruthConfigBuilder::from_sql_connections(self.metadata_db.clone())
+                .build(),
         ))
     }
 
@@ -638,26 +633,32 @@ impl TestRepoFactory {
 
     /// The commit mapping bettween repos for synced commits.
     pub fn synced_commit_mapping(&self) -> Result<ArcSyncedCommitMapping> {
-        Ok(Arc::new(SqlSyncedCommitMapping::from_sql_connections(
-            self.metadata_db.clone(),
-        )))
+        Ok(Arc::new(
+            SqlSyncedCommitMappingBuilder::from_sql_connections(self.metadata_db.clone())
+                .build(RendezVousOptions::for_test()),
+        ))
     }
 
     /// Cross-repo sync manager for this repo
-    pub fn repo_cross_repo(
+    pub async fn repo_cross_repo(
         &self,
         synced_commit_mapping: &ArcSyncedCommitMapping,
+        repo_identity: &ArcRepoIdentity,
     ) -> Result<ArcRepoCrossRepo> {
         let live_commit_sync_config = self
             .live_commit_sync_config
             .clone()
             .unwrap_or_else(|| Arc::new(TestLiveCommitSyncConfig::new_empty()));
         let sync_lease = Arc::new(InProcessLease::new());
-        Ok(Arc::new(RepoCrossRepo::new(
+        let repo_xrepo = RepoCrossRepo::new(
             synced_commit_mapping.clone(),
             live_commit_sync_config,
             sync_lease,
-        )))
+            repo_identity.id(),
+        )
+        .await?;
+
+        Ok(Arc::new(repo_xrepo))
     }
 
     /// Test repo-handler-base
@@ -728,12 +729,14 @@ impl TestRepoFactory {
         bookmarks: &ArcBookmarks,
         repo_blobstore: &ArcRepoBlobstore,
         bonsai_tag_mapping: &ArcBonsaiTagMapping,
+        bonsai_git_mapping: &ArcBonsaiGitMapping,
     ) -> ArcHookManager {
         let content_store = RepoHookStateProvider::from_parts(
             bookmarks.clone(),
             repo_blobstore.clone(),
             repo_derived_data.clone(),
             bonsai_tag_mapping.clone(),
+            bonsai_git_mapping.clone(),
         );
 
         Arc::new(HookManager::new_test(
@@ -788,16 +791,9 @@ impl TestRepoFactory {
     }
 
     /// Commit graph writer
-    pub fn commit_graph_writer(
-        &self,
-        commit_graph: &CommitGraph,
-        changesets: &ArcChangesets,
-    ) -> Result<ArcCommitGraphWriter> {
+    pub fn commit_graph_writer(&self, commit_graph: &CommitGraph) -> Result<ArcCommitGraphWriter> {
         let base_writer = BaseCommitGraphWriter::new(commit_graph.clone());
-        Ok(Arc::new(CompatCommitGraphWriter::new(
-            Arc::new(base_writer),
-            changesets.clone(),
-        )))
+        Ok(Arc::new(base_writer))
     }
 
     /// Commit graph bulk fetcher

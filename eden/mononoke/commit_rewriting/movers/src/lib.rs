@@ -45,6 +45,7 @@ pub enum ErrorKind {
 /// - `Ok(None)` - the path should not be synced
 /// - `Err(e)` - the sync should fail, as this function
 ///   could not figure out how to rewrite path
+///
 /// Fine to have Option<NonRootMPath> in this case since the optional part is not for representing root paths
 /// but instead to handle control flow differently
 pub type Mover = Arc<dyn Fn(&NonRootMPath) -> Result<Option<NonRootMPath>> + Send + Sync + 'static>;
@@ -360,6 +361,7 @@ pub fn get_movers(
 mod test {
     use maplit::hashmap;
     use metaconfig_types::CommitSyncConfigVersion;
+    use mononoke_macros::mononoke;
 
     use super::*;
 
@@ -371,7 +373,7 @@ mod test {
         MPathElement::new(s.to_vec()).unwrap()
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_suffix_after() {
         let foobar = mp("foo/bar");
         let foo = mp("foo");
@@ -383,7 +385,7 @@ mod test {
         assert!(r.is_empty());
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_path_action() {
         let foo_el = [mpe(b"foo")];
         assert_eq!(
@@ -400,7 +402,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_non_prefix_free_mover() {
         let hm = hashmap! {
             mp("path/") => PrefixAction::Change(mp("shortest/renamed")),
@@ -430,7 +432,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_mover() {
         let hm = hashmap! {
             mp("renameme") => PrefixAction::Change(mp("renamed")),
@@ -513,7 +515,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_small_to_large_mover_1_non_overlapping() {
         let large_sync_config = get_large_repo_sync_config_non_overlapping();
         let mover = get_small_to_large_mover(&large_sync_config, RepositoryId::new(1)).unwrap();
@@ -534,7 +536,7 @@ mod test {
         assert_eq!(mover(&f).unwrap(), Some(f.clone()));
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_small_to_large_mover_2_non_overlapping() {
         let large_sync_config = get_large_repo_sync_config_non_overlapping();
         let mover = get_small_to_large_mover(&large_sync_config, RepositoryId::new(2)).unwrap();
@@ -558,7 +560,7 @@ mod test {
         );
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_large_to_small_mover_non_overlapping_images() {
         let large_sync_config = get_large_repo_sync_config_non_overlapping();
         let mover_1 = get_large_to_small_mover(&large_sync_config, RepositoryId::new(1)).unwrap();
@@ -670,7 +672,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_large_to_small_mover_overlapping_images() {
         let mover_1 = get_large_to_small_mover(
             &get_large_repo_sync_config_overlapping(),
@@ -763,7 +765,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_large_to_small_mover_non_prefix_free() -> Result<()> {
         let mover = get_large_to_small_mover(
             &get_large_repo_sync_config_non_prefix_free(),
@@ -813,7 +815,7 @@ mod test {
         }
     }
 
-    #[test]
+    #[mononoke::test]
     fn test_get_large_to_small_mover_with_excludes() -> Result<()> {
         let mover = get_large_to_small_mover(
             &get_large_repo_sync_config_with_exludes(),

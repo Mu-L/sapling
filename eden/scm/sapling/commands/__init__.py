@@ -72,8 +72,8 @@ from .. import (
 from ..i18n import _
 from ..node import bin, hex, nullid, short
 from ..pycompat import isint, range
+from ..utils import subtreeutil
 from . import cmdtable
-
 
 with hgdemandimport.deactivated():
     # Importing these modules have side effect on the command table.
@@ -781,8 +781,6 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
             raise error.Abort(_("cannot use --parent on non-merge changeset"))
         parent = p1
 
-    # the backout should appear on the same branch
-    branch = repo.dirstate.branch()
     rctx = scmutil.revsingle(repo, hex(parent))
     if not opts.get("merge") and op1 != node:
         dsguard = dirstateguard.dirstateguard(repo, "backout")
@@ -797,7 +795,7 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
             _replayrenames(repo, node)
 
             dsguard.close()
-            hg._showstats(repo, stats)
+            hg.showstats(repo, stats)
             if stats[3]:
                 repo.ui.status(
                     _("use '@prog@ resolve' to retry unresolved " "file merges\n")
@@ -808,7 +806,6 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
             lockmod.release(dsguard)
     else:
         hg.clean(repo, node, show_stats=False)
-        repo.dirstate.setbranch(branch)
         cmdutil.revert(ui, repo, rctx, repo.dirstate.parents())
         # Ensure reverse-renames are preserved during the backout. In theory
         # cmdutil.revert() should handle this, but it's extremely complex, so
@@ -833,7 +830,7 @@ def _dobackout(ui, repo, node=None, rev=None, **opts):
     if not newnode:
         ui.status(_("nothing changed\n"))
         return 1
-    cmdutil.commitstatus(repo, newnode, branch)
+    cmdutil.commitstatus(repo, newnode)
 
     nice = short
     ui.status(
@@ -1057,9 +1054,6 @@ the sparse profile from the known %s changeset %s\n"
         return (node, changesets, bgood)
 
     displayer = cmdutil.show_changeset(ui, repo, {})
-    if "eden" in repo.requirements:
-        # skip the sparseskip logic if it's an Eden repo
-        nosparseskip = True
 
     if command:
         changesets = 1
@@ -1387,7 +1381,7 @@ def branch(ui, repo, label=None, **opts):
         ui.deprecate("hg-branch", "branches are deprecated at Meta")
     hintutil.trigger("branch-command-deprecate")
     if not opts.get("clean") and not label:
-        ui.write("%s\n" % repo.dirstate.branch())
+        ui.write("default\n")
         return
 
     raise error.Abort(
@@ -1495,9 +1489,8 @@ def bundle(ui, repo, fname, dest=None, **opts):
         outgoing = discovery.outgoing(repo, common, heads)
     else:
         dest = ui.expandpath(dest or "default-push", dest or "default")
-        dest, branches = hg.parseurl(dest)
+        dest = hg.parseurl(dest)
         other = hg.peer(repo, opts, dest)
-        revs, checkout = hg.addbranchrevs(repo, repo, branches, revs)
         heads = revs and list(map(repo.lookup, revs)) or revs
         outgoing = discovery.findcommonoutgoing(
             repo, other, onlyheads=heads, force=opts.get("force"), portable=True
@@ -1735,8 +1728,6 @@ def _docommit(ui, repo, *pats, **opts):
 
     cmdutil.checkunfinished(repo, op="commit")
 
-    branch = repo[None].branch()
-
     extra = {}
     if opts.get("amend"):
         old = repo["."]
@@ -1762,8 +1753,18 @@ def _docommit(ui, repo, *pats, **opts):
             mutinfo = commitmutinfofunc(extra)
 
         def commitfunc(ui, repo, message, match, opts):
+            ms = mergemod.mergestate.read(repo)
+            subtree_merges = ms.subtree_merges
+            extra.update(subtreeutil.gen_merge_info(subtree_merges))
+            summaryfooter = subtree.gen_merge_commit_msg(subtree_merges)
+            if subtree_merges:
+                parents = repo[None].parents()
+                repo.setparents(parents[0].node())
+
             editform = cmdutil.mergeeditform(repo[None], "commit.normal")
-            editor = cmdutil.getcommiteditor(editform=editform, **opts)
+            editor = cmdutil.getcommiteditor(
+                editform=editform, summaryfooter=summaryfooter, **opts
+            )
             return repo.commit(
                 message,
                 opts.get("user"),
@@ -1787,7 +1788,7 @@ def _docommit(ui, repo, *pats, **opts):
                 ui.status(_("nothing changed\n"))
             return 1
 
-    cmdutil.commitstatus(repo, node, branch, opts=opts)
+    cmdutil.commitstatus(repo, node, opts=opts)
 
 
 @command(
@@ -2077,7 +2078,7 @@ def uncopy(ui, repo, *pats, **opts):
 @command("debugcommands", [], _("[COMMAND]"), norepo=True)
 def debugcommands(ui, cmd="", *args):
     """list all available commands and options"""
-    for cmd, vals in sorted(pycompat.iteritems(table)):
+    for cmd, vals in sorted(table.items()):
         cmd = cmd.split("|")[0].strip("^")
         opts = ", ".join([i[1] for i in vals[1]])
         ui.write("%s: %s\n" % (cmd, opts))
@@ -2225,7 +2226,9 @@ def diff(ui, repo, *pats, **opts):
         ctx1, ctx2 = ctx2, ctx1
         opts["from_path"], opts["to_path"] = opts.get("to_path"), opts.get("from_path")
 
-    cmdutil.registerdiffgrafts(opts, ctx1)
+    from_paths = scmutil.rootrelpaths(ctx1, opts.get("from_path"))
+    to_paths = scmutil.rootrelpaths(ctx1, opts.get("to_path"))
+    cmdutil.registerdiffgrafts(from_paths, to_paths, ctx1)
 
     if onlyfilesinrevs:
         files1 = set(ctx1.files())
@@ -2571,8 +2574,6 @@ def _dograft(ui, repo, *revs, **opts):
     if not opts.get("date") and opts.get("currentdate"):
         opts["date"] = "%d %d" % util.makedate()
 
-    editor = cmdutil.getcommiteditor(editform="graft", **opts)
-
     cont = False
     if opts.get("continue") or opts.get("abort"):
         if revs and opts.get("continue"):
@@ -2631,6 +2632,9 @@ def _dograft(ui, repo, *revs, **opts):
         if not revs:
             return -1
 
+    from_paths = scmutil.rootrelpaths(repo["."], opts.get("from_path"))
+    to_paths = scmutil.rootrelpaths(repo["."], opts.get("to_path"))
+
     for pos, ctx in enumerate(repo.set("%ld", revs)):
         desc = '%s "%s"' % (ctx, ctx.description().split("\n", 1)[0])
         names = repo.nodebookmarks(ctx.node())
@@ -2653,11 +2657,10 @@ def _dograft(ui, repo, *revs, **opts):
         date = ctx.date()
         if opts.get("date"):
             date = opts["date"]
-        message = _makegraftmessage(ctx, opts)
 
         # Apply --from-path/--to-path mappings to manifest being grafted, and its
         # parent manifest.
-        cmdutil.registerdiffgrafts(opts, ctx, ctx.p1())
+        cmdutil.registerdiffgrafts(from_paths, to_paths, ctx, ctx.p1())
 
         # we don't merge the first commit when continuing
         if not cont:
@@ -2691,10 +2694,15 @@ def _dograft(ui, repo, *revs, **opts):
             cont = False
 
         # commit
+        editor = cmdutil.getcommiteditor(editform="graft", **opts)
+        message = _makegraftmessage(repo, ctx, opts)
         node = repo.commit(
             text=message, user=user, date=date, extra=extra, editor=editor
         )
         if node is None:
+            # users might provide wrong from paths, this validate function will
+            # provide more info for users to understand why no changes to commit
+            scmutil.validate_path_exist(ui, ctx, from_paths)
             ui.warn(_("note: graft of %s created no changes to commit\n") % (ctx))
 
     # remove state when we complete successfully
@@ -2704,19 +2712,33 @@ def _dograft(ui, repo, *revs, **opts):
     return 0
 
 
-def _makegraftmessage(ctx, opts):
-    message = ctx.description()
+def _makegraftmessage(repo, ctx, opts):
+    if logmessage := cmdutil.logmessage(repo, opts):
+        description, is_from_ctx = logmessage, False
+    else:
+        description, is_from_ctx = ctx.description(), True
+
+    message = []
     if opts.get("from_path"):
         # For xdir grafts, include "grafted from" breadcrumb by default.
         if opts.get("log") is not False:
-            message += "\n\nGrafted from %s\n" % ctx.hex()
+            message.append("Grafted from %s" % ctx.hex())
             for f, t in zip(opts.get("from_path"), opts.get("to_path")):
-                message += "  Grafted path %s to %s\n" % (f, t)
-            message += "\n"
+                message.append("- Grafted path %s to %s" % (f, t))
+
+            # only update the title if it is from original change context,
+            # we don't update the user provided title
+            if is_from_ctx:
+                try:
+                    title, rest = description.split("\n", 1)
+                    description = f'Graft "{title}"\n{rest}'
+                except ValueError:
+                    description = f'Graft "{description}"'
     else:
         if opts.get("log"):
-            message += "\n(grafted from %s)" % ctx.hex()
-    return message
+            message.append("(grafted from %s)" % ctx.hex())
+    message = "\n".join(message)
+    return cmdutil.add_summary_footer(ctx.repo().ui, description, message)
 
 
 @command(
@@ -3111,35 +3133,24 @@ def _rungrep(ui, cmd, files, match):
             _("show only heads which are descendants of STARTREV"),
             _("STARTREV"),
         ),
-        ("t", "topo", False, _("show topological heads only")),
+        ("t", "topo", False, _("show topological heads only (DEPRECATED)")),
         ("a", "active", False, _("show active branchheads only (DEPRECATED)")),
-        ("c", "closed", False, _("show normal and closed branch heads")),
+        ("c", "closed", False, _("show normal and closed branch heads (DEPRECATED)")),
     ]
     + templateopts,
     _("[OPTION]... [REV]..."),
     cmdtype=readonly,
 )
 def heads(ui, repo, *branchrevs, **opts):
-    """show branch heads
+    """show heads
 
-    With no arguments, show all open branch heads in the repository.
-    Branch heads are changesets that have no descendants on the
-    same branch. They are where development generally takes place and
-    are the usual targets for update and merge operations.
-
-    If one or more REVs are given, only open branch heads on the
-    branches associated with the specified changesets are shown. This
-    means that you can use :prog:`heads .` to see the heads on the
-    currently checked-out branch.
-
-    If -c/--closed is specified, also show branch heads marked closed
-    (see :prog:`commit --close-branch`).
+    With no arguments, show all heads in the repository. Heads are
+    changesets that have no descendants. They are where development
+    generally takes place and are the usual targets for update and
+    merge operations.
 
     If STARTREV is specified, only those heads that are descendants of
     STARTREV will be displayed.
-
-    If -t/--topo is specified, named branch mechanics will be ignored and only
-    topological heads (changesets with no children) will be shown.
 
     Returns 0 if matching heads are found, 1 if not.
     """
@@ -3153,30 +3164,7 @@ def heads(ui, repo, *branchrevs, **opts):
     if "rev" in opts:
         start = scmutil.revsingle(repo, opts["rev"], None).node()
 
-    if opts.get("topo"):
-        heads = [repo[h] for h in repo.heads(start)]
-    else:
-        heads = []
-        for branch in repo.branchmap():
-            heads += repo.branchheads(branch, start, opts.get("closed"))
-        heads = [repo[h] for h in heads]
-
-    if branchrevs:
-        branches = set(repo[br].branch() for br in branchrevs)
-        heads = [h for h in heads if h.branch() in branches]
-
-    if opts.get("active") and branchrevs:
-        dagheads = repo.heads(start)
-        heads = [h for h in heads if h.node() in dagheads]
-
-    if branchrevs:
-        haveheads = set(h.branch() for h in heads)
-        if branches - haveheads:
-            headless = ", ".join(b for b in branches - haveheads)
-            msg = _("no open branch heads found on branches %s") % headless
-            if opts.get("rev"):
-                msg += _(" (started at %s)") % opts["rev"]
-            ui.warn(msg, "\n")
+    heads = [repo[h] for h in repo.heads(start)]
 
     if not heads:
         return 1
@@ -3615,13 +3603,11 @@ def identify(
         hexfunc = short
     default = not (num or id or branch or bookmarks)
     output = []
-    revs = []
 
     if source:
-        source, branches = hg.parseurl(ui.expandpath(source))
+        source = hg.parseurl(ui.expandpath(source))
         peer = hg.peer(repo or ui, opts, source)  # only pass ui when no repo
         repo = peer.local()
-        revs, checkout = hg.addbranchrevs(repo, peer, branches, None)
 
     fm = ui.formatter("identify", opts)
     fm.startitem()
@@ -3629,8 +3615,6 @@ def identify(
     if not repo:
         if num or branch:
             raise error.Abort(_("can't query remote revision number or branch"))
-        if not rev and revs:
-            rev = revs[0]
         if not rev:
             rev = "tip"
 
@@ -3647,7 +3631,7 @@ def identify(
                 hexremoterev = hex(remoterev)
                 bms = [
                     bm
-                    for bm, bmr in pycompat.iteritems(peer.listkeys("bookmarks"))
+                    for bm, bmr in peer.listkeys("bookmarks").items()
                     if bmr == hexremoterev
                 ]
 
@@ -3672,7 +3656,7 @@ def identify(
             parents = ctx.parents()
 
             dirty = ""
-            if ctx.dirty(missing=True, merge=False, branch=False):
+            if ctx.dirty(missing=True, merge=False):
                 dirty = "+"
             fm.data(dirty=dirty)
 
@@ -3708,7 +3692,7 @@ def identify(
                 output.append(bm)
         else:
             if branch:
-                output.append(ctx.branch())
+                output.append("default")
 
             if bookmarks:
                 output.extend(ctx.bookmarks())
@@ -4301,7 +4285,7 @@ def log(ui, repo, *pats, **opts):
     "manifest|mani",
     [
         ("r", "rev", "", _("revision to display"), _("REV")),
-        ("", "all", False, _("list files from all revisions")),
+        ("", "all", False, _("list files from all revisions (DEPRECATED)")),
     ]
     + formatteropts,
     _("[-r REV]"),
@@ -4327,24 +4311,7 @@ def manifest(ui, repo, node=None, rev=None, **opts):
     fm = ui.formatter("manifest", opts)
 
     if opts.get("all"):
-        if rev or node:
-            raise error.Abort(_("can't specify a revision with --all"))
-
-        res = []
-        prefix = "data/"
-        suffix = ".i"
-        plen = len(prefix)
-        slen = len(suffix)
-        with repo.lock():
-            for fn, b, size in repo.store.datafiles():
-                if size != 0 and fn[-slen:] == suffix and fn[:plen] == prefix:
-                    res.append(fn[plen:-slen])
-        ui.pager("manifest")
-        for f in res:
-            fm.startitem()
-            fm.write("path", "%s\n", f)
-        fm.end()
-        return
+        raise error.Abort(_("--all not supported"))
 
     if rev and node:
         raise error.Abort(_("please specify just one revision"))
@@ -4573,13 +4540,9 @@ def paths(ui, repo, search=None, **opts):
 
     ui.pager("paths")
     if search:
-        pathitems = [
-            (name, path)
-            for name, path in pycompat.iteritems(ui.paths)
-            if name == search
-        ]
+        pathitems = [(name, path) for name, path in ui.paths.items() if name == search]
     else:
-        pathitems = sorted(pycompat.iteritems(ui.paths))
+        pathitems = sorted(ui.paths.items())
 
     fm = ui.formatter("paths", opts)
     if fm.isplain():
@@ -4785,19 +4748,13 @@ def pull(ui, repo, source="default", **opts):
         if name.startswith("pull:"):
             hintutil.trigger(name)
 
-    source, branches = hg.parseurl(ui.expandpath(source))
+    source = hg.parseurl(ui.expandpath(source))
     ui.status_err(_("pulling from %s\n") % util.hidepassword(source))
 
     hasselectivepull = ui.configbool("remotenames", "selectivepull")
-    if (
-        hasselectivepull
-        and ui.configbool("commands", "new-pull")
-        and not branches[0]
-        and not branches[1]
-    ):
+    if hasselectivepull and ui.configbool("commands", "new-pull"):
         # Use the new repo.pull API.
         # - Does not support non-selectivepull.
-        # - Does not support named branches.
         modheads, checkout = _newpull(ui, repo, source, **opts)
     else:
         if git.isgitpeer(repo):
@@ -4817,8 +4774,10 @@ def pull(ui, repo, source="default", **opts):
             source, opts=opts
         ) as conn, repo.wlock(), repo.lock(), repo.transaction("pull"):
             other = conn.peer
-            revs, checkout = hg.addbranchrevs(repo, other, branches, opts.get("rev"))
+            revs = opts.get("rev") or None
+            checkout = None
             if revs:
+                checkout = revs[0]
                 revs = autopull.rewritepullrevs(repo, revs)
 
             implicitbookmarks = set()
@@ -4908,13 +4867,11 @@ def pull(ui, repo, source="default", **opts):
     if checkout and checkout in repo:
         checkout = repo[checkout].node()
 
-        # order below depends on implementation of
-        # hg.addbranchrevs(). opts['bookmark'] is ignored,
-        # because 'checkout' is determined without it.
+        # opts['bookmark'] is ignored, because 'checkout' is determined without it.
         if opts.get("rev"):
             brev = opts["rev"][0]
         else:
-            brev = branches[0]
+            brev = None
     repo._subtoppath = source
     try:
         ret = postincoming(ui, repo, modheads, opts.get("update"), checkout, brev)
@@ -5075,9 +5032,8 @@ def push(ui, repo, dest=None, **opts):
             hint=_("see '@prog@ help config.paths'"),
         )
     dest = path.pushloc or path.loc
-    branches = (path.branch, [])
     ui.status_err(_("pushing to %s\n") % util.hidepassword(dest))
-    revs, checkout = hg.addbranchrevs(repo, repo, branches, opts.get("rev"))
+    revs = opts.get("rev") or None
     other = hg.peer(repo, opts, dest)
 
     if revs:
@@ -6058,7 +6014,7 @@ def summary(ui, repo, **opts):
 
     c = repo.dirstate.copies()
     copied, renamed = [], []
-    for d, s in pycompat.iteritems(c):
+    for d, s in c.items():
         if s in status.removed:
             status.removed.remove(s)
             renamed.append(d)
@@ -6136,60 +6092,50 @@ def summary(ui, repo, **opts):
             return
 
     def getincoming():
-        source, branches = hg.parseurl(ui.expandpath("default"))
-        sbranch = branches[0]
+        source = hg.parseurl(ui.expandpath("default"))
         try:
             other = hg.peer(repo, {}, source)
         except error.RepoError:
             if opts.get("remote"):
                 raise
-            return source, sbranch, None, None, None
-        revs, checkout = hg.addbranchrevs(repo, other, branches, None)
-        if revs:
-            revs = [other.lookup(rev) for rev in revs]
+            return source, None, None, None
         ui.debug("comparing with %s\n" % util.hidepassword(source))
         with repo.ui.configoverride({("ui", "quiet"): True}):
-            commoninc = discovery.findcommonincoming(repo, other, heads=revs)
-        return source, sbranch, other, commoninc, commoninc[1]
+            commoninc = discovery.findcommonincoming(repo, other)
+        return source, other, commoninc, commoninc[1]
 
     if needsincoming:
-        source, sbranch, sother, commoninc, incoming = getincoming()
+        source, sother, commoninc, incoming = getincoming()
     else:
-        source = sbranch = sother = commoninc = incoming = None
+        source = sother = commoninc = incoming = None
 
     def getoutgoing():
-        dest, branches = hg.parseurl(ui.expandpath("default-push", "default"))
-        dbranch = branches[0]
-        revs, checkout = hg.addbranchrevs(repo, repo, branches, None)
+        dest = hg.parseurl(ui.expandpath("default-push", "default"))
         if source != dest:
             try:
                 dother = hg.peer(repo, {}, dest)
             except error.RepoError:
                 if opts.get("remote"):
                     raise
-                return dest, dbranch, None, None
+                return dest, None, None
             ui.debug("comparing with %s\n" % util.hidepassword(dest))
         elif sother is None:
             # there is no explicit destination peer, but source one is invalid
-            return dest, dbranch, None, None
+            return dest, None, None
         else:
             dother = sother
-        if source != dest or (sbranch is not None and sbranch != dbranch):
+        if source != dest:
             common = None
         else:
             common = commoninc
-        if revs:
-            revs = [repo.lookup(rev) for rev in revs]
         with repo.ui.configoverride({("ui", "quiet"): True}):
-            outgoing = discovery.findcommonoutgoing(
-                repo, dother, onlyheads=revs, commoninc=common
-            )
-        return dest, dbranch, dother, outgoing
+            outgoing = discovery.findcommonoutgoing(repo, dother, commoninc=common)
+        return dest, dother, outgoing
 
     if needsoutgoing:
-        dest, dbranch, dother, outgoing = getoutgoing()
+        dest, dother, outgoing = getoutgoing()
     else:
-        dest = dbranch = dother = outgoing = None
+        dest = dother = outgoing = None
 
     if opts.get("remote"):
         t = []
@@ -6217,7 +6163,7 @@ def summary(ui, repo, **opts):
         ui,
         repo,
         opts,
-        ((source, sbranch, sother, commoninc), (dest, dbranch, dother, outgoing)),
+        ((source, None, sother, commoninc), (dest, None, dother, outgoing)),
     )
 
 
@@ -6427,7 +6373,6 @@ def update(
     inactive=None,
     **opts,
 ):
-
     ui.log("checkout_info", checkout_mode="python")
 
     def abort_on_unresolved_conflicts():

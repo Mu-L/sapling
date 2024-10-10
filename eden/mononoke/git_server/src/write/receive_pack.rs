@@ -10,31 +10,33 @@ use std::sync::Arc;
 use bonsai_git_mapping::BonsaiGitMappingArc;
 use bytes::Bytes;
 use cloned::cloned;
-use context::CoreContext;
 use futures::stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use git_push_redirect::Staleness;
 use gotham::mime;
 use gotham::state::FromState;
 use gotham::state::State;
 use gotham_ext::error::HttpError;
+use gotham_ext::middleware::ScubaMiddlewareState;
 use gotham_ext::response::BytesBody;
 use gotham_ext::response::TryIntoResponse;
 use hyper::Body;
 use hyper::Response;
-use mononoke_api::Repo;
+use import_tools::GitImportLfs;
+use metaconfig_types::RepoConfigRef;
 use packetline::encode::flush_to_write;
 use packetline::encode::write_text_packetline;
 use protocol::pack_processor::parse_pack;
 use repo_blobstore::RepoBlobstoreArc;
-use repo_identity::RepoIdentityRef;
+use slog::info;
 
 use crate::command::Command;
 use crate::command::PushArgs;
 use crate::command::RefUpdate;
 use crate::command::RequestCommand;
 use crate::model::GitMethodInfo;
+use crate::model::GitServerContext;
+use crate::model::PushValidationErrors;
 use crate::model::RepositoryParams;
 use crate::model::RepositoryRequestContext;
 use crate::service::set_ref;
@@ -45,6 +47,7 @@ use crate::service::GitObjectStore;
 use crate::service::RefUpdateOperation;
 use crate::util::empty_body;
 use crate::util::get_body;
+use crate::util::mononoke_source_of_truth;
 
 const PACK_OK: &[u8] = b"unpack ok";
 const REF_OK: &str = "ok";
@@ -52,6 +55,9 @@ const REF_ERR: &str = "ng";
 const REF_UPDATE_CONCURRENCY: usize = 20;
 
 pub async fn receive_pack(state: &mut State) -> Result<Response<Body>, HttpError> {
+    let repo_name = RepositoryParams::borrow_from(state).repo_name();
+    ScubaMiddlewareState::try_borrow_add(state, "repo", repo_name.as_str());
+    ScubaMiddlewareState::try_borrow_add(state, "method", "push");
     let body_bytes = get_body(state).await?;
     // We got a flush line packet to keep the connection alive. Just return Ok.
     if body_bytes == packetline::FLUSH_LINE {
@@ -84,35 +90,75 @@ async fn push<'a>(
             &request_context.ctx,
             request_context.repo.repo_blobstore_arc().clone(),
         );
+        info!(
+            request_context.ctx.logger(),
+            "Parsing packfile for repo {}", repo_name
+        );
         // Parse the packfile provided as part of the push and verify that its valid
         let parsed_objects = parse_pack(push_args.pack_file, ctx, blobstore.clone()).await?;
         // Generate the GitObjectStore using the parsed objects
         let object_store = Arc::new(GitObjectStore::new(parsed_objects, ctx, blobstore.clone()));
+        // Instantiate the LFS configuration
+        let git_ctx = GitServerContext::borrow_from(state);
+        let lfs = if request_context
+            .repo
+            .repo_config()
+            .git_configs
+            .git_lfs_interpret_pointers
+        {
+            GitImportLfs::new(
+                git_ctx
+                    .upstream_lfs_server()?
+                    .ok_or_else(|| anyhow::anyhow!("No upstream LFS server specified"))?,
+                false,    // allow_not_found
+                2,        // max attempts
+                Some(50), // conn_limit
+                git_ctx.tls_args()?,
+            )?
+        } else {
+            GitImportLfs::new_disabled()
+        };
+        info!(
+            request_context.ctx.logger(),
+            "Uploading packfile objects for repo {}", repo_name
+        );
         // Upload the objects corresponding to the push to the underlying store
         let ref_map = upload_objects(
             ctx,
             request_context.repo.clone(),
             object_store.clone(),
             &push_args.ref_updates,
+            lfs,
         )
         .await?;
-        let affected_changesets_len = ref_map.len();
+        info!(
+            request_context.ctx.logger(),
+            "Uploaded packfile objects for repo {}. Sending PACK_OK to the client", repo_name
+        );
         // We were successful in parsing the pack and uploading the objects to underlying store. Indicate this to the client
         write_text_packetline(PACK_OK, &mut output).await?;
         // Create bonsai_git_mapping store to enable mapping lookup during bookmark movement
         let git_bonsai_mapping_store = Arc::new(GitMappingsStore::new(
             ctx,
-            request_context.repo.inner.bonsai_git_mapping_arc(),
+            request_context.repo.bonsai_git_mapping_arc(),
             ref_map,
         ));
+        info!(
+            request_context.ctx.logger(),
+            "Updating refs for repo {}", repo_name
+        );
         let updated_refs = refs_update(
             &push_args,
             request_context.clone(),
             git_bonsai_mapping_store.clone(),
             object_store.clone(),
-            affected_changesets_len,
         )
         .await?;
+        info!(
+            request_context.ctx.logger(),
+            "Updated refs for repo {}. Sending ref update status to the client", repo_name
+        );
+        let mut validation_errors = PushValidationErrors::default();
         // For each ref, update the status as ok or ng based on the result of the bookmark set operation
         for (updated_ref, result) in updated_refs {
             match result {
@@ -124,6 +170,8 @@ async fn push<'a>(
                     .await?;
                 }
                 Err(e) => {
+                    validation_errors
+                        .add_error(updated_ref.ref_name.clone(), e.root_cause().to_string());
                     write_text_packetline(
                         format!("{} {} {}", REF_ERR, updated_ref.ref_name, e.root_cause())
                             .as_bytes(),
@@ -132,6 +180,9 @@ async fn push<'a>(
                     .await?;
                 }
             }
+        }
+        if !validation_errors.is_empty() {
+            state.put(validation_errors);
         }
         flush_to_write(&mut output).await?;
     }
@@ -144,7 +195,6 @@ async fn refs_update(
     request_context: Arc<RepositoryRequestContext>,
     git_bonsai_mapping_store: Arc<GitMappingsStore>,
     object_store: Arc<GitObjectStore>,
-    affected_changesets_len: usize,
 ) -> anyhow::Result<Vec<(RefUpdate, anyhow::Result<()>)>> {
     if push_args.settings.atomic {
         atomic_refs_update(
@@ -152,7 +202,6 @@ async fn refs_update(
             request_context,
             git_bonsai_mapping_store,
             object_store,
-            affected_changesets_len,
         )
         .await
     } else {
@@ -161,7 +210,6 @@ async fn refs_update(
             request_context,
             git_bonsai_mapping_store,
             object_store,
-            affected_changesets_len,
         )
         .await
     }
@@ -173,22 +221,37 @@ async fn non_atomic_refs_update(
     request_context: Arc<RepositoryRequestContext>,
     git_bonsai_mapping_store: Arc<GitMappingsStore>,
     object_store: Arc<GitObjectStore>,
-    affected_changesets_len: usize,
 ) -> anyhow::Result<Vec<(RefUpdate, anyhow::Result<()>)>> {
     stream::iter(push_args.ref_updates.clone())
         .map(|ref_update| {
             cloned!(request_context, git_bonsai_mapping_store, object_store);
             async move {
+                let ctx = request_context.ctx.clone();
+                let ref_info = ref_update.clone();
+                info!(
+                    ctx.logger(),
+                    "Updating ref {} from {} to {}",
+                    ref_info.ref_name.as_str(),
+                    ref_info.from.to_hex(),
+                    ref_info.to.to_hex()
+                );
                 let output = tokio::spawn(async move {
                     set_ref(
                         request_context,
                         git_bonsai_mapping_store,
                         object_store,
-                        RefUpdateOperation::new(ref_update.clone(), affected_changesets_len),
+                        RefUpdateOperation::new(ref_update),
                     )
                     .await
                 })
                 .await?;
+                info!(
+                    ctx.logger(),
+                    "Updated ref {} from {} to {}",
+                    ref_info.ref_name.as_str(),
+                    ref_info.from.to_hex(),
+                    ref_info.to.to_hex()
+                );
                 anyhow::Ok(output)
             }
         })
@@ -203,12 +266,11 @@ async fn atomic_refs_update(
     request_context: Arc<RepositoryRequestContext>,
     git_bonsai_mapping_store: Arc<GitMappingsStore>,
     object_store: Arc<GitObjectStore>,
-    affected_changesets_len: usize,
 ) -> anyhow::Result<Vec<(RefUpdate, anyhow::Result<()>)>> {
     let ref_update_ops = push_args
         .ref_updates
         .iter()
-        .map(|ref_update| RefUpdateOperation::new(ref_update.clone(), affected_changesets_len))
+        .map(|ref_update| RefUpdateOperation::new(ref_update.clone()))
         .collect::<Vec<_>>();
     let ref_updates = push_args.ref_updates.clone();
     match set_refs(
@@ -234,15 +296,6 @@ async fn atomic_refs_update(
                 .collect())
         }
     }
-}
-
-async fn mononoke_source_of_truth(ctx: &CoreContext, repo: Arc<Repo>) -> anyhow::Result<bool> {
-    let repo_id = repo.repo_identity().id();
-    repo.inner
-        .git_push_redirect_config
-        .get_by_repo_id(ctx, repo_id, Staleness::MostRecent)
-        .await
-        .map(|entry| entry.map_or(false, |entry| entry.mononoke))
 }
 
 async fn reject_push(

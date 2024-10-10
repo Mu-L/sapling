@@ -33,6 +33,7 @@ use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use minibytes::Bytes;
 use parking_lot::RwLock;
+use storemodel::SerializationFormat;
 use streams::HybridResolver;
 use streams::HybridStream;
 use tracing::instrument;
@@ -42,7 +43,7 @@ use zstore::Zstore;
 use crate::AppendCommits;
 use crate::DescribeBackend;
 use crate::HgCommit;
-use crate::HgCommits;
+use crate::OnDiskCommits;
 use crate::ParentlessHgCommit;
 use crate::ReadCommitText;
 use crate::Result;
@@ -58,7 +59,7 @@ use crate::StripCommits;
 /// Use edenapi to resolve public commit messages and hashes.
 pub struct HybridCommits {
     revlog: Option<RevlogCommits>,
-    commits: HgCommits,
+    commits: OnDiskCommits,
     client: Arc<dyn SaplingRemoteApi>,
     lazy_hash_desc: String,
 }
@@ -110,6 +111,13 @@ impl RemoteIdConvertProtocol for SaplingRemoteApiProtocol {
                         name, EDENSCM_DISABLE_REMOTE_RESOLVE
                     );
                     return Err(dag::errors::BackendError::Generic(msg).into());
+                }
+                if name.as_ref() == Id20::wdir_id().as_ref()
+                    || name.as_ref() == Id20::null_id().as_ref()
+                {
+                    // Do not borther asking server about virtual nodes.
+                    // Check resolve_names_to_relative_paths API docstring.
+                    continue;
                 }
                 if let Some(threshold) = self.remote_name_threshold {
                     let current = self.remote_name_current.fetch_add(1, SeqCst);
@@ -201,10 +209,11 @@ impl HybridCommits {
         dag_path: &Path,
         commits_path: &Path,
         client: Arc<dyn SaplingRemoteApi>,
+        format: SerializationFormat,
     ) -> Result<Self> {
-        let commits = HgCommits::new(dag_path, commits_path)?;
+        let commits = OnDiskCommits::new(dag_path, commits_path, format)?;
         let revlog = match revlog_dir {
-            Some(revlog_dir) => Some(RevlogCommits::new(revlog_dir)?),
+            Some(revlog_dir) => Some(RevlogCommits::new(revlog_dir, format)?),
             None => None,
         };
         Ok(Self {
@@ -351,6 +360,10 @@ impl AppendCommits for HybridCommits {
         self.commits.dag.import_pull_data(clone_data, heads).await?;
         Ok(())
     }
+
+    async fn update_virtual_nodes(&mut self, wdir_parents: Vec<Vertex>) -> Result<()> {
+        self.commits.update_virtual_nodes(wdir_parents).await
+    }
 }
 
 /// Subset of HybridCommits useful to read commit text.
@@ -440,6 +453,10 @@ impl Drop for Resolver {
 impl HybridResolver<Vertex, Bytes, anyhow::Error> for Resolver {
     fn resolve_local(&mut self, vertex: &Vertex) -> anyhow::Result<Option<Bytes>> {
         let id = Id20::from_slice(vertex.as_ref())?;
+        if &id == Id20::wdir_id() || &id == Id20::null_id() {
+            // Do not borther asking server about virtual nodes.
+            return Ok(Some(Bytes::new()));
+        }
         match self.zstore.read().get(id)? {
             Some(bytes) => Ok(Some(bytes.slice(Id20::len() * 2..))),
             None => Ok(crate::revlog::get_hard_coded_commit_text(vertex)),

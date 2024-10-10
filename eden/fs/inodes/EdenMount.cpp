@@ -702,6 +702,16 @@ void EdenMount::transitionToFsChannelInitializationErrorState() {
         break;
     }
   }
+
+  // For NFS mounts, we register the mount prior to finishing initialization.
+  // Failure after registration (but before initialization) causes the
+  // uninitialized mount to get stuck in the Mountd's map of registered mounts
+  // and causes crashes when remount attempts occur. To avoid this, we must
+  // always unregister upon initialization failure.
+  auto nfsServer = serverState_->getNfsServer();
+  if (nfsServer) {
+    nfsServer->tryUnregisterMount(getPath());
+  }
 }
 
 static folly::StringPiece getCheckoutModeString(CheckoutMode checkoutMode) {
@@ -800,6 +810,7 @@ ImmediateFuture<SetPathObjectIdResultAndTimes> EdenMount::setPathsToObjectIds(
         checkoutMode,
         context->getClientPid(),
         "setPathObjectId",
+        nullptr,
         context->getRequestInfo());
 
     /**
@@ -889,9 +900,9 @@ ImmediateFuture<SetPathObjectIdResultAndTimes> EdenMount::setPathsToObjectIds(
                          << " trees (" << fetchStats.tree.cacheHitRate
                          << "% chr), " << fetchStats.blob.accessCount
                          << " blobs (" << fetchStats.blob.cacheHitRate
-                         << "% chr), and "
-                         << fetchStats.blobMetadata.accessCount << " metadata ("
-                         << fetchStats.blobMetadata.cacheHitRate << "% chr).";
+                         << "% chr), and " << fetchStats.blobAuxData.accessCount
+                         << " metadata (" << fetchStats.blobAuxData.cacheHitRate
+                         << "% chr).";
 
               return std::move(resultAndTimes);
             });
@@ -1070,6 +1081,21 @@ const shared_ptr<UnboundedQueueExecutor>& EdenMount::getInvalidationThreadPool()
 
 std::shared_ptr<const EdenConfig> EdenMount::getEdenConfig() const {
   return serverState_->getReloadableConfig()->getEdenConfig();
+}
+
+std::optional<int64_t> EdenMount::getCheckoutProgress() const {
+  auto parentLock = parentState_.rlock();
+  if (!std::holds_alternative<ParentCommitState::CheckoutInProgress>(
+          parentLock->checkoutState)) {
+    return std::nullopt;
+  }
+  auto checkout = std::get<ParentCommitState::CheckoutInProgress>(
+      parentLock->checkoutState);
+  auto progress = checkout.checkoutProgress.get();
+  if (progress == nullptr) {
+    return std::nullopt;
+  }
+  return progress->load(std::memory_order_relaxed);
 }
 
 #ifndef _WIN32
@@ -1358,6 +1384,7 @@ ImmediateFuture<CheckoutResult> EdenMount::checkout(
 
   ParentCommitState::CheckoutState oldState =
       ParentCommitState::NoOngoingCheckout{};
+  std::shared_ptr<CheckoutContext> ctx;
   RootId oldParent;
   {
     auto parentLock = parentState_.wlock();
@@ -1392,15 +1419,18 @@ ImmediateFuture<CheckoutResult> EdenMount::checkout(
     // achieving the same would be to hold the lock during the checkout
     // operation, but this might lead to deadlocks on Windows due to callbacks
     // needing to access the parent commit to service callbacks.
-    parentLock->checkoutState = ParentCommitState::CheckoutInProgress{};
+    auto progressTracker = std::make_shared<std::atomic<uint64_t>>(0);
+    parentLock->checkoutState =
+        ParentCommitState::CheckoutInProgress{progressTracker};
+    ctx = std::make_shared<CheckoutContext>(
+        this,
+        checkoutMode,
+        fetchContext->getClientPid(),
+        thriftMethodCaller,
+        progressTracker,
+        fetchContext->getRequestInfo());
   }
 
-  auto ctx = std::make_shared<CheckoutContext>(
-      this,
-      checkoutMode,
-      fetchContext->getClientPid(),
-      thriftMethodCaller,
-      fetchContext->getRequestInfo());
   XLOG(DBG1) << "starting checkout for " << this->getPath() << ": " << oldParent
              << " to " << snapshotHash;
 
@@ -1585,8 +1615,8 @@ ImmediateFuture<CheckoutResult> EdenMount::checkout(
                    << fetchStats.tree.cacheHitRate << "% chr), "
                    << fetchStats.blob.accessCount << " blobs ("
                    << fetchStats.blob.cacheHitRate << "% chr), and "
-                   << fetchStats.blobMetadata.accessCount << " metadata ("
-                   << fetchStats.blobMetadata.cacheHitRate << "% chr).";
+                   << fetchStats.blobAuxData.accessCount << " metadata ("
+                   << fetchStats.blobAuxData.cacheHitRate << "% chr).";
 
         auto checkoutTimeInSeconds =
             std::chrono::duration<double>{stopWatch.elapsed()};
@@ -1596,10 +1626,10 @@ ImmediateFuture<CheckoutResult> EdenMount::checkout(
         event.success = result.hasValue();
         event.fetchedTrees = fetchStats.tree.fetchCount;
         event.fetchedBlobs = fetchStats.blob.fetchCount;
-        event.fetchedBlobsMetadata = fetchStats.blobMetadata.fetchCount;
+        event.fetchedBlobsAuxData = fetchStats.blobAuxData.fetchCount;
         event.accessedTrees = fetchStats.tree.accessCount;
         event.accessedBlobs = fetchStats.blob.accessCount;
-        event.accessedBlobsMetadata = fetchStats.blobMetadata.accessCount;
+        event.accessedBlobsAuxData = fetchStats.blobAuxData.accessCount;
         if (result.hasValue()) {
           auto& conflicts = result.value().conflicts;
           event.numConflicts = conflicts.size();
@@ -1620,9 +1650,9 @@ ImmediateFuture<CheckoutResult> EdenMount::checkout(
           }
         }
 
-        // Don't log metadata fetches, because our backends don't yet support
-        // fetching metadata directly. We expect tree fetches to eventually
-        // return metadata for their entries.
+        // Don't log aux data fetches, because our backends don't yet support
+        // fetching aux data directly. We expect tree fetches to eventually
+        // return aux data for their entries.
         this->serverState_->getStructuredLogger()->logEvent(event);
         return std::move(result);
       });
@@ -1832,11 +1862,25 @@ ImmediateFuture<Unit> EdenMount::diff(
     auto latestInfo = getJournal().getLatest();
     if (latestInfo.has_value()) {
       auto key = ScmStatusCache::makeKey(commitHash, listIgnored);
+      XLOG(DBG7) << fmt::format(
+          "ScmStatusCache: hash={}, listIgnored={}, key={}",
+          commitHash.value(),
+          listIgnored,
+          key);
       auto curSequenceID = latestInfo.value().sequenceID;
       std::variant<StatusResultFuture, StatusResultPromise> getResult{nullptr};
       {
         auto lockedCachePtr = scmStatusCache_.wlock();
-        getResult = (*lockedCachePtr)->get(key, curSequenceID);
+        auto& cache = *lockedCachePtr;
+
+        // if there is a root update, we can invalidate the cache as a whole
+        // so we don't need to invalidate each entry item individually as we
+        // fetch them.
+        if (!cache->isCachedWorkingDirValid(currentWorkingCopyParentRootId)) {
+          cache->clear();
+          cache->resetCachedWorkingDir(currentWorkingCopyParentRootId);
+        }
+        getResult = cache->get(key, curSequenceID);
       }
 
       if (std::holds_alternative<StatusResultFuture>(getResult)) {
@@ -1911,10 +1955,7 @@ ImmediateFuture<Unit> EdenMount::diff(
                 auto lockedCachePtr = scmStatusCache_.wlock();
                 if (shouldInsert) {
                   (*lockedCachePtr)
-                      ->insert(
-                          key,
-                          std::make_shared<SeqStatusPair>(
-                              curSequenceID, std::move(newStatus)));
+                      ->insert(key, curSequenceID, std::move(newStatus));
                 }
 
                 // FaultInjector check point: for testing only
@@ -2030,6 +2071,10 @@ std::string EdenMount::getCounterName(CounterName name) {
     case CounterName::PERIODIC_UNLINKED_INODE_UNLOAD:
       return folly::to<std::string>(
           "inodemap.", base, ".unloaded_unlinked_inodes");
+    case CounterName::OVERLAY_DIR_COUNT:
+      return folly::to<std::string>("overlay.", base, ".dir_count");
+    case CounterName::OVERLAY_FILE_COUNT:
+      return folly::to<std::string>("overlay.", base, ".file_count");
   }
   EDEN_BUG() << "unknown counter name "
              << static_cast<std::underlying_type_t<CounterName>>(name);
@@ -2168,6 +2213,12 @@ folly::Future<folly::Unit> EdenMount::fsChannelMount(bool readOnly) {
                 // Channel is later moved. We must assign addr to a local var
                 // to avoid the possibility of a use-after-move bug.
                 auto addr = channel->getAddr();
+
+                // For testing purposes only: allow tests to force an exception
+                // that mimics privhelper mount failing
+                serverState_->getFaultInjector().check(
+                    "failMountInitialization", mountPath.view());
+
                 // TODO: teach privhelper or something to mount on Windows
                 return serverState_->getPrivHelper()
                     ->nfsMount(
@@ -2234,6 +2285,11 @@ folly::Future<folly::Unit> EdenMount::fsChannelMount(bool readOnly) {
               return makeFuture(folly::unit);
             });
 #else
+
+        // For testing purposes only: allow tests to force an exception
+        // that mimics privhelper mount failing
+        serverState_->getFaultInjector().check(
+            "failMountInitialization", mountPath.view());
         return serverState_->getPrivHelper()
             ->fuseMount(
                 mountPath.view(),
@@ -2367,22 +2423,7 @@ void EdenMount::fsChannelInitSuccessful(
   // This state transition could fail if shutdown() was called before we saw
   // the FUSE_INIT message from the kernel.
   transitionState(State::STARTING, State::RUNNING);
-  preparePostFsChannelCompletion(
-      std::move(channelCompleteFuture)
-          .deferValue([this](FsStopDataPtr stopData) {
-            if (isNfsdChannel()) {
-              // TODO: Understand why destroying Nfsd3 here is necessary, and
-              // allowing it to destroy itself when EdenMount dies is not
-              // sufficient. The problem with clearing channel_ is that it
-              // introduces a potential race with every other use of channel_ in
-              // EdenMount.
-              //
-              // In particular, it races with fb303's dynamic counter
-              // aggregation.
-              channel_ = nullptr;
-            }
-            return stopData;
-          }));
+  preparePostFsChannelCompletion(std::move(channelCompleteFuture));
 }
 
 void EdenMount::takeoverFuse(FuseChannelData takeoverData) {

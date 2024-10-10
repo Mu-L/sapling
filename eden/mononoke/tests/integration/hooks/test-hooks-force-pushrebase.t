@@ -9,7 +9,7 @@
 setup configuration
   $ setconfig push.edenapi=true
   $ export MONONOKE_TEST_SCRIBE_LOGGING_DIRECTORY=$TESTTMP/scribe_logs/
-  $ ENABLE_API_WRITES=1 setup_mononoke_config
+  $ setup_mononoke_config
   $ cd "$TESTTMP/mononoke-config"
   $ cat >> repos/repo/server.toml <<CONFIG
   > [[bookmarks]]
@@ -33,9 +33,8 @@ setup configuration
   $ enable amend
 
 setup repo
-  $ hg init repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
   $ drawdag <<EOF
   > A X
   > EOF
@@ -45,14 +44,13 @@ setup repo
 
 blobimport
   $ cd ..
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
   $ start_and_wait_for_mononoke_server
 clone
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo2 --noupdate --config extensions.remotenames= -q
+  $ hg clone -q mono:repo repo2 --noupdate
   $ cd repo2
-  $ setup_hg_client
   $ enable pushrebase remotenames
 
 make more commits
@@ -69,7 +67,7 @@ make more commits
 
 fast-forward the bookmark
   $ hg up -q $B
-  $ sl push -r . --to main --force
+  $ hg push -r . --to main --force
   pushing rev 112478962961 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   edenapi: queue 1 commit for upload
   edenapi: queue 1 file for upload
@@ -81,7 +79,7 @@ fast-forward the bookmark
 
 fast-forward the bookmark over a commit that fails the hook
   $ hg up -q $D
-  $ sl push -r . --to main --force
+  $ hg push -r . --to main --force
   pushing rev 7ff4b7c298ec to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   edenapi: queue 2 commits for upload
   edenapi: queue 3 files for upload
@@ -95,13 +93,13 @@ fast-forward the bookmark over a commit that fails the hook
   [255]
 
 bypass the hook, the push will now work
-  $ sl push -r . --to main --force --pushvar ALLOW_LARGE_FILES=true
+  $ hg push -r . --to main --force --pushvar ALLOW_LARGE_FILES=true
   pushing rev 7ff4b7c298ec to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   moving remote bookmark main from * to 7ff4b7c298ec (glob)
 
 attempt a non-fast-forward push over a commit that fails the hook
   $ hg up -q $F
-  $ sl push -r . --to main --force
+  $ hg push -r . --to main --force
   pushing rev af09fbbc2f05 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   edenapi: queue 2 commits for upload
   edenapi: queue 2 files for upload
@@ -115,14 +113,14 @@ attempt a non-fast-forward push over a commit that fails the hook
   [255]
 
 bypass the hook, and it should work
-  $ sl push -r . --to main --pushvar ALLOW_LARGE_FILES=true --force
+  $ hg push -r . --to main --pushvar ALLOW_LARGE_FILES=true --force
   pushing rev af09fbbc2f05 to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   moving remote bookmark main from * to af09fbbc2f05 (glob)
 
 attempt a move to a completely unrelated commit (no common ancestor), with an ancestor that
 fails the hook
   $ hg up -q $Z
-  $ sl push -r . --to main --force
+  $ hg push -r . --to main --force
   pushing rev e3295448b1ef to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   edenapi: queue 2 commits for upload
   edenapi: queue 2 files for upload
@@ -136,6 +134,6 @@ fails the hook
   [255]
 
 bypass the hook, and it should work
-  $ sl push -r . --to main --force --pushvar ALLOW_LARGE_FILES=true
+  $ hg push -r . --to main --force --pushvar ALLOW_LARGE_FILES=true
   pushing rev e3295448b1ef to destination https://localhost:$LOCAL_PORT/edenapi/ bookmark main
   moving remote bookmark main from * to e3295448b1ef (glob)

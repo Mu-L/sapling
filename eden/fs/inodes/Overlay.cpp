@@ -259,6 +259,11 @@ void Overlay::close() {
   if (fileContentStore_ && inodeCatalogType_ != InodeCatalogType::Legacy) {
     fileContentStore_->close();
   }
+
+  // Reset InternalOverlayStats counters
+  auto overlayStatsLock = overlayStats_.wlock();
+  overlayStatsLock->dirCount = 0;
+  overlayStatsLock->fileCount = 0;
 }
 
 bool Overlay::isClosed() {
@@ -364,7 +369,8 @@ void Overlay::initOverlay(
         inodeCatalog_.get(),
         static_cast<FsFileContentStore*>(fileContentStore_.get()),
         std::nullopt,
-        lookupCallback);
+        lookupCallback,
+        config->fsckNumErrorDiscoveryThreads.getValue());
     folly::stop_watch<> fsckRuntime;
     checker.scanForErrors(progressCallback);
     auto result = checker.repairErrors();
@@ -566,10 +572,11 @@ void Overlay::removeOverlayFile(InodeNumber inodeNumber) {
 
     freeInodeFromMetadataTable(inodeNumber);
     fileContentStore_->removeOverlayFile(inodeNumber);
+    stats_->increment(&OverlayStats::removeOverlayFileSuccessful);
+    overlayStats_.wlock()->fileCount--;
 #else
     (void)inodeNumber;
 #endif
-    stats_->increment(&OverlayStats::removeOverlayFileSuccessful);
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to remove overlay file " << inodeNumber << " "
               << e.what();
@@ -586,6 +593,7 @@ void Overlay::removeOverlayDir(InodeNumber inodeNumber) {
     freeInodeFromMetadataTable(inodeNumber);
     inodeCatalog_->removeOverlayDir(inodeNumber);
     stats_->increment(&OverlayStats::removeOverlayDirSuccessful);
+    overlayStats_.wlock()->dirCount--;
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to remove overlay dir " << inodeNumber << " "
               << e.what();
@@ -613,6 +621,7 @@ void Overlay::recursivelyRemoveOverlayDir(InodeNumber inodeNumber) {
       gcCondVar_.notify_one();
     }
     stats_->increment(&OverlayStats::recursivelyRemoveOverlayDirSuccessful);
+    overlayStats_.wlock()->dirCount--;
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to recursively remove overlay dir " << inodeNumber
               << " " << e.what();
@@ -716,6 +725,7 @@ OverlayFile Overlay::createOverlayFile(
         fileContentStore_->createOverlayFile(inodeNumber, contents),
         weak_from_this());
     stats_->increment(&OverlayStats::createOverlayFileSuccessful);
+    overlayStats_.wlock()->fileCount++;
     return file;
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to create file " << inodeNumber << " " << e.what();
@@ -738,6 +748,7 @@ OverlayFile Overlay::createOverlayFile(
         fileContentStore_->createOverlayFile(inodeNumber, contents),
         weak_from_this());
     stats_->increment(&OverlayStats::createOverlayFileSuccessful);
+    overlayStats_.wlock()->fileCount++;
     return file;
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to create file " << inodeNumber << " " << e.what();
@@ -747,6 +758,10 @@ OverlayFile Overlay::createOverlayFile(
 }
 
 #endif // !_WIN32
+
+Overlay::InternalOverlayStats Overlay::getOverlayStats() const {
+  return *overlayStats_.rlock();
+}
 
 InodeNumber Overlay::getMaxInodeNumber() {
   auto ino = nextInodeNumber_.load(std::memory_order_relaxed);
@@ -888,6 +903,7 @@ void Overlay::handleGCRequest(GCRequest& request) {
     try {
       freeInodeFromMetadataTable(ino);
       auto dirData = inodeCatalog_->loadAndRemoveOverlayDir(ino);
+      overlayStats_.wlock()->dirCount--;
       if (!dirData.has_value()) {
         XLOG(DBG7) << "no dir data for inode " << ino;
         continue;
@@ -917,6 +933,7 @@ void Overlay::addChild(
       saveOverlayDir(parent, content);
     }
     stats_->increment(&OverlayStats::addChildSuccessful);
+    overlayStats_.wlock()->dirCount++;
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to add child " << childEntry.first << " " << e.what();
     stats_->increment(&OverlayStats::addChildFailure);
@@ -931,11 +948,15 @@ void Overlay::removeChild(
   DurationScope<EdenStats> statScope{stats_, &OverlayStats::removeChild};
   try {
     if (supportsSemanticOperations_) {
-      inodeCatalog_->removeChild(parent, childName);
+      if (inodeCatalog_->removeChild(parent, childName)) {
+        overlayStats_.wlock()->dirCount--;
+        stats_->increment(&OverlayStats::removeChildSuccessful);
+      }
     } else {
       saveOverlayDir(parent, content);
+      overlayStats_.wlock()->dirCount--;
+      stats_->increment(&OverlayStats::removeChildSuccessful);
     }
-    stats_->increment(&OverlayStats::removeChildSuccessful);
   } catch (const std::exception& e) {
     XLOG(ERR) << "Failed to remove child " << childName << " " << e.what();
     stats_->increment(&OverlayStats::removeChildFailure);

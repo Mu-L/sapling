@@ -22,6 +22,7 @@ use std::str;
 use std::str::FromStr;
 use std::time::Duration;
 
+use abomonation_derive::Abomonation;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Error;
@@ -93,7 +94,7 @@ impl PartialEq for ComparableRegex {
 impl Eq for ComparableRegex {}
 
 /// Structure representing general purpose identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
 pub struct Identity {
     /// Type of this identity.
     pub id_type: String,
@@ -112,9 +113,18 @@ pub struct RedactionConfig {
     pub redaction_sets_location: String,
 }
 
+/// Configuration for the async requests system
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AsyncRequestsConfig {
+    /// The database used for the queue table
+    pub db_config: Option<DatabaseConfig>,
+    /// The blobstore used for request params and response
+    pub blobstore: Option<BlobConfig>,
+}
+
 /// Configuration for all repos
 #[facet::facet]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
 pub struct CommonConfig {
     /// Hipster tier that is permitted to act as a trusted proxy.
     pub trusted_parties_hipster_tier: Option<String>,
@@ -138,6 +148,8 @@ pub struct CommonConfig {
     pub git_memory_upper_bound: Option<u64>,
     /// Scuba table to dump edenapi requests to (for replay).
     pub edenapi_dumper_scuba_table: Option<String>,
+    /// Configuration for the async requests system.
+    pub async_requests_config: AsyncRequestsConfig,
 }
 
 /// Configuration for logging of censored blobstore accesses
@@ -237,8 +249,6 @@ pub struct RepoConfig {
     pub deep_sharding_config: Option<ShardingModeConfig>,
     /// Local directory to write files to instead of uploading to everstore
     pub everstore_local_path: Option<String>,
-    /// The concurrency setting to be used during git protocol for this repo
-    pub git_concurrency: Option<GitConcurrencyParams>,
     /// Configuration for the repo metadata logger
     pub metadata_logger_config: MetadataLoggerConfig,
     /// Configuration for connecting to Zelos
@@ -247,6 +257,12 @@ pub struct RepoConfig {
     pub bookmark_name_for_objects_count: Option<String>,
     /// Default value for the objects count metric if it cannot be determined via TreeInfo.
     pub default_objects_count: Option<i64>,
+    /// Overrides the value for the objects count metric for this repo, whether
+    /// the actual value can be computed with TreeInfo or not (in fact, the computation is
+    /// skipped entirely).
+    pub override_objects_count: Option<i64>,
+    /// Sets a multiplier for the value for the objects count metric for this repo
+    pub objects_count_multiplier: Option<ObjectsCountMultiplier>,
     /// Map of XRepoSyncSourceConfig for the current repo keyed by the name of the target repo, e.g.
     /// XRepoSyncSourceConfig for the sync from whatsapp/server to fbsource will be stored as
     /// whatsapp_server_config.x_repo_sync_source_mapping["fbsource"] = config
@@ -255,12 +271,8 @@ pub struct RepoConfig {
     pub commit_cloud_config: CommitCloudConfig,
     /// Mononoke Cas Sync Configuration
     pub mononoke_cas_sync_config: Option<MononokeCasSyncConfig>,
-    /// Determines the behaviour on converting from Git commits
-    /// to bonsais for this repo.
-    ///  - With the flag ON the git lfs pointers will be interpreted and the actual file contents will
-    ///    be stored. File contents have to be available in Mononoke.
-    ///  - With this flag OFF the git lfs pointers are treated like any other file in the repo.
-    pub git_lfs_interpret_pointers: bool,
+    /// All Git related configs (e.g. Git Server and Git-only repos)
+    pub git_configs: GitConfigs,
 }
 
 /// Config determining if the repo is deep sharded in the context of a service.
@@ -347,6 +359,9 @@ pub struct DerivedDataConfig {
 
     /// All available configs for derived data types
     pub available_configs: HashMap<String, DerivedDataTypesConfig>,
+
+    /// Name of scuba table to log all derivation queue operations
+    pub derivation_queue_scuba_table: Option<String>,
 }
 
 impl DerivedDataConfig {
@@ -491,6 +506,16 @@ pub enum RepoReadOnly {
     /// This repo should accept writes.
     #[default]
     ReadWrite,
+}
+
+impl RepoReadOnly {
+    /// Returns true if the repo is read-only
+    pub fn is_read_only(&self) -> bool {
+        match self {
+            RepoReadOnly::ReadOnly(_) => true,
+            RepoReadOnly::ReadWrite => false,
+        }
+    }
 }
 
 /// Configuration of warming up the Mononoke cache. This warmup happens on startup
@@ -824,6 +849,8 @@ pub struct LfsParams {
     pub rollout_percentage: u32,
     /// Whether hg sync job should generate lfs blobs
     pub generate_lfs_blob_in_hg_sync_job: bool,
+    /// Whether to use upstream LFS server
+    pub use_upstream_lfs_server: bool,
 }
 
 /// Id used to discriminate diffirent underlying blobstore instances
@@ -1391,7 +1418,7 @@ pub enum CommitSyncDirection {
 }
 
 /// CommitSyncConfig version name
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Abomonation, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[derive(mysql::OptTryFromRowField)]
 pub struct CommitSyncConfigVersion(pub String);
 
@@ -1797,6 +1824,8 @@ pub struct HgSyncConfig {
 pub struct MononokeCasSyncConfig {
     /// The name of the main bookmark to sync to RE CAS
     pub main_bookmark_to_sync: String,
+    /// Enabling it would expand the sync to all the bookmarks
+    pub sync_all_bookmarks: bool,
 }
 
 /// Destination for telemetry logging.
@@ -1842,7 +1871,7 @@ pub struct MetadataLoggerConfig {
 }
 
 /// Configuration for connecting to Zelos
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum ZelosConfig {
     /// Connect to a local Zelos server
     Local {
@@ -1876,6 +1905,25 @@ pub struct GitConcurrencyParams {
     pub tags: usize,
 }
 
+/// All Git related configs (e.g. Git Server and Git-only repos)
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct GitConfigs {
+    /// The concurrency setting to be used during git protocol for this repo
+    pub git_concurrency: Option<GitConcurrencyParams>,
+    /// Determines the behaviour on converting from Git commits
+    /// to bonsais for this repo.
+    ///  - With the flag ON the git lfs pointers will be interpreted and the actual file contents will
+    ///    be stored. File contents have to be available in Mononoke.
+    ///  - With this flag OFF the git lfs pointers are treated like any other file in the repo.
+    pub git_lfs_interpret_pointers: bool,
+    /// Optional messages to display to users after they run fetch commands (e.g.
+    /// pull, clone).
+    ///
+    /// NOTE: Adding a message is not enough! The message will only be displayed
+    /// if the repo enables this feature through a JK.
+    pub fetch_message: Option<String>,
+}
+
 /// Configuration for x repo syncs
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct XRepoSyncSourceConfig {
@@ -1899,4 +1947,27 @@ pub struct XRepoSyncSourceConfigMapping {
 pub struct CommitCloudConfig {
     /// Mock emails or usernames used for tests
     pub mocked_employees: Vec<String>,
+    /// Disables interngraph notification whenever a commit is synced to commit cloud
+    pub disable_interngraph_notification: bool,
+}
+
+/// Configs the multiplier when computing the repo load from the objects count
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ObjectsCountMultiplier(f32);
+
+impl Eq for ObjectsCountMultiplier {}
+
+impl ObjectsCountMultiplier {
+    /// Build a new ObjectsCountMultiplier wrapping a value
+    pub fn new(val: f32) -> Self {
+        ObjectsCountMultiplier(val)
+    }
+}
+
+impl Deref for ObjectsCountMultiplier {
+    type Target = f32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }

@@ -20,11 +20,13 @@ import stat
 import tempfile
 import typing
 from enum import Enum
-from typing import Dict
+from typing import Dict, List, Optional, Set, Tuple
 
 import bindings
 from bindings import renderdag
+
 from sapling import tracing
+from sapling.ext.extlib.phabricator import PHABRICATOR_COMMIT_MESSAGE_TAGS
 
 from . import (
     bookmarks,
@@ -208,6 +210,23 @@ debugrevlogopts = [
     ("c", "changelog", False, _("open changelog")),
     ("m", "manifest", False, _("open manifest")),
     ("", "dir", "", _("open directory manifest")),
+]
+
+subtree_path_opts = [
+    (
+        "",
+        "from-path",
+        [],
+        _("the path of source directory or file"),
+        _("PATH"),
+    ),
+    (
+        "",
+        "to-path",
+        [],
+        _("the path of dest directory or file"),
+        _("PATH"),
+    ),
 ]
 
 # special string such that everything below this line will be ingored in the
@@ -501,7 +520,7 @@ def dorecord(ui, repo, commitfunc, cmdsuggest, backupall, filterfn, *pats, **opt
             # 5. finally restore backed-up files
             try:
                 dirstate = repo.dirstate
-                for realname, tmpname in pycompat.iteritems(backups):
+                for realname, tmpname in backups.items():
                     ui.debug("restoring %r to %r\n" % (tmpname, realname))
 
                     if dirstate[realname] == "n":
@@ -1004,34 +1023,29 @@ def mergeeditform(ctxorbool, baseformname):
     return baseformname + ".normal"
 
 
-def getcommiteditor(edit=False, finishdesc=None, extramsg=None, editform="", **opts):
+def getcommiteditor(edit=False, editform="", summaryfooter="", **opts):
     """get appropriate commit message editor according to '--edit' option
-
-    'finishdesc' is a function to be called with edited commit message
-    (= 'description' of the new changeset) just after editing, but
-    before checking empty-ness. It should return actual text to be
-    stored into history. This allows to change description before
-    storing.
-
-    'extramsg' is a extra message to be shown in the editor instead of
-    'Leave message empty to abort commit' line. 'HG: ' prefix and EOL
-    is automatically added.
 
     'editform' is a dot-separated list of names, to distinguish
     the purpose of commit text editing.
 
-    'getcommiteditor' returns 'commitforceeditor' regardless of
-    'edit', if one of 'finishdesc' or 'extramsg' is specified, because
-    they are specific for usage in MQ.
+    'summaryfooter' is a prepopulated message to add extra info to the commit
+    summary.
     """
-    if edit or finishdesc or extramsg:
+    if edit:
         return lambda r, c: commitforceeditor(
-            r, c, finishdesc=finishdesc, extramsg=extramsg, editform=editform
+            r,
+            c,
+            editform=editform,
+            summaryfooter=summaryfooter,
         )
-    elif editform:
-        return lambda r, c: commiteditor(r, c, editform=editform)
     else:
-        return commiteditor
+        return lambda r, c: commiteditor(
+            r,
+            c,
+            editform=editform,
+            summaryfooter=summaryfooter,
+        )
 
 
 def loglimit(opts):
@@ -1153,7 +1167,6 @@ def makefileobj(
     modemap=None,
     pathname=None,
 ):
-
     writable = mode not in ("r", "rb")
 
     if isstdiofilename(pat):
@@ -1715,9 +1728,6 @@ def tryimportone(ui, repo, hunk, parents, opts, msgs, updatefunc):
             if p2 != parents[1]:
                 repo.setparents(p1.node(), p2.node())
 
-            if opts.get("exact"):
-                repo.dirstate.setbranch(branch or "default")
-
             partial = opts.get("partial", False)
             files = set()
             try:
@@ -1767,10 +1777,6 @@ def tryimportone(ui, repo, hunk, parents, opts, msgs, updatefunc):
                     for idfunc in extrapostimport:
                         extrapostimportmap[idfunc](repo[n])
         else:
-            if opts.get("exact"):
-                branch = branch or "default"
-            else:
-                branch = p1.branch()
             store = patch.filestore()
             try:
                 files = set()
@@ -1792,7 +1798,6 @@ def tryimportone(ui, repo, hunk, parents, opts, msgs, updatefunc):
                     filectxfn=store,
                     user=user,
                     date=date,
-                    branch=branch,
                     editor=editor,
                 )
                 n = memctx.commit()
@@ -1837,7 +1842,6 @@ def _exportsingle(
 
     node = scmutil.binnode(ctx)
     parents = [p.node() for p in ctx.parents() if p]
-    branch = ctx.branch()
     if switch_parent:
         parents.reverse()
 
@@ -1850,8 +1854,6 @@ def _exportsingle(
     writestr("# User %s\n" % ctx.user())
     writestr("# Date %d %d\n" % ctx.date())
     writestr("#      %s\n" % util.datestr(ctx.date()))
-    if branch and branch != "default":
-        writestr("# Branch %s\n" % branch)
     writestr("# Node ID %s\n" % hex(node))
     writestr("# Parent  %s\n" % hex(prev))
     if len(parents) > 1:
@@ -2096,18 +2098,7 @@ class changeset_printer:
                 label=_changesetlabels(ctx),
             )
 
-        # branches are shown first before any other names due to backwards
-        # compatibility
-        branch = ctx.branch()
-        # don't show the default branch name
-        if branch != "default":
-            self.ui.write(columns["branch"] % branch, label="log.branch")
-
-        for nsname, ns in pycompat.iteritems(self.repo.names):
-            # branches has special logic already handled above, so here we just
-            # skip it
-            if nsname == "branches":
-                continue
+        for nsname, ns in self.repo.names.items():
             # we will use the templatename as the color name since those two
             # should be the same
             for name in ns.names(self.repo, changenode):
@@ -2240,7 +2231,7 @@ class jsonchangeset(changeset_printer):
 
         self.ui.write(_x('\n  "rev": %s') % jrev)
         self.ui.write(_x(',\n  "node": %s') % jnode)
-        self.ui.write(_x(',\n  "branch": %s') % j(ctx.branch()))
+        self.ui.write(_x(',\n  "branch": %s') % j("default"))
         self.ui.write(_x(',\n  "phase": "%s"') % ctx.phasestr())
         self.ui.write(_x(',\n  "user": %s') % j(ctx.user()))
         date = ctx.date()
@@ -2397,7 +2388,6 @@ class changeset_templater(changeset_printer):
         props["index"] = index = next(self._counter)
         props["revcache"] = {"copies": copies}
         props["cache"] = self.cache
-        props = props
 
         # write separator, which wouldn't work well with the header part below
         # since there's inherently a conflict between header (across items) and
@@ -4078,36 +4068,209 @@ def _amend(ui, repo, wctx, old, extra, opts, matcher):
     return newid
 
 
-def commiteditor(repo, ctx, editform=""):
-    if ctx.description():
-        return ctx.description()
+def commiteditor(repo, ctx, editform="", summaryfooter=""):
+    if description := ctx.description():
+        return add_summary_footer(repo.ui, description, summaryfooter)
+
     return commitforceeditor(
-        repo, ctx, editform=editform, unchangedmessagedetection=True
+        repo,
+        ctx,
+        editform=editform,
+        unchangedmessagedetection=True,
+        summaryfooter=summaryfooter,
     )
+
+
+def add_summary_footer(
+    ui,
+    commit_msg: str,
+    summary_footer: str,
+) -> str:
+    """
+    >>> class FakeUI:
+    ...   def configlist(self, section, key):
+    ...     assert section == "committemplate" and key == "commit-message-fields"
+    ...     return ["Summary", "Test Plan"]
+    ...
+    ...   def config(self, section, key):
+    ...     assert section == "committemplate" and key == "summary-field"
+    ...     return "Summary"
+    ...
+
+    >>> ui = FakeUI()
+    >>> print(add_summary_footer(ui, "", "i am a summary footer"))
+    <BLANKLINE>
+    i am a summary footer
+
+    >>> print(add_summary_footer(ui, "this is a title", ""))
+    this is a title
+
+    >>> print(add_summary_footer(ui, "this is a title", "i am a summary footer"))
+    this is a title
+    <BLANKLINE>
+    i am a summary footer
+
+    >>> print(add_summary_footer(
+    ...   ui,
+    ...   "this is a title\\n\\nSummary: I am a summary",
+    ...   "i am a summary footer"
+    ... ))
+    this is a title
+    <BLANKLINE>
+    Summary: I am a summary
+    <BLANKLINE>
+    i am a summary footer
+
+    >>> print(add_summary_footer(
+    ...   ui,
+    ...   "this is a title\\n\\nSummary: I am a summary\\n\\nTest Plan: I am a test plan",
+    ...   "i am a summary footer"
+    ... ))
+    this is a title
+    <BLANKLINE>
+    Summary: I am a summary
+    <BLANKLINE>
+    i am a summary footer
+    <BLANKLINE>
+    Test Plan: I am a test plan
+    """
+    if not summary_footer:
+        return commit_msg
+
+    commit_fields = set(ui.configlist("committemplate", "commit-message-fields"))
+    summary_field = ui.config("committemplate", "summary-field")
+
+    lines = commit_msg.split("\n")
+    field_content_list = _parse_commit_message(lines, commit_fields)
+
+    # defaults to the last field
+    summary_index = len(field_content_list) - 1
+    summary_content = field_content_list[summary_index][1]
+    for i, (field, content) in enumerate(field_content_list):
+        if field == summary_field:
+            summary_index, summary_content = i, content
+            break
+
+    if summary_content[-1]:
+        summary_content.append("")
+    summary_content.append(summary_footer)
+    if summary_index < len(field_content_list) - 1:
+        summary_content.append("")
+
+    return "\n".join(
+        line for (_field, content) in field_content_list for line in content
+    )
+
+
+def extract_summary(ui, message: str) -> str:
+    """Extract summary (including title) of a commit message.
+
+    >>> class FakeUI:
+    ...   def configlist(self, section, key):
+    ...     assert section == "committemplate" and key == "commit-message-fields"
+    ...     return ["Summary", "Test Plan"]
+    ...
+    ...   def config(self, section, key):
+    ...     assert section == "committemplate" and key == "summary-field"
+    ...     return "Summary"
+    ...
+
+    >>> ui = FakeUI()
+
+    >>> print(extract_summary(ui, "this is a title"))
+    this is a title
+
+    >>> print(extract_summary(
+    ...   ui,
+    ...   "this is a title\\n\\nSummary: I am a summary"
+    ... ))
+    this is a title
+    <BLANKLINE>
+    Summary: I am a summary
+
+    >>> print(extract_summary(
+    ...   ui,
+    ...   "this is a title\\n\\nSummary: I am a summary\\n\\nTest Plan: I am a test plan",
+    ... ))
+    this is a title
+    <BLANKLINE>
+    Summary: I am a summary
+    """
+    commit_fields = set(ui.configlist("committemplate", "commit-message-fields"))
+    summary_field = ui.config("committemplate", "summary-field")
+    lines = message.split("\n")
+    field_content_list = _parse_commit_message(lines, commit_fields)
+
+    new_lines = []
+    for field, content in field_content_list:
+        new_lines.extend(content)
+        if field == summary_field:
+            break
+    while new_lines and not new_lines[-1]:
+        new_lines.pop()
+    return "\n".join(new_lines)
+
+
+def _parse_commit_message(
+    lines: List[str], commit_fields: Set[str]
+) -> List[Tuple[Optional[str], List[str]]]:
+    """Parse commit message lines and return list of (field, content_lines) pairs.
+
+    >>> _parse_commit_message(["this is a title"], {"Summary"})
+    [(None, ['this is a title'])]
+    >>> _parse_commit_message(
+    ...   ['this is a title', '', 'Summary: I am a summary'],
+    ...   {'Summary', 'Test Plan'},
+    ... )
+    [(None, ['this is a title', '']), ('Summary', ['Summary: I am a summary'])]
+    >>> _parse_commit_message(
+    ...   ["this is a title", "", "Summary: I am a summary", "", "Test Plan: I am a test plan"],
+    ...   {"Summary", "Test Plan"},
+    ... )
+    [(None, ['this is a title', '']), ('Summary', ['Summary: I am a summary', '']), ('Test Plan', ['Test Plan: I am a test plan'])]
+    """
+    result = []
+    curr_key, curr_content = None, []
+    for line in lines:
+        try:
+            key = line[: line.index(":")]
+        except ValueError:
+            # not found ":"
+            curr_content.append(line)
+            continue
+
+        if key in commit_fields:
+            if curr_content:
+                result.append((curr_key, curr_content))
+            curr_key, curr_content = key, [line]
+        else:
+            curr_content.append(line)
+
+    if curr_content:
+        result.append((curr_key, curr_content))
+    return result
 
 
 def commitforceeditor(
     repo,
     ctx,
-    finishdesc=None,
-    extramsg=None,
     editform="",
     unchangedmessagedetection=False,
+    summaryfooter="",
 ):
-    if not extramsg:
-        extramsg = _("Leave message empty to abort commit.")
-
     forms = [e for e in editform.split(".") if e]
     forms.insert(0, "changeset")
     templatetext = None
     while forms:
         ref = ".".join(forms)
         if repo.ui.config("committemplate", ref):
-            templatetext = committext = buildcommittemplate(repo, ctx, extramsg, ref)
+            templatetext = committext = buildcommittemplate(
+                repo, ctx, ref, summaryfooter
+            )
             break
         forms.pop()
     else:
-        committext = buildcommittext(repo, ctx, extramsg)
+        committext = buildcommittext(repo, ctx, summaryfooter)
 
     # run editor in the repository root
     olddir = pycompat.getcwd()
@@ -4146,8 +4309,6 @@ def commitforceeditor(
     text = re.sub(f"(?m)^({all_prefixes}):.*(\n|$)", "", text)
     os.chdir(olddir)
 
-    if finishdesc:
-        text = finishdesc(text)
     if not text.strip():
         raise error.Abort(_("empty commit message"))
     if unchangedmessagedetection and editortext == templatetext:
@@ -4156,7 +4317,7 @@ def commitforceeditor(
     return text
 
 
-def buildcommittemplate(repo, ctx, extramsg, ref):
+def buildcommittemplate(repo, ctx, ref, summaryfooter=""):
     ui = repo.ui
     spec = formatter.templatespec(ref, None, None)
     t = changeset_templater(ui, repo, spec, None, {}, False)
@@ -4165,16 +4326,16 @@ def buildcommittemplate(repo, ctx, extramsg, ref):
         for k, v in repo.ui.configitems("committemplate")
     )
 
+    if summaryfooter:
+        t.t.cache.update({"summaryfooter": summaryfooter})
+
     # load extra aliases based on changed files
     if repo.ui.configbool("experimental", "local-committemplate"):
         localtemplate = localcommittemplate(repo, ctx)
         t.t.cache.update((k, templater.unquotestring(v)) for k, v in localtemplate)
 
-    if not extramsg:
-        extramsg = ""  # ensure that extramsg is string
-
     ui.pushbuffer()
-    t.show(ctx, extramsg=extramsg)
+    t.show(ctx)
     return pycompat.decodeutf8(ui.popbufferbytes(), errors="replace")
 
 
@@ -4219,12 +4380,13 @@ def hgprefix(msg):
     return "\n".join([f"{identity.tmplprefix()}: {a}" for a in msg.split("\n") if a])
 
 
-def buildcommittext(repo, ctx, extramsg):
+def buildcommittext(repo, ctx, summaryfooter=""):
     edittext = []
     modified, added, removed = ctx.modified(), ctx.added(), ctx.removed()
-    if ctx.description():
-        edittext.append(ctx.description())
-    edittext.append("")
+    description = ctx.description()
+    edittext.append(add_summary_footer(repo.ui, description, summaryfooter))
+    if edittext[-1]:
+        edittext.append("")
     edittext.append("")  # Empty line between message and comments.
     edittext.append(
         hgprefix(
@@ -4234,13 +4396,11 @@ def buildcommittext(repo, ctx, extramsg):
             )
         )
     )
-    edittext.append(hgprefix(extramsg))
+    edittext.append(hgprefix(_("Leave message empty to abort commit.")))
     edittext.append(f"{identity.tmplprefix()}: --")
     edittext.append(hgprefix(_("user: %s") % ctx.user()))
     if ctx.p2():
         edittext.append(hgprefix(_("branch merge")))
-    if ctx.branch():
-        edittext.append(hgprefix(_("branch '%s'") % ctx.branch()))
     if bookmarks.isactivewdirparent(repo):
         edittext.append(hgprefix(_("bookmark '%s'") % repo._activebookmark))
     edittext.extend([hgprefix(_("added %s") % f) for f in added])
@@ -4253,16 +4413,10 @@ def buildcommittext(repo, ctx, extramsg):
     return "\n".join(edittext)
 
 
-def commitstatus(repo, node, branch, opts=None):
+def commitstatus(repo, node, opts=None):
     if opts is None:
         opts = {}
     ctx = repo[node]
-    parents = ctx.parents()
-
-    if not opts.get("close_branch"):
-        for r in parents:
-            if r.closesbranch() and r.branch() == branch:
-                repo.ui.status(_("reopening closed branch head %d\n") % r)
 
     if repo.ui.debugflag:
         repo.ui.write(_("committed %s\n") % (ctx.hex()))
@@ -4683,7 +4837,6 @@ def _performrevert(
         originalchunks = patch.parsepatch(diff)
 
         try:
-
             chunks, opts = recordfilter(repo.ui, originalchunks, operation=operation)
             if reversehunks:
                 chunks = patch.reversehunks(chunks)
@@ -4791,7 +4944,7 @@ def howtocontinue(repo):
     for f, msg in afterresolvedstates:
         if repo.localvfs.exists(f):
             return contmsg % msg, True
-    if repo[None].dirty(missing=True, merge=False, branch=False):
+    if repo[None].dirty(missing=True, merge=False):
         return contmsg % _("@prog@ commit"), False
     return None, None
 
@@ -4846,28 +4999,17 @@ diffgraftopts = [
 ]
 
 
-def registerdiffgrafts(opts, *ctxs):
+def registerdiffgrafts(from_paths, to_paths, *ctxs):
     """Register --from-path/--to-path manifest "grafts" in ctx's manifest.
 
     These grafts are applied temporarily before diff operations, allowing users
     to "remap" directories.
     """
-    from_paths = opts.get("from_path") or []
-    to_paths = opts.get("to_path") or []
+    if not ctxs:
+        return error.ProgrammingError("registerdiffgrafts() requires ctxs")
 
-    if not from_paths and not to_paths:
-        return
-
-    if len(from_paths) != len(to_paths):
-        raise error.Abort(_("must provide same number of --from-path and --to-path"))
-
-    # Disallow overlapping --to-path to keep things simple.
-    to_dirs = util.dirs(to_paths)
-    seen = set()
-    for p in to_paths:
-        if p in to_dirs or p in seen:
-            raise error.Abort(_("overlapping --to-path entries"))
-        seen.add(p)
+    scmutil.validate_path_size(from_paths, to_paths)
+    scmutil.validate_path_overlap(to_paths)
 
     for ctx in ctxs:
         manifest = ctx.manifest()

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Error;
+use blobstore::Blobstore;
 use blobstore::BlobstoreEnumerableWithUnlink;
 use blobstore::ErrorKind;
 use blobstore::PutBehaviour;
@@ -45,6 +46,11 @@ pub struct ManifoldArgs {
     /// operation.
     #[clap(long)]
     pub manifold_read_retries: Option<i16>,
+
+    /// The maximum number of automatic retries during write
+    /// operation.
+    #[clap(long)]
+    pub manifold_write_retries: Option<i16>,
 }
 
 impl From<ManifoldArgs> for ManifoldOptions {
@@ -55,11 +61,12 @@ impl From<ManifoldArgs> for ManifoldOptions {
             parallel_downloads: args.manifold_parallel_downloads,
             read_timeout_ms: args.manifold_read_timeout_ms,
             read_retries: args.manifold_read_retries,
+            write_retries: args.manifold_write_retries,
         }
     }
 }
 
-pub fn make_manifold_blobstore(
+pub fn make_manifold_blobstore_enumerable_with_unlink(
     fb: FacebookInit,
     prefix: &str,
     bucket: &str,
@@ -72,4 +79,18 @@ pub fn make_manifold_blobstore(
 
     Ok(Arc::new(PrefixBlobstore::new(manifold, prefix.to_string()))
         as Arc<dyn BlobstoreEnumerableWithUnlink>)
+}
+
+pub fn make_manifold_blobstore(
+    fb: FacebookInit,
+    prefix: &str,
+    bucket: &str,
+    ttl: Option<Duration>,
+    manifold_options: &ManifoldOptions,
+    put_behaviour: PutBehaviour,
+) -> Result<Arc<dyn Blobstore>, Error> {
+    let manifold = ManifoldBlob::new(fb, bucket, ttl, manifold_options.clone(), put_behaviour)
+        .context(ErrorKind::StateOpen)?;
+
+    Ok(Arc::new(PrefixBlobstore::new(manifold, prefix.to_string())) as Arc<dyn Blobstore>)
 }

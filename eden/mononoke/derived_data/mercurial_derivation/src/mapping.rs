@@ -431,6 +431,7 @@ mod test {
     use fixtures::UnsharedMergeUneven;
     use futures::Future;
     use futures::TryStreamExt;
+    use mononoke_macros::mononoke;
     use repo_blobstore::RepoBlobstore;
     use repo_derived_data::RepoDerivedData;
     use repo_derived_data::RepoDerivedDataRef;
@@ -524,24 +525,18 @@ mod test {
         Ok(())
     }
 
-    #[fbinit::test]
+    #[mononoke::fbinit_test]
     async fn test_batch_derive(fb: FacebookInit) -> Result<()> {
-        verify_repo(fb, || Linear::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || BranchEven::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || BranchUneven::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || BranchWide::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || ManyDiamonds::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || ManyFilesDirs::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || MergeEven::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || MergeUneven::get_custom_test_repo::<TestRepo>(fb)).await?;
-        verify_repo(fb, || {
-            UnsharedMergeEven::get_custom_test_repo::<TestRepo>(fb)
-        })
-        .await?;
-        verify_repo(fb, || {
-            UnsharedMergeUneven::get_custom_test_repo::<TestRepo>(fb)
-        })
-        .await?;
+        verify_repo(fb, || Linear::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || BranchEven::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || BranchUneven::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || BranchWide::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || ManyDiamonds::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || ManyFilesDirs::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || MergeEven::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || MergeUneven::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || UnsharedMergeEven::get_repo::<TestRepo>(fb)).await?;
+        verify_repo(fb, || UnsharedMergeUneven::get_repo::<TestRepo>(fb)).await?;
         // Create a repo with a few empty commits in a row
         verify_repo(fb, || async {
             let repo: TestRepo = test_repo_factory::build_empty(fb).await.unwrap();

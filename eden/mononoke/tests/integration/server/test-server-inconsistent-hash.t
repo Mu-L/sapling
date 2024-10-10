@@ -6,10 +6,6 @@
 
   $ CACHEDIR=$PWD/cachepath
   $ . "${TEST_FIXTURES}/library.sh"
-# For now this test requires packfiles as there's no existing config option for disabling indexedlog integrity checks
-# to force the client to try to push corrupted data
-  $ setconfig remotefilelog.write-hgcache-to-indexedlog=False remotefilelog.write-local-to-indexedlog=False
-  $ setconfig scmstore.enableshim=False
 
 # setup config repo
 
@@ -18,9 +14,8 @@
   $ cd $TESTTMP
 
 # 1. Setup nolfs hg repo, create several commit to it
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
-  $ setup_hg_server
+  $ hginit_treemanifest repo
+  $ cd repo
 
 # Commit small file
   $ echo s > smallfile
@@ -28,27 +23,25 @@
   $ hg bookmark master_bookmark -r tip
   $ cd ..
 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 # 2. Setup Mononoke.
   $ start_and_wait_for_mononoke_server
 # 3. Clone hg server repo to hg client repo
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-hg-client --noupdate --config extensions.remotenames=
-  $ cd repo-hg-client
-  $ setup_hg_client
+  $ hg clone -q mono:repo repo-client --noupdate
+  $ cd repo-client
 
   $ cat >> .hg/hgrc <<EOF
   > [extensions]
   > pushrebase =
-  > remotenames =
   > EOF
 
-  $ hgmn pull -q
-  $ hgmn update -r master_bookmark -q
+  $ hg pull -q
+  $ hg update -r master_bookmark -q
 
 # 4. Make a commit with corrupted file node, Change file node text
   $ echo "hello_world" > file
-  $ sl commit -Aqm "commit"
+  $ hg commit -Aqm "commit"
 
 Corrupt file contents via an extension:
   $ cat > $TESTTMP/corrupt.py <<EOF
@@ -63,8 +56,8 @@ Corrupt file contents via an extension:
 
 Do a push, but disable cache verification on the client side, otherwise
 filenode won't be send at all
-  $ hgmn push -r . --to master_bookmark -v --config remotefilelog.validatecachehashes=False --config extensions.corrupt=$TESTTMP/corrupt.py
-  pushing rev cb67355f2348 to destination mononoke://$LOCALIP:$LOCAL_PORT/repo bookmark master_bookmark
+  $ hg push -r . --to master_bookmark -v --config remotefilelog.validatecachehashes=False --config extensions.corrupt=$TESTTMP/corrupt.py
+  pushing rev cb67355f2348 to destination mono:repo bookmark master_bookmark
   searching for changes
   validated revset for rebase
   1 changesets found

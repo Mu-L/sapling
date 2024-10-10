@@ -23,11 +23,54 @@ use types::HgId;
 use types::RepoPath;
 use types::RepoPathBuf;
 
+/// MergeState represents the repo state when merging two commits.
+///
+/// Basically, MergeState records which commits are being merged, and the state
+/// of conflicting files (i.e. unresoled/resolved).
+///
+/// MergeState is serialized as a list of records. Each record contains an
+/// arbitrary list of strings and an associated type. This `type` should be a
+/// letter. If `type` is uppercase, the record is mandatory: versions of Sapling
+/// that don't support it should abort. If `type` is lowercase, the record can
+/// be safely ignored.
+///
+/// Currently known records:
+///
+/// L: the node of the "local" part of the merge (hexified version)
+/// O: the node of the "other" part of the merge (hexified version)
+/// F: a file to be merged entry
+/// C: a change/delete or delete/change conflict
+/// D: a file that the external merge driver will merge internally
+///    (experimental)
+/// P: a path conflict (file vs directory)
+/// S: subtree merges
+/// m: the external merge driver defined for this merge plus its run state
+///    (experimental)
+/// f: a (filename, dictionary) tuple of optional values for a given file
+/// X: unsupported mandatory record type (used in tests)
+/// x: unsupported advisory record type (used in tests)
+/// l: the labels for the parts of the merge.
+///
+/// Merge driver run states (experimental):
+/// u: driver-resolved files unmarked -- needs to be run next time we're about
+///    to resolve or commit
+/// m: driver-resolved files marked -- only needs to be run before commit
+/// s: success/skipped -- does not need to be run any more
+///
+/// Merge record states (stored in self._state, indexed by filename):
+/// u: unresolved conflict
+/// r: resolved conflict
+/// pu: unresolved path conflict (file conflicts with directory)
+/// pr: resolved path conflict
+/// d: driver-resolved conflict
 #[derive(Default)]
 pub struct MergeState {
     // commits being merged
     local: Option<HgId>,
     other: Option<HgId>,
+
+    // subtree merge info: [(from_commit, from_path, to_path)]
+    subtree_merges: Vec<(HgId, RepoPathBuf, RepoPathBuf)>,
 
     // contextual labels for local/other/base
     labels: Vec<String>,
@@ -54,46 +97,6 @@ impl std::fmt::Display for UnsupportedMergeRecords {
         write!(f, "{:?}", self.0.unsupported_records)
     }
 }
-
-/// MergeState represents the repo state when merging two commits.
-///
-/// Basically, MergeState records which commits are being merged, and the state
-/// of conflicting files (i.e. unresoled/resolved).
-///
-/// MergeState is serialized as a list of records. Each record contains an
-/// arbitrary list of strings and an associated type. This `type` should be a
-/// letter. If `type` is uppercase, the record is mandatory: versions of Sapling
-/// that don't support it should abort. If `type` is lowercase, the record can
-/// be safely ignored.
-///
-/// Currently known records:
-///
-/// L: the node of the "local" part of the merge (hexified version)
-/// O: the node of the "other" part of the merge (hexified version)
-/// F: a file to be merged entry
-/// C: a change/delete or delete/change conflict
-/// D: a file that the external merge driver will merge internally
-///    (experimental)
-/// P: a path conflict (file vs directory)
-/// m: the external merge driver defined for this merge plus its run state
-///    (experimental)
-/// f: a (filename, dictionary) tuple of optional values for a given file
-/// X: unsupported mandatory record type (used in tests)
-/// x: unsupported advisory record type (used in tests)
-/// l: the labels for the parts of the merge.
-///
-/// Merge driver run states (experimental):
-/// u: driver-resolved files unmarked -- needs to be run next time we're about
-///    to resolve or commit
-/// m: driver-resolved files marked -- only needs to be run before commit
-/// s: success/skipped -- does not need to be run any more
-///
-/// Merge record states (stored in self._state, indexed by filename):
-/// u: unresolved conflict
-/// r: resolved conflict
-/// pu: unresolved path conflict (file conflicts with directory)
-/// pr: resolved path conflict
-/// d: driver-resolved conflict
 
 impl MergeState {
     pub fn new(local: Option<HgId>, other: Option<HgId>, labels: Vec<String>) -> Self {
@@ -141,6 +144,19 @@ impl MergeState {
 
     pub fn labels(&self) -> &[String] {
         &self.labels
+    }
+
+    pub fn add_subtree_merge(
+        &mut self,
+        from_commit: HgId,
+        from_path: RepoPathBuf,
+        to_path: RepoPathBuf,
+    ) {
+        self.subtree_merges.push((from_commit, from_path, to_path));
+    }
+
+    pub fn subtree_merges(&self) -> &[(HgId, RepoPathBuf, RepoPathBuf)] {
+        &self.subtree_merges
     }
 
     pub fn insert(&mut self, path: RepoPathBuf, data: Vec<String>) -> Result<()> {
@@ -251,6 +267,22 @@ impl MergeState {
                         },
                     );
                 }
+                b'S' => {
+                    let (first, mut rest) = split_strings(record_data)?;
+
+                    if rest.len() != 2 {
+                        bail!("subtree merge should have two paths: {} {:?}", first, rest);
+                    }
+
+                    let from_commit =
+                        HgId::from_hex(first.as_bytes()).context("subtree merge from-commit")?;
+
+                    if let (Some(to_path), Some(from_path)) = (rest.pop(), rest.pop()) {
+                        let from_path = from_path.try_into().context("subtree from-path")?;
+                        let to_path = to_path.try_into().context("subtree to-path")?;
+                        ms.subtree_merges.push((from_commit, from_path, to_path));
+                    }
+                }
                 b'f' => {
                     let (first, mut rest) = split_strings(record_data)?;
 
@@ -331,6 +363,10 @@ impl MergeState {
             write_record(w, b'O', &other.to_hex(), &Vec::<&str>::new())?;
         }
 
+        for (from_commit, from_path, to_path) in &self.subtree_merges {
+            write_record(w, b'S', &from_commit.to_hex(), &[from_path, to_path])?;
+        }
+
         if let Some((md, mds)) = &self.merge_driver {
             write_record(w, b'm', md, &[mds.to_py_string()])?;
         }
@@ -394,6 +430,17 @@ impl std::fmt::Debug for MergeState {
                 md,
                 mds.to_py_string()
             )?;
+        }
+
+        if !self.subtree_merges.is_empty() {
+            writeln!(f, "subtree merges:")?;
+            for (from_commit, from_path, to_path) in &self.subtree_merges {
+                writeln!(
+                    f,
+                    "  from_commit: {}, from: {}, to: {}",
+                    from_commit, from_path, to_path
+                )?;
+            }
         }
 
         if !self.labels.is_empty() {
@@ -625,6 +672,33 @@ mod test {
         ms.set_merge_driver(Some(("my driver".to_string(), MergeDriverState::Marked)));
         assert!(ms.is_unresolved());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_subtree_merges() -> Result<()> {
+        let mut ms = MergeState::default();
+        assert!(ms.subtree_merges().is_empty());
+
+        let from_path = RepoPathBuf::from_string("foo/a".to_string())?;
+        let to_path = RepoPathBuf::from_string("foo/b".to_string())?;
+        let from_commit = HgId::from_byte_array([0x11; HgId::len()]);
+
+        ms.add_subtree_merge(from_commit, from_path.clone(), to_path.clone());
+        assert_eq!(
+            ms.subtree_merges(),
+            &[(from_commit, from_path.clone(), to_path.clone())],
+        );
+
+        let mut data = Vec::new();
+        ms.serialize(&mut data)?;
+
+        let mut buffer = &data[..];
+        let ms2 = MergeState::deserialize(&mut buffer)?;
+        assert_eq!(
+            ms2.subtree_merges(),
+            &[(from_commit, from_path.clone(), to_path.clone())],
+        );
         Ok(())
     }
 }

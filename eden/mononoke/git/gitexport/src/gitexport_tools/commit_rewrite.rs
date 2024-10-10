@@ -30,6 +30,7 @@ use fileblob::Fileblob;
 use futures::stream::TryStreamExt;
 use futures::stream::{self};
 use futures::StreamExt;
+use futures_stats::TimedTryFutureExt;
 use git_types::MappedGitCommitId;
 use git_types::RootGitDeltaManifestV2Id;
 use git_types::TreeHandle;
@@ -43,6 +44,7 @@ use mononoke_api::BookmarkKey;
 use mononoke_api::ChangesetContext;
 use mononoke_api::CoreContext;
 use mononoke_api::MononokeError;
+use mononoke_api::MononokeRepo;
 use mononoke_api::Repo;
 use mononoke_api::RepoContext;
 use mononoke_types::BonsaiChangeset;
@@ -53,6 +55,7 @@ use rand::distributions::Alphanumeric;
 use rand::distributions::DistString;
 use repo_blobstore::RepoBlobstoreArc;
 use repo_derived_data::RepoDerivedDataRef;
+use scuba_ext::FutureStatsScubaExt;
 use slog::debug;
 use slog::info;
 use slog::trace;
@@ -66,7 +69,6 @@ use unodes::RootUnodeManifestId;
 use warm_bookmarks_cache::NoopBookmarksCache;
 
 pub use crate::git_repo::create_git_repo_on_disk;
-use crate::logging::run_and_log_stats_to_scuba;
 pub use crate::partial_commit_graph::build_partial_commit_graph_for_export;
 use crate::partial_commit_graph::ChangesetParents;
 pub use crate::partial_commit_graph::ExportPathInfo;
@@ -74,8 +76,8 @@ pub use crate::partial_commit_graph::GitExportGraphInfo;
 
 pub const MASTER_BOOKMARK: &str = "heads/master";
 
-struct ChangesetRewriteInfo {
-    changeset_context: ChangesetContext,
+struct ChangesetRewriteInfo<R> {
+    changeset_context: ChangesetContext<R>,
     export_paths: Vec<NonRootMPath>,
     implicit_deletes: Vec<Vec<NonRootMPath>>,
 }
@@ -83,13 +85,13 @@ struct ChangesetRewriteInfo {
 /// Given a list of changesets, their parents and a list of paths, create
 /// copies in a target mononoke repository containing only changes that
 /// were made on the given paths.
-pub async fn rewrite_partial_changesets(
+pub async fn rewrite_partial_changesets<R: MononokeRepo>(
     fb: FacebookInit,
-    source_repo_ctx: RepoContext,
-    graph_info: GitExportGraphInfo,
-    export_paths: Vec<ExportPathInfo>,
+    source_repo_ctx: RepoContext<R>,
+    graph_info: GitExportGraphInfo<R>,
+    export_paths: Vec<ExportPathInfo<R>>,
     implicit_delete_prefetch_buffer_size: usize,
-) -> Result<RepoContext> {
+) -> Result<RepoContext<Repo>> {
     let source_repo_ctx = Arc::new(source_repo_ctx);
     let ctx = source_repo_ctx.ctx().clone();
     let changesets = graph_info.changesets;
@@ -123,7 +125,7 @@ pub async fn rewrite_partial_changesets(
         .map(|cs| {
             cloned!(source_repo_ctx, export_paths);
 
-            let blobstore = source_repo_ctx.blob_repo().repo_blobstore_arc();
+            let blobstore = source_repo_ctx.repo().repo_blobstore_arc();
             async move {
                 task::spawn(async move {
                     let ctx = source_repo_ctx.ctx();
@@ -157,18 +159,20 @@ pub async fn rewrite_partial_changesets(
                         return Err(anyhow!("No relevant file changes in changeset"));
                     };
 
-                    let renamed_implicit_deletes = run_and_log_stats_to_scuba(
-                        ctx,
-                        "Getting renamed implicit deletes",
-                        get_renamed_implicit_deletes(
-                            source_repo_ctx.ctx(),
-                            file_changes,
-                            bcs.parents(),
-                            multi_mover,
-                            source_repo_ctx.repo(),
-                        ),
+                    let renamed_implicit_deletes = get_renamed_implicit_deletes(
+                        source_repo_ctx.ctx(),
+                        file_changes,
+                        bcs.parents(),
+                        multi_mover,
+                        source_repo_ctx.repo(),
                     )
-                    .await?;
+                    .try_timed()
+                    .await?
+                    .log_future_stats(
+                        ctx.scuba().clone(),
+                        "Getting renamed implicit deletes",
+                        None,
+                    );
 
                     Ok(ChangesetRewriteInfo {
                         changeset_context: cs,
@@ -193,52 +197,58 @@ pub async fn rewrite_partial_changesets(
                     let ctx: &CoreContext = source_repo_ctx.ctx();
                     let multi_mover = build_multi_mover_for_changeset(ctx.logger(), &export_paths)?;
                     let (new_bcs, remapped_parents, export_paths_not_created) =
-                        run_and_log_stats_to_scuba(
-                            ctx,
-                            "Creating bonsai for temp repo",
-                            create_bonsai_for_new_repo(
-                                &source_repo_ctx,
-                                multi_mover,
-                                changeset_parents,
-                                remapped_parents,
-                                changeset,
-                                &export_paths,
-                                export_paths_not_created,
-                                implicit_deletes,
-                            ),
+                        create_bonsai_for_new_repo(
+                            &source_repo_ctx,
+                            multi_mover,
+                            changeset_parents,
+                            remapped_parents,
+                            changeset,
+                            &export_paths,
+                            export_paths_not_created,
+                            implicit_deletes,
                         )
-                        .await?;
+                        .try_timed()
+                        .await?
+                        .log_future_stats(
+                            ctx.scuba().clone(),
+                            "Creating bonsai for temp repo",
+                            None,
+                        );
 
                     let new_bcs_id = new_bcs.get_changeset_id();
 
-                    run_and_log_stats_to_scuba(
-                        ctx,
+                    upload_commits(
+                        source_repo_ctx.ctx(),
+                        vec![new_bcs],
+                        source_repo_ctx.repo(),
+                        temp_repo_ctx.repo(),
+                        Vec::<(Arc<Repo>, HashSet<_>)>::new(),
+                    )
+                    .try_timed()
+                    .await?
+                    .log_future_stats(
+                        ctx.scuba().clone(),
                         "Upload commits to temp repo",
-                        upload_commits(
-                            source_repo_ctx.ctx(),
-                            vec![new_bcs],
-                            source_repo_ctx.repo(),
-                            temp_repo_ctx.repo(),
-                            Vec::<(Arc<Repo>, HashSet<_>)>::new(),
-                        ),
-                    )
-                    .await?;
+                        None,
+                    );
 
-                    run_and_log_stats_to_scuba(
-                        ctx,
-                        "Deriving RootGitDeltaManifestV2Id",
-                        temp_repo_ctx
-                            .repo()
-                            .repo_derived_data()
-                            .derive::<RootGitDeltaManifestV2Id>(ctx, new_bcs_id),
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Error in deriving RootGitDeltaManifestV2Id for Bonsai commit {:?}",
-                            new_bcs_id
-                        )
-                    })?;
+                    temp_repo_ctx
+                        .repo()
+                        .repo_derived_data()
+                        .derive::<RootGitDeltaManifestV2Id>(ctx, new_bcs_id)
+                        .try_timed()
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Error in deriving RootGitDeltaManifestV2Id for Bonsai commit {:?}",
+                                new_bcs_id
+                            )
+                        })?
+                        .log_future_stats(
+                            ctx.scuba().clone(),
+                            "Deriving RootGitDeltaManifestV2Id",
+                            None,
+                        );
 
                     if let Some(progress_bar) = mb_progress_bar {
                         progress_bar.inc(1);
@@ -259,12 +269,7 @@ pub async fn rewrite_partial_changesets(
 
     // Set master bookmark to point to the latest changeset
     temp_repo_ctx
-        .create_bookmark(
-            &BookmarkKey::from_str(MASTER_BOOKMARK)?,
-            head_cs_id,
-            None,
-            None,
-        )
+        .create_bookmark(&BookmarkKey::from_str(MASTER_BOOKMARK)?, head_cs_id, None)
         .await
         .with_context(|| "Failed to create master bookmark")?;
 
@@ -274,12 +279,12 @@ pub async fn rewrite_partial_changesets(
 
 /// Given a changeset and a set of paths being exported, build the
 /// BonsaiChangeset containing only the changes to those paths.
-async fn create_bonsai_for_new_repo<'a>(
-    source_repo_ctx: &RepoContext,
+async fn create_bonsai_for_new_repo<'a, R: MononokeRepo>(
+    source_repo_ctx: &RepoContext<R>,
     multi_mover: MultiMover<'_>,
     changeset_parents: &ChangesetParents,
     mut remapped_parents: HashMap<ChangesetId, ChangesetId>,
-    changeset_ctx: ChangesetContext,
+    changeset_ctx: ChangesetContext<R>,
     export_paths: &'a [NonRootMPath],
     mut export_paths_not_created: HashSet<NonRootMPath>,
     implicit_deletes: Vec<Vec<NonRootMPath>>,
@@ -291,7 +296,7 @@ async fn create_bonsai_for_new_repo<'a>(
     ),
     MononokeError,
 > {
-    let logger = changeset_ctx.repo().ctx().logger();
+    let logger = changeset_ctx.ctx().logger();
     trace!(
         logger,
         "Rewriting changeset: {:#?} | {:#?}",
@@ -299,7 +304,7 @@ async fn create_bonsai_for_new_repo<'a>(
         &changeset_ctx.message().await?
     );
 
-    let blobstore = source_repo_ctx.blob_repo().repo_blobstore_arc();
+    let blobstore = source_repo_ctx.repo().repo_blobstore_arc();
     let bcs: BonsaiChangeset = changeset_ctx
         .id()
         .load(source_repo_ctx.ctx(), &blobstore)
@@ -438,9 +443,9 @@ async fn create_bonsai_for_new_repo<'a>(
 
 /// Builds a vector of references to the paths that should be exported when
 /// rewriting the provided changeset based on each export path's head commit.
-async fn get_export_paths_for_changeset<'a>(
-    processed_cs: &ChangesetContext,
-    export_path_infos: &'a Vec<ExportPathInfo>,
+async fn get_export_paths_for_changeset<'a, R: MononokeRepo>(
+    processed_cs: &ChangesetContext<R>,
+    export_path_infos: &'a Vec<ExportPathInfo<R>>,
 ) -> Result<Vec<NonRootMPath>> {
     // Get the export paths for the changeset being processed considering its
     // head commit.
@@ -512,7 +517,7 @@ fn build_multi_mover_for_changeset<'a>(
 /// directories.
 /// The temporary repo uses file-backed storage and does not perform any writes
 /// to the Mononoke instance provided to the tool (e.g. production Mononoke).
-async fn create_temp_repo(fb: FacebookInit, ctx: &CoreContext) -> Result<RepoContext, Error> {
+async fn create_temp_repo(fb: FacebookInit, ctx: &CoreContext) -> Result<RepoContext<Repo>, Error> {
     let logger = ctx.logger();
     let system_tmp = env::temp_dir();
     let temp_dir_suffix = Alphanumeric.sample_string(&mut rand::thread_rng(), 16);

@@ -22,9 +22,10 @@ use super::to_vec1;
 use super::ChangesetContext;
 use super::ChangesetFileOrdering;
 use crate::errors::MononokeError;
+use crate::MononokeRepo;
 
 /// A context object representing a query to a particular commit in a repo.
-impl ChangesetContext {
+impl<R: MononokeRepo> ChangesetContext<R> {
     pub async fn find_files_unordered(
         &self,
         prefixes: Option<Vec<MPath>>,
@@ -47,6 +48,7 @@ impl ChangesetContext {
     /// - the basename of the file path is in `basenames`, or there is a string
     ///   in `basename_suffixes` that is a suffix of the basename of the file,
     ///   or both `basenames` and `basename_suffixes` are None.
+    ///
     /// The order that files are returned is based on the parameter `ordering`.
     /// To continue a paginated query, use the parameter `ordering`.
     pub async fn find_files(
@@ -67,14 +69,14 @@ impl ChangesetContext {
                 if justknobs::eval(
                     "scm/mononoke:enable_bssm_v3",
                     None,
-                    Some(self.repo().name()),
+                    Some(self.repo_ctx().name()),
                 )
                 .unwrap_or_default()
                     && (!basenames_and_suffixes.has_right()
                         || justknobs::eval(
                             "scm/mononoke:enable_bssm_v3_suffix_query",
                             None,
-                            Some(self.repo().name()),
+                            Some(self.repo_ctx().name()),
                         )
                         .unwrap_or_default()) =>
             {
@@ -108,7 +110,7 @@ impl ChangesetContext {
             .await?
             .find_files_filter_basenames(
                 self.ctx(),
-                self.repo().blob_repo().repo_blobstore().clone(),
+                self.repo_ctx().repo().repo_blobstore().clone(),
                 prefixes.unwrap_or_else(Vec::new).into_iter().collect(),
                 basenames_and_suffixes,
                 match ordering {
@@ -132,13 +134,32 @@ impl ChangesetContext {
         ordering: ChangesetFileOrdering,
     ) -> Result<impl Stream<Item = Result<MPath, MononokeError>>, MononokeError> {
         // First, find the entries, and filter by file prefix.
-        let entries = self.find_entries(prefixes, ordering).await?;
-        let mpaths = entries.try_filter_map(|(path, entry)| async move {
-            match (path.into_optional_non_root_path(), entry) {
-                (Some(mpath), ManifestEntry::Leaf(_)) => Ok(Some(mpath)),
-                _ => Ok(None),
-            }
-        });
+
+        let mpaths = if justknobs::eval(
+            "scm/mononoke:mononoke_api_find_files_use_skeleton_manifests_v2",
+            None,
+            Some(self.repo_ctx().name()),
+        )? {
+            let entries = self.find_entries_v2(prefixes, ordering).await?;
+            entries
+                .try_filter_map(|(path, entry)| async move {
+                    match (path.into_optional_non_root_path(), entry) {
+                        (Some(mpath), ManifestEntry::Leaf(_)) => Ok(Some(mpath)),
+                        _ => Ok(None),
+                    }
+                })
+                .left_stream()
+        } else {
+            let entries = self.find_entries(prefixes, ordering).await?;
+            entries
+                .try_filter_map(|(path, entry)| async move {
+                    match (path.into_optional_non_root_path(), entry) {
+                        (Some(mpath), ManifestEntry::Leaf(_)) => Ok(Some(mpath)),
+                        _ => Ok(None),
+                    }
+                })
+                .right_stream()
+        };
 
         // Now, construct a set of basenames to include.
         // These basenames are of type MPathElement rather than being strings.

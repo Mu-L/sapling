@@ -1,8 +1,7 @@
 load("@fbcode_macros//build_defs:rust_library.bzl", "rust_library")
 load("@fbcode_macros//build_defs:rust_unittest.bzl", "rust_unittest")
-load("@fbsource//tools/build_defs:glob_defs.bzl", "glob")
 
-oncall("mononoke")
+oncall("scm_server_infra")
 
 rust_library(
     name = "thrift_convert",
@@ -25,7 +24,6 @@ rust_library(
     crate_root = "proc_macros/lib.rs",
     proc_macro = True,
     deps = [
-        # "fbsource//third-party/rust:proc-macro-crate",
         "fbsource//third-party/rust:proc-macro2",
         "fbsource//third-party/rust:quote",
         "fbsource//third-party/rust:syn1",
@@ -39,5 +37,6 @@ rust_unittest(
         "fbsource//third-party/rust:anyhow",
         ":thrift_convert",
         "//eden/mononoke/common/thrift_convert/tests/if:thrift-convert-test-rust",
+        "//eden/mononoke/mononoke_macros:mononoke_macros",
     ],
 )

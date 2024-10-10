@@ -5,6 +5,8 @@
  * GNU General Public License version 2.
  */
 
+#![allow(unexpected_cfgs)]
+
 //! Common types used by sibling crates
 
 pub mod augmented_tree;
@@ -33,6 +35,7 @@ pub use crate::augmented_tree::AugmentedTreeEntry;
 pub use crate::augmented_tree::AugmentedTreeWithDigest;
 pub use crate::blake3::Blake3;
 pub use crate::cas::CasDigest;
+pub use crate::cas::CasDigestType;
 pub use crate::hgid::HgId;
 pub use crate::key::Key;
 pub use crate::node::Node;

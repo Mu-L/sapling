@@ -6,7 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
+anyhow = "1.0.86"
 async-runtime = { version = "0.1.0", path = "../async-runtime" }
 atexit = { version = "0.1.0", path = "../util/atexit" }
 configmodel = { version = "0.1.0", path = "../config/model" }
@@ -29,7 +29,7 @@ spawn-ext = { version = "0.1.0", path = "../spawn-ext" }
 status = { version = "0.1.0", path = "../status" }
 storemodel = { version = "0.1.0", path = "../storemodel" }
 termlogger = { version = "0.1.0", path = "../io/term/logger" }
-thiserror = "1.0.49"
+thiserror = "1.0.64"
 toml = { version = "0.8.4", optional = true }
 tracing = { version = "0.1.40", features = ["attributes", "valuable"] }
 treestate = { version = "0.1.0", path = "../treestate" }

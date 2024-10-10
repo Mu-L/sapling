@@ -18,8 +18,8 @@ setup common configuration for these tests
 
 setup repo
 
-  $ hginit_treemanifest repo-hg
-  $ cd repo-hg
+  $ hginit_treemanifest repo
+  $ cd repo
   $ touch base
   $ hg commit -Aqm base
   $ tglogp
@@ -32,12 +32,12 @@ create master bookmark
   $ cd $TESTTMP
 
 setup repo-push and repo-pull
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-push --noupdate
-  $ hgclone_treemanifest ssh://user@dummy/repo-hg repo-pull --noupdate
+  $ hg clone -q mono:repo repo-push --noupdate
+  $ hg clone -q mono:repo repo-pull --noupdate
 
 blobimport
 
-  $ blobimport repo-hg/.hg repo
+  $ blobimport repo/.hg repo
 
 start mononoke
 
@@ -65,8 +65,8 @@ Do initial infinitepush of a small stack
   │
   o  df4f53cec30a public 'base'
   
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --bundle-store --allow-anon
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --bundle-store --allow-anon
+  pushing to mono:repo
   searching for changes
 
 Amend the bottom commit
@@ -85,8 +85,8 @@ Amend the bottom commit
   │
   o  df4f53cec30a public 'base'
   
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --bundle-store --allow-anon
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --bundle-store --allow-anon
+  pushing to mono:repo
   searching for changes
   $ hg debugmutation -r "draft()"
    *  a8543df036f16781d7f37d40d4f177056fc816a5 amend by test at 1970-01-01T00:00:00 from:
@@ -97,8 +97,8 @@ Amend the bottom commit
   
 Pull the amended stack to the other repo
   $ cd $TESTTMP/repo-pull
-  $ hgmn pull -r a24671c3bce2
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r a24671c3bce2
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
@@ -129,14 +129,14 @@ Amend the stack again.
   $ hg next
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   [647398] B1
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --bundle-store --allow-anon
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --bundle-store --allow-anon
+  pushing to mono:repo
   searching for changes
 
 Pull the amended stack to the other repo.
   $ cd $TESTTMP/repo-pull
-  $ hgmn pull -r 647398
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 647398
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests
@@ -178,14 +178,14 @@ Do some more complicated mutations
   │
   o  df4f53cec30a 'base'
   
-  $ hgmn push mononoke://$(mononoke_address)/repo -r . --bundle-store --allow-anon
-  pushing to mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg push -r . --bundle-store --allow-anon
+  pushing to mono:repo
   searching for changes
 
 Pull the modified stack to the other repo.
   $ cd $TESTTMP/repo-pull
-  $ hgmn pull -r 853e5ba9bd35
-  pulling from mononoke://$LOCALIP:$LOCAL_PORT/repo
+  $ hg pull -r 853e5ba9bd35
+  pulling from mono:repo
   searching for changes
   adding changesets
   adding manifests

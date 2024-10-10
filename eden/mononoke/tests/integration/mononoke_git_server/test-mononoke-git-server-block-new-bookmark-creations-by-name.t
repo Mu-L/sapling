@@ -11,22 +11,6 @@
   $ GIT_REPO_ORIGIN="${TESTTMP}/origin/repo-git"
   $ GIT_REPO_SUBMODULE="${TESTTMP}/origin/repo-submodule-git"
   $ GIT_REPO="${TESTTMP}/repo-git"
-  $ cat >> repos/repo/server.toml <<EOF
-  > [source_control_service]
-  > permit_writes = true
-  > EOF
-
-  $ cat >> repos/repo/server.toml <<EOF
-  > [[bookmarks]]
-  > regex=".*"
-  > [[bookmarks.hooks]]
-  > hook_name="block_new_bookmark_creations_by_name"
-  > [[hooks]]
-  > name="block_new_bookmark_creations_by_name"
-  > config_json='''{
-  > "blocked_bookmarks": ".*this_is_blocked.*"
-  > }'''
-  > EOF
 
 # Setup git repository
   $ mkdir -p "$GIT_REPO_ORIGIN"
@@ -53,14 +37,20 @@
 # Set Mononoke as the Source of Truth
   $ set_mononoke_as_source_of_truth_for_git
 
-  $ merge_just_knobs <<EOF
-  > {
-  >   "bools": {
-  >     "scm/mononoke:run_hooks_on_additional_changesets": true
-  >   }
-  > }
+  $ cd "$TESTTMP"/mononoke-config
+  $ cat >> repos/repo/server.toml <<EOF
+  > [[bookmarks]]
+  > regex=".*"
+  > [[bookmarks.hooks]]
+  > hook_name="block_new_bookmark_creations_by_name"
+  > [[hooks]]
+  > name="block_new_bookmark_creations_by_name"
+  > config_json='''{
+  > "blocked_bookmarks": ".*this_is_blocked.*"
+  > }'''
+  > bypass_pushvar="x-git-allow-all-bookmarks=1"
   > EOF
-
+  $ cd "${TESTTMP}"
 
 # Start up the Mononoke Git Service
   $ mononoke_git_service
@@ -88,9 +78,14 @@
 # This push is blocked
   $ git_client push origin --all
   To https://localhost:$LOCAL_PORT/repos/git/ro/repo.git
-   ! [remote rejected] master -> master (invalid request: Bookmark transaction failed)
    ! [remote rejected] this_is_blocked -> this_is_blocked (hooks failed:
     block_new_bookmark_creations_by_name for 8643610acce921ac6df12107a4e671da0406984f: Creation of bookmark "heads/this_is_blocked" was blocked because it matched the '.*this_is_blocked.*' regular expression
-    block_new_bookmark_creations_by_name for 8ff9b0ab58e4c2785dc5a516ae6e549e73a801d5: Creation of bookmark "heads/this_is_blocked" was blocked because it matched the '.*this_is_blocked.*' regular expression)
+  
+  For more information about hooks and bypassing, refer https://fburl.com/wiki/mb4wtk1j)
   error: failed to push some refs to 'https://localhost:$LOCAL_PORT/repos/git/ro/repo.git'
   [1]
+
+# This push succeeds
+  $ git_client -c http.extraHeader="x-git-allow-all-bookmarks: 1" push origin --all
+  To https://localhost:$LOCAL_PORT/repos/git/ro/repo.git
+   * [new branch]      this_is_blocked -> this_is_blocked

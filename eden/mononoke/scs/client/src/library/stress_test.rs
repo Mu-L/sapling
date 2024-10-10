@@ -17,7 +17,6 @@ use futures::stream::StreamExt;
 use tokio::time;
 
 #[derive(clap::Parser)]
-/// List the contents of a directory
 pub(crate) struct StressArgs {
     /// Run in stress test mode
     #[clap(long = "stress")]
@@ -39,6 +38,10 @@ pub(crate) struct StressArgs {
         conflicts_with = "pace"
     )]
     pub(crate) parallel: usize,
+
+    /// Print timing information for each request
+    #[clap(long = "stress-print-timing", default_value_t = false)]
+    pub(crate) print_timing: bool,
 }
 
 impl StressArgs {
@@ -49,12 +52,14 @@ impl StressArgs {
         if self.pace > 0 {
             Box::new(Paced {
                 client_correlator,
+                print_timing: self.print_timing,
                 pace: self.pace,
                 count: self.count,
             })
         } else {
             Box::new(Reckless {
                 client_correlator,
+                print_timing: self.print_timing,
                 count: self.count,
                 parallel: self.parallel,
             })
@@ -72,8 +77,25 @@ pub(crate) trait StressTestRunner {
     ) -> Box<dyn Iterator<Item = Result<(), Error>>>;
 }
 
+macro_rules! maybe_print_timing {
+    ($print_timing:expr, $fun:expr) => {
+        if $print_timing {
+            Box::pin(async {
+                let before = Instant::now();
+                let res = $fun().await;
+                let after = Instant::now();
+                println!("elapsed {}us", after.duration_since(before).as_micros());
+                res
+            })
+        } else {
+            $fun()
+        }
+    };
+}
+
 struct Reckless {
     client_correlator: Option<String>,
+    print_timing: bool,
     count: usize,
     parallel: usize,
 }
@@ -96,7 +118,7 @@ impl StressTestRunner for Reckless {
 
         Box::new(
             stream::iter(0..self.count)
-                .map(|_| fun())
+                .map(|_| maybe_print_timing!(self.print_timing, fun))
                 .buffer_unordered(self.parallel)
                 .collect::<Vec<_>>()
                 .await
@@ -107,6 +129,7 @@ impl StressTestRunner for Reckless {
 
 struct Paced {
     client_correlator: Option<String>,
+    print_timing: bool,
     pace: u64,
     count: usize,
 }
@@ -131,7 +154,7 @@ impl StressTestRunner for Paced {
 
         let forever = stream::unfold(interval, |mut interval| async {
             interval.tick().await;
-            let res = fun().await;
+            let res = maybe_print_timing!(self.print_timing, fun).await;
             Some((res, interval))
         });
 

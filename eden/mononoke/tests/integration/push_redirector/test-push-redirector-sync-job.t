@@ -9,7 +9,7 @@
   $ enable remotenames
 
   $ setconfig push.edenapi=true
-  $ ENABLE_API_WRITES=1 PUSHREBASE_REWRITE_DATES=1 create_large_small_repo
+  $ PUSHREBASE_REWRITE_DATES=1 create_large_small_repo
   Adding synced mapping entry
   $ setup_configerator_configs
   $ enable_pushredirect 1
@@ -18,19 +18,18 @@
   $ init_local_large_small_clones
 
 -- enable verification hook in small-hg-srv
-  $ hg init "$TESTTMP/small-hg-srv"
+  $ hginit_treemanifest "$TESTTMP/small-hg-srv"
   $ cd "$TESTTMP/small-hg-srv"
-  $ setup_hg_server
   $ enable_replay_verification_hook
 
 -- normal pushrebase with one commit
   $ cd "$TESTTMP/small-hg-client"
-  $ REPONAME=small-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ echo 2 > 2 && hg addremove -q && hg ci -q -m newcommit
-  $ REPONAME=small-mon sl push -r . --to master_bookmark 2>&1 | grep "updated remote bookmark"
+  $ hg push -r . --to master_bookmark 2>&1 | grep "updated remote bookmark"
   updated remote bookmark master_bookmark to * (glob)
 -- newcommit was correctly pushed to master_bookmark (we need to update, as it's a new commit with date rewriting)
-  $ REPONAME=small-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ log -r master_bookmark
   @  newcommit [public;rev=3;*] default/master_bookmark (glob)
   │
@@ -41,21 +40,21 @@
   @  first post-move commit [public;rev=2;*] default/master_bookmark (glob)
   │
   ~
-  $ REPONAME=large-mon hgmn pull -q
+  $ hg pull -q
   $ log -r master_bookmark
   o  newcommit [public;rev=3;*] default/master_bookmark (glob)
   │
   ~
-  $ verify_wc master_bookmark
+  $ verify_wc $(hg log -r master_bookmark -T '{node}')
 -- do a push to a large repo, then backsync it to a small one
-  $ REPONAME=large-mon hgmn up -q master_bookmark
+  $ hg up -q master_bookmark
   $ echo test > tolarge
   $ hg add tolarge
   $ hg ci -m tolarge
   $ echo 1 > empty && hg add empty && hg ci -m empty
   $ hg revert -r .^ empty
   $ hg commit --amend
-  $ REPONAME=large-mon sl push -r . --to master_bookmark -q
+  $ hg push -r . --to master_bookmark -q
   $ backsync_large_to_small 2>&1 | grep "syncing bookmark"
   * syncing bookmark master_bookmark to * (glob)
 

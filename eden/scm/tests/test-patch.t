@@ -4,7 +4,6 @@
 #inprocess-hg-incompatible
 
   $ setconfig devel.segmented-changelog-rev-compat=true
-  $ setconfig experimental.allowfilepeer=True
 
   $ cat > patchtool.py <<EOF
   > from __future__ import absolute_import, print_function
@@ -38,7 +37,7 @@ check custom patch options are honored
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to 8580ff50825a50c8f716709acdf8de0deddcd6ab
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
 
   $ hg --cwd b import -v ../a.diff
@@ -77,7 +76,7 @@ Clone and apply patch:
   adding changesets
   adding manifests
   adding file changes
-  updating to branch default
+  updating to 7fadb901d4035fb3ae61dca0aededab9b996ad25
   1 files updated, 0 files merged, 0 files removed, 0 files unresolved
   $ cd d
   $ hg import ../c/p
