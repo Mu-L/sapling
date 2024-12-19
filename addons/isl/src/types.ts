@@ -790,6 +790,7 @@ export type LocalStorageName =
   | 'isl.warn-about-diagnostics'
   | 'isl.hide-non-blocking-diagnostics'
   | 'isl.rebase-off-warm-warning-enabled'
+  | 'isl.experimental-features-local-override'
   // These keys are prefixes, with further dynamic keys appended afterwards
   | 'isl.edited-commit-messages:'
   | 'isl.partial-abort';
@@ -987,3 +988,9 @@ export type MessageBusStatus =
   | {type: 'open'}
   | {type: 'reconnecting'}
   | {type: 'error'; error?: string};
+
+export type ArcStableGKInfo = {
+  gk: string;
+  id: string;
+  label: string;
+};

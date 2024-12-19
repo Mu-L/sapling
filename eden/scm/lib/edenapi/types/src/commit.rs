@@ -315,6 +315,7 @@ pub enum BonsaiFileChange {
         /// Token proving the file was uploaded, and containing its content id and size
         upload_token: UploadToken,
         file_type: FileType,
+        copy_info: Option<(RepoPathBuf, usize)>,
     },
     Deletion,
     UntrackedChange {
@@ -449,6 +450,7 @@ impl Arbitrary for BonsaiFileChange {
             0..=49 => Self::Change {
                 upload_token: Arbitrary::arbitrary(g),
                 file_type: Arbitrary::arbitrary(g),
+                copy_info: Arbitrary::arbitrary(g),
             },
             50..=79 => Self::Deletion,
             80..=94 => Self::UntrackedChange {
@@ -499,6 +501,152 @@ pub struct CommitTranslateIdResponse {
     pub commit: CommitId,
     #[id(2)]
     pub translated: CommitId,
+}
+
+#[auto_wire]
+#[derive(Clone, Default, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
+pub struct UploadIdenticalChangesetsRequest {
+    /// list of changesets to upload, changesets must be sorted topologically
+    #[id(1)]
+    pub changesets: Vec<IdenticalChangesetContent>,
+}
+
+#[auto_wire]
+#[derive(Clone, Default, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
+pub struct HgInfo {
+    #[id(1)]
+    pub node_id: HgId,
+    #[id(2)]
+    pub manifestid: HgId,
+    #[id(3)]
+    pub extras: Vec<Extra>,
+}
+
+#[auto_wire]
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
+pub enum BonsaiParents {
+    #[id(1)]
+    None,
+    #[id(2)]
+    One(BonsaiChangesetId),
+    #[id(3)]
+    Two((BonsaiChangesetId, BonsaiChangesetId)),
+}
+
+impl BonsaiParents {
+    pub fn new(p1: Option<BonsaiChangesetId>, p2: Option<BonsaiChangesetId>) -> Self {
+        match (p1, p2) {
+            (None, None) => Self::None,
+            (Some(p1), None) => Self::One(p1),
+            (None, Some(p2)) => Self::One(p2),
+            (Some(p1), Some(p2)) => Self::Two((p1, p2)),
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<BonsaiChangesetId> {
+        match self {
+            Self::None => vec![],
+            Self::One(p1) => vec![p1.clone()],
+            Self::Two((p1, p2)) => vec![p1.clone(), p2.clone()],
+        }
+    }
+}
+
+impl Default for BonsaiParents {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl FromIterator<BonsaiChangesetId> for BonsaiParents {
+    fn from_iter<I: IntoIterator<Item = BonsaiChangesetId>>(iter: I) -> Self {
+        let mut iter = iter.into_iter();
+        let p1 = iter.next();
+        let p2 = iter.next();
+        Self::new(p1, p2)
+    }
+}
+
+#[auto_wire]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "for-tests"), derive(Arbitrary))]
+pub struct IdenticalChangesetContent {
+    #[id(1)]
+    pub bcs_id: BonsaiChangesetId,
+    #[id(2)]
+    pub hg_parents: Parents,
+    #[id(3)]
+    pub bonsai_parents: BonsaiParents,
+    #[id(4)]
+    pub author: String,
+    #[id(5)]
+    pub time: i64,
+    #[id(6)]
+    pub tz: i32,
+    #[id(7)]
+    pub extras: Vec<BonsaiExtra>,
+    #[id(8)]
+    pub file_changes: Vec<(RepoPathBuf, BonsaiFileChange)>,
+    #[id(9)]
+    pub message: String,
+    #[id(10)]
+    pub is_snapshot: bool,
+    #[id(11)]
+    pub hg_info: HgInfo,
+}
+
+impl From<IdenticalChangesetContent> for HgChangesetContent {
+    fn from(changeset: IdenticalChangesetContent) -> Self {
+        Self {
+            parents: changeset.hg_parents,
+            manifestid: changeset.hg_info.manifestid,
+            user: changeset.author.into_bytes(),
+            time: changeset.time,
+            tz: changeset.tz,
+            extras: changeset
+                .extras
+                .into_iter()
+                .map(|extra| Extra {
+                    key: extra.key.into_bytes(),
+                    value: extra.value,
+                })
+                .collect(),
+            files: changeset
+                .file_changes
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect(),
+            message: changeset.message.into_bytes(),
+        }
+    }
+}
+
+impl From<IdenticalChangesetContent> for BonsaiChangesetContent {
+    fn from(changeset: IdenticalChangesetContent) -> Self {
+        Self {
+            hg_parents: changeset.hg_parents,
+            author: changeset.author,
+            time: changeset.time,
+            tz: changeset.tz,
+            extra: changeset.extras,
+            file_changes: changeset.file_changes,
+            message: changeset.message,
+            is_snapshot: changeset.is_snapshot,
+        }
+    }
 }
 
 #[cfg(test)]

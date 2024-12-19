@@ -37,6 +37,10 @@ use thrift_streaming_thriftclients::build_StreamingEdenService_client;
 #[cfg(fbcode_build)]
 use thrift_types::edenfs::ChangesSinceV2Params;
 use thrift_types::edenfs::DaemonInfo;
+use thrift_types::edenfs::GetConfigParams;
+use thrift_types::edenfs::GetCurrentSnapshotInfoRequest;
+use thrift_types::edenfs::GetScmStatusParams;
+use thrift_types::edenfs::MountId;
 use thrift_types::edenfs_clients::EdenService;
 use thrift_types::fb303_core::fb303_status;
 use thrift_types::fbthrift::binary_protocol::BinaryProtocol;
@@ -425,6 +429,129 @@ impl EdenFsInstance {
             .await
             .with_context(|| format!("Failed to unmount {}", path.display()))?;
         Ok(())
+    }
+
+    pub async fn get_current_snapshot_info(
+        &self,
+        mount_point: PathBuf,
+    ) -> Result<thrift_types::edenfs::GetCurrentSnapshotInfoResponse> {
+        let client = self
+            .connect(None)
+            .await
+            .with_context(|| "Unable to connect to EdenFS daemon")?;
+
+        let mount_point = bytes_from_path(mount_point)?;
+
+        let snapshot_info_params = GetCurrentSnapshotInfoRequest {
+            mountId: MountId {
+                mountPoint: mount_point,
+                ..Default::default()
+            },
+            cri: None,
+            ..Default::default()
+        };
+
+        client
+            .getCurrentSnapshotInfo(&snapshot_info_params)
+            .await
+            .map_err(|_| EdenFsError::Other(anyhow!("failed to get snapshot info")))
+    }
+
+    pub async fn get_scm_status_v2(
+        &self,
+        mount_point: PathBuf,
+        commit_str: String,
+        list_ignored: bool,
+        root_id_options: Option<thrift_types::edenfs::RootIdOptions>,
+    ) -> Result<thrift_types::edenfs::GetScmStatusResult> {
+        let client = self
+            .connect(None)
+            .await
+            .with_context(|| "Unable to connect to EdenFS daemon")?;
+
+        client
+            .getScmStatusV2(&GetScmStatusParams {
+                mountPoint: bytes_from_path(mount_point)?,
+                commit: commit_str.as_bytes().to_vec(),
+                listIgnored: list_ignored,
+                rootIdOptions: root_id_options,
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| EdenFsError::Other(anyhow!("failed to get scm status v2 result")))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn add_bind_mount(
+        &self,
+        mount_path: &Path,
+        repo_path: &Path,
+        target_path: &Path,
+    ) -> Result<()> {
+        let mount_path = bytes_from_path(mount_path.to_path_buf()).with_context(|| {
+            format!(
+                "Failed to get mount point '{}' as str",
+                mount_path.display()
+            )
+        })?;
+
+        let repo_path = bytes_from_path(repo_path.to_path_buf()).with_context(|| {
+            format!("Failed to get repo point '{}' as str", repo_path.display())
+        })?;
+
+        let target_path = bytes_from_path(target_path.to_path_buf())
+            .with_context(|| format!("Failed to get target '{}' as str", target_path.display()))?;
+
+        let client = self
+            .connect(None)
+            .await
+            .with_context(|| "Unable to connect to EdenFS daemon")?;
+
+        client
+            .addBindMount(&mount_path, &repo_path, &target_path)
+            .await
+            .with_context(|| "failed add bind mount thrift call")?;
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn remove_bind_mount(&self, mount_path: &Path, repo_path: &Path) -> Result<()> {
+        let mount_path = bytes_from_path(mount_path.to_path_buf()).with_context(|| {
+            format!(
+                "Failed to get mount point '{}' as str",
+                mount_path.display()
+            )
+        })?;
+
+        let repo_path = bytes_from_path(repo_path.to_path_buf()).with_context(|| {
+            format!("Failed to get repo point '{}' as str", repo_path.display())
+        })?;
+
+        let client = self
+            .connect(None)
+            .await
+            .with_context(|| "Unable to connect to EdenFS daemon")?;
+
+        client
+            .removeBindMount(&mount_path, &repo_path)
+            .await
+            .with_context(|| "failed remove bind mount thrift call")?;
+
+        Ok(())
+    }
+
+    pub async fn get_config_default(&self) -> Result<thrift_types::edenfs_config::EdenConfigData> {
+        let client = self
+            .connect(None)
+            .await
+            .with_context(|| "Unable to connect to EdenFS daemon")?;
+
+        let params: GetConfigParams = Default::default();
+        client
+            .getConfig(&params)
+            .await
+            .map_err(|_| EdenFsError::Other(anyhow!("failed to get default eden config data")))
     }
 }
 
