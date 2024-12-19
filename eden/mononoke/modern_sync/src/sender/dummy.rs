@@ -7,13 +7,17 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use edenapi_types::HgFilenodeData;
-use edenapi_types::UploadTreeEntry;
-use mononoke_types::ContentId;
+use edenapi_types::AnyFileContentId;
+use mercurial_types::blobs::HgBlobChangeset;
+use mercurial_types::HgChangesetId;
+use mercurial_types::HgFileNodeId;
+use mercurial_types::HgManifestId;
+use mononoke_types::BonsaiChangeset;
 use mononoke_types::FileContents;
 use slog::info;
 use slog::Logger;
 
+use crate::sender::Entry;
 use crate::sender::ModernSyncSender;
 
 #[derive(Clone)]
@@ -29,23 +33,73 @@ impl DummySender {
 
 #[async_trait]
 impl ModernSyncSender for DummySender {
-    async fn upload_content(&self, content_id: ContentId, _blob: FileContents) -> Result<()> {
-        info!(&self.logger, "Uploading content with id: {:?}", content_id);
+    async fn enqueue_entry(&self, entry: Entry) -> Result<()> {
+        match entry {
+            Entry::Content(content_id, blob) => {
+                self.upload_contents(vec![(content_id, blob)]).await
+            }
+            Entry::Tree(tree_id) => self.upload_trees(vec![tree_id]).await,
+            Entry::FileNode(filenode_id) => self.upload_filenodes(vec![filenode_id]).await,
+            Entry::HgChangeset(hg_css) => self.upload_hg_changeset(vec![hg_css]).await,
+        }
+    }
+
+    async fn upload_contents(&self, contents: Vec<(AnyFileContentId, FileContents)>) -> Result<()> {
+        for (content_id, _blob) in contents {
+            info!(&self.logger, "Uploading content with id: {:?}", content_id);
+        }
+
         Ok(())
     }
 
-    async fn upload_tree(&self, trees: Vec<UploadTreeEntry>) -> Result<()> {
+    async fn upload_trees(&self, trees: Vec<HgManifestId>) -> Result<()> {
         for tree in trees {
-            info!(&self.logger, "Uploading tree with id {:?}", tree.node_id);
+            info!(&self.logger, "Uploading tree with id {:?}", tree);
         }
         Ok(())
     }
 
-    async fn upload_filenodes(&self, filenodes: Vec<HgFilenodeData>) -> Result<()> {
+    async fn upload_filenodes(&self, filenodes: Vec<HgFileNodeId>) -> Result<()> {
         for filenode in filenodes {
+            info!(&self.logger, "Uploading filenode with id {}", filenode);
+        }
+        Ok(())
+    }
+
+    async fn upload_hg_changeset(&self, hg_css: Vec<HgBlobChangeset>) -> Result<()> {
+        for hg_cs in hg_css {
             info!(
                 &self.logger,
-                "Uploading filenode with id {:?}", filenode.node_id
+                "Uploading hg changeset with id {}",
+                hg_cs.get_changeset_id()
+            );
+        }
+        Ok(())
+    }
+
+    async fn set_bookmark(
+        &self,
+        bookmark: String,
+        from: Option<HgChangesetId>,
+        to: Option<HgChangesetId>,
+    ) -> Result<()> {
+        info!(
+            &self.logger,
+            "Uploading moving bookmark {} from {:?} to {:?}", bookmark, from, to
+        );
+        Ok(())
+    }
+
+    async fn upload_identical_changeset(
+        &self,
+        css: Vec<(HgBlobChangeset, BonsaiChangeset)>,
+    ) -> Result<()> {
+        for (hg_cs, bs_cs) in css {
+            info!(
+                &self.logger,
+                "Uploading hg changeset with hgid {} and bsid{}",
+                hg_cs.get_changeset_id(),
+                bs_cs.get_changeset_id()
             );
         }
         Ok(())

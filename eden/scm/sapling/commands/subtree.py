@@ -4,6 +4,7 @@
 # GNU General Public License version 2.
 
 import os
+import time
 from collections import defaultdict
 
 from .. import (
@@ -16,14 +17,19 @@ from .. import (
     node,
     pathutil,
     progress,
+    registrar,
     scmutil,
+    util,
 )
 from ..cmdutil import (
     commitopts,
     commitopts2,
+    diffopts,
+    diffopts2,
     dryrunopts,
     mergetoolopts,
     subtree_path_opts,
+    walkopts,
 )
 from ..i18n import _
 from ..utils import subtreeutil
@@ -37,12 +43,15 @@ from .cmdtable import command
 
 
 MAX_SUBTREE_COPY_FILE_COUNT = 10_000
+MERGE_BASE_TIMEOUT_SECS = 120
+
+readonly = registrar.command.readonly
 
 
 @command(
     "subtree",
     [],
-    _("<copy|graft|merge>"),
+    _("<copy|graft|merge|diff>"),
 )
 def subtree(ui, repo, *pats, **opts) -> None:
     """subtree (directory or file) branching in monorepo"""
@@ -178,6 +187,26 @@ def subtree_merge(ui, repo, **opts):
         return stats[3] > 0
 
 
+@subtree_subcmd(
+    "diff",
+    [
+        ("r", "rev", [], _("revision"), _("REV")),
+    ]
+    + diffopts
+    + diffopts2
+    + walkopts
+    + subtree_path_opts,
+    _("[OPTION]... ([-r REV1 [-r REV2]])"),
+    inferrepo=True,
+    cmdtype=readonly,
+)
+def subtree_diff(ui, repo, *args, **opts):
+    """show differences between directory branches"""
+    from sapling.commands import do_diff
+
+    return do_diff(ui, repo, *args, **opts)
+
+
 def _subtree_merge_base(repo, to_ctx, to_path, from_ctx, from_path):
     """get the best merge base for subtree merge
 
@@ -204,12 +233,25 @@ def _subtree_merge_base(repo, to_ctx, to_path, from_ctx, from_path):
             cmdutil.registerdiffgrafts([to_path], [from_path], merge_base_ctx)
         return merge_base_ctx
 
+    def get_p1(dag, node):
+        try:
+            return dag.parentnames(node)[0]
+        except IndexError:
+            return None
+
     dag = repo.changelog.dag
     if from_path == to_path:
         nodes = [from_ctx.node(), to_ctx.node()]
         gca = dag.gcaone(nodes)
         return registerdiffgrafts(repo[gca], 0)
 
+    ui = repo.ui
+    mergebase_timeout_secs = ui.configint(
+        "subtree", "merge-base-timeout-secs", MERGE_BASE_TIMEOUT_SECS
+    )
+    ui.status(
+        _("computing merge base (timeout: %d seconds)...\n") % mergebase_timeout_secs
+    )
     isancestor = dag.isancestor
     to_hist = repo.pathhistory([to_path], dag.ancestors([to_ctx.node()]))
     from_hist = repo.pathhistory([from_path], dag.ancestors([from_ctx.node()]))
@@ -222,41 +264,68 @@ def _subtree_merge_base(repo, to_ctx, to_path, from_ctx, from_path):
     heads = [next(iters[0]), next(iters[1])]
     has_ancestor_relation = dag.gcaone(heads) in heads
     i = 1
-    while True:
-        # check the other one by default
-        i = 1 - i
-        # if they have direct ancestor relationship, then selects the newer one
-        if has_ancestor_relation:
-            if isancestor(heads[0], heads[1]):
-                i = 1
-            elif isancestor(heads[1], heads[0]):
-                i = 0
+    start_time = time.time()
+    with progress.bar(
+        ui,
+        _("searching commit history"),
+        _("commits"),
+    ) as p:
+        while True:
+            p.value += 1
+            if int(time.time() - start_time) >= mergebase_timeout_secs:
+                break
+            # check the other one by default
+            i = 1 - i
+            # if they have direct ancestor relationship, then selects the newer one
+            if has_ancestor_relation:
+                if isancestor(heads[0], heads[1]):
+                    i = 1
+                elif isancestor(heads[1], heads[0]):
+                    i = 0
 
-        # check merge info
-        for merge in get_subtree_merges(repo, heads[i]):
-            if merge.to_path == paths[i] and merge.from_path == paths[1 - i]:
-                merge_base_ctx = repo[merge.from_commit]
-                return registerdiffgrafts(merge_base_ctx, i)
+            # check merge info
+            curr_node = heads[i]
+            for merge in get_subtree_merges(repo, curr_node):
+                if merge.to_path == paths[i] and merge.from_path == paths[1 - i]:
+                    merge_base_ctx = repo[merge.from_commit]
+                    return registerdiffgrafts(merge_base_ctx, i)
 
-        # check branch info
-        for branch in get_subtree_branches(repo, heads[i]):
-            if branch.to_path == paths[i] and branch.from_path == paths[1 - i]:
-                merge_base_ctx = repo[branch.from_commit]
-                return registerdiffgrafts(merge_base_ctx, i)
+            # check branch info
+            for branch in get_subtree_branches(repo, curr_node):
+                if branch.to_path == paths[i] and branch.from_path == paths[1 - i]:
+                    merge_base_ctx = repo[branch.from_commit]
+                    return registerdiffgrafts(merge_base_ctx, i)
 
-        try:
-            # add next node to the list
-            heads[i] = next(iters[i])
-        except StopIteration:
             try:
-                # no branch info, use the first parent
-                p1 = dag.parentnames(heads[i])[0]
+                # add next node to the list
+                heads[i] = next(iters[i])
+            except StopIteration:
+                p1 = get_p1(dag, curr_node) or curr_node
                 return registerdiffgrafts(repo[p1], i)
-            except IndexError:
-                return repo[node.nullid]
 
-    # should never reach here
-    raise error.Abort("cannot find a merge base")
+    # merge base computation timed out
+    ui.status(
+        _(
+            "merge base computation timed out, falling back to directory creation commit\n"
+        )
+    )
+
+    to_create_node = repo.pathcreation(to_path, dag.ancestors([to_ctx.node()]))
+    if not to_create_node:
+        raise error.Abort(_("cannot find the creation commit of '%s'") % to_path)
+    from_create_node = repo.pathcreation(from_path, dag.ancestors([from_ctx.node()]))
+    if not from_create_node:
+        raise error.Abort(_("cannot find the creation commit of '%s'") % from_path)
+
+    gca = dag.gcaone([to_create_node, from_create_node])
+    if gca == to_create_node:
+        ui.status(_("using the creation commit of 'from' path '%s'\n") % from_path)
+        p1 = get_p1(dag, from_create_node) or from_create_node
+        return registerdiffgrafts(repo[p1], 1)
+    else:
+        ui.status(_("using the creation commit of 'to' path '%s'\n") % to_path)
+        p1 = get_p1(dag, to_create_node) or to_create_node
+        return registerdiffgrafts(repo[p1], 0)
 
 
 def _docopy(ui, repo, *args, **opts):
@@ -379,6 +448,8 @@ def _do_normal_copy(repo, from_ctx, to_ctx, from_paths, to_paths, opts):
                 else:
                     with open(os_abs_dest, "wb") as f:
                         f.write(fctx.data())
+                    if fctx.isexec():
+                        util.setflags(os_abs_dest, l=False, x=True)
 
     wctx = repo[None]
     wctx.add(new_files)

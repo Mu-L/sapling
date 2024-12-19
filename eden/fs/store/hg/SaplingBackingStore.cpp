@@ -515,48 +515,19 @@ void SaplingBackingStore::processBlobImportRequests(
     XLOGF(DBG4, "Processing blob request for {}", blobImport->hash);
   }
 
-  std::vector<std::shared_ptr<SaplingImportRequest>> retryRequest;
-  retryRequest.reserve(requests.size());
-  if (config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-    getBlobBatch(requests, sapling::FetchMode::AllowRemote);
-    retryRequest = std::move(requests);
-  } else {
-    getBlobBatch(requests, sapling::FetchMode::LocalOnly);
+  getBlobBatch(requests, sapling::FetchMode::AllowRemote);
+
+  {
+    std::vector<folly::SemiFuture<folly::Unit>> futures;
+    futures.reserve(requests.size());
 
     for (auto& request : requests) {
       auto* promise = request->getPromise<BlobPtr>();
       if (promise->isFulfilled()) {
-        XLOGF(
-            DBG4,
-            "Blob found in Sapling local for {}",
-            request->getRequest<SaplingImportRequest::BlobImport>()->hash);
         setBlobCounters(
             request->getContext().copy(),
             request->getFetchType(),
-            ObjectFetchContext::FetchedSource::Local,
-            ObjectFetchContext::FetchResult::Success,
-            watch);
-      } else {
-        retryRequest.emplace_back(std::move(request));
-      }
-    }
-
-    getBlobBatch(retryRequest, sapling::FetchMode::RemoteOnly);
-  }
-
-  {
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(retryRequest.size());
-
-    for (auto& request : retryRequest) {
-      auto* promise = request->getPromise<BlobPtr>();
-      if (promise->isFulfilled()) {
-        setBlobCounters(
-            request->getContext().copy(),
-            request->getFetchType(),
-            config_->getEdenConfig()->allowRemoteGetBatch.getValue()
-                ? ObjectFetchContext::FetchedSource::Unknown
-                : ObjectFetchContext::FetchedSource::Remote,
+            ObjectFetchContext::FetchedSource::Unknown,
             ObjectFetchContext::FetchResult::Success,
             watch);
         continue;
@@ -628,35 +599,14 @@ folly::SemiFuture<BlobPtr> SaplingBackingStore::retryGetBlob(
         // Retry using datapackStore (SaplingNativeBackingStore).
         auto result = folly::makeFuture<BlobPtr>(BlobPtr{nullptr});
 
-        auto fetch_mode =
-            config_->getEdenConfig()->allowRemoteGetBatch.getValue()
-            ? sapling::FetchMode::AllowRemote
-            : sapling::FetchMode::LocalOnly;
-        auto blob = getBlobFromBackingStore(hgInfo, fetch_mode);
-        if (!blob.hasValue() && fetch_mode == sapling::FetchMode::LocalOnly) {
-          // Retry using remote
-          fetch_mode = sapling::FetchMode::RemoteOnly;
-          blob = getBlobFromBackingStore(hgInfo, fetch_mode);
-        }
-        auto fetched_source = ObjectFetchContext::FetchedSource::Unknown;
-        switch (fetch_mode) {
-          case sapling::FetchMode::LocalOnly:
-            fetched_source = ObjectFetchContext::FetchedSource::Local;
-            break;
-          case sapling::FetchMode::RemoteOnly:
-            fetched_source = ObjectFetchContext::FetchedSource::Remote;
-            break;
-          case sapling::FetchMode::AllowRemote:
-          case sapling::FetchMode::AllowRemotePrefetch:
-            fetched_source = ObjectFetchContext::FetchedSource::Unknown;
-            break;
-        }
+        auto blob =
+            getBlobFromBackingStore(hgInfo, sapling::FetchMode::AllowRemote);
 
         if (blob.hasValue()) {
           setBlobCounters(
               context.copy(),
               fetch_type,
-              fetched_source,
+              ObjectFetchContext::FetchedSource::Unknown,
               ObjectFetchContext::FetchResult::SuccessInRetry,
               watch);
           result = blob.value();
@@ -673,7 +623,7 @@ folly::SemiFuture<BlobPtr> SaplingBackingStore::retryGetBlob(
           setBlobCounters(
               context.copy(),
               fetch_type,
-              fetched_source,
+              ObjectFetchContext::FetchedSource::Unknown,
               ObjectFetchContext::FetchResult::Failure,
               watch);
           auto ew = folly::exception_wrapper{blob.exception()};
@@ -766,59 +716,15 @@ void SaplingBackingStore::processTreeImportRequests(
     XLOGF(DBG4, "Processing tree request for {}", treeImport->hash);
   }
 
-  std::vector<std::shared_ptr<SaplingImportRequest>> retryRequest;
-  retryRequest.reserve(requests.size());
-  if (config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-    getTreeBatch(requests, sapling::FetchMode::AllowRemote);
-    retryRequest = std::move(requests);
-  } else {
-    getTreeBatch(requests, sapling::FetchMode::LocalOnly);
-    for (auto& request : requests) {
-      auto* promise = request->getPromise<TreePtr>();
-      if (promise->isFulfilled()) {
-        XLOGF(
-            DBG4,
-            "Tree found in Sapling local for {}",
-            request->getRequest<SaplingImportRequest::TreeImport>()->hash);
-        request->getContext()->setFetchedSource(
-            ObjectFetchContext::FetchedSource::Local,
-            ObjectFetchContext::ObjectType::Tree,
-            stats_.copy());
-        if (isOBCEnabled_) {
-          getTreePerRepoLatencies_ += watch.elapsed().count();
-        } else {
-          stats_->addDuration(
-              &SaplingBackingStoreStats::fetchTree, watch.elapsed());
-        }
-        stats_->increment(&SaplingBackingStoreStats::fetchTreeSuccess);
-        if (store_.dogfoodingHost()) {
-          stats_->increment(
-              &SaplingBackingStoreStats::fetchTreeSuccessDogfooding);
-        }
-      } else {
-        retryRequest.emplace_back(std::move(request));
-      }
-    }
-    getTreeBatch(retryRequest, sapling::FetchMode::RemoteOnly);
-  }
+  getTreeBatch(requests, sapling::FetchMode::AllowRemote);
 
   {
     std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(retryRequest.size());
+    futures.reserve(requests.size());
 
-    for (auto& request : retryRequest) {
+    for (auto& request : requests) {
       auto* promise = request->getPromise<TreePtr>();
       if (promise->isFulfilled()) {
-        if (!config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-          XLOGF(
-              DBG4,
-              "Tree found in Sapling remote for {}",
-              request->getRequest<SaplingImportRequest::TreeImport>()->hash);
-          request->getContext()->setFetchedSource(
-              ObjectFetchContext::FetchedSource::Remote,
-              ObjectFetchContext::ObjectType::Tree,
-              stats_.copy());
-        }
         if (isOBCEnabled_) {
           getTreePerRepoLatencies_ += watch.elapsed().count();
         } else {
@@ -1067,48 +973,12 @@ void SaplingBackingStore::processBlobAuxImportRequests(
     XLOGF(DBG4, "Processing blob aux request for {}", blobAuxImport->hash);
   }
 
-  std::vector<std::shared_ptr<SaplingImportRequest>> retryRequest;
-  retryRequest.reserve(requests.size());
-  if (config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-    getBlobAuxDataBatch(requests, sapling::FetchMode::AllowRemote);
-    retryRequest = std::move(requests);
-  } else {
-    getBlobAuxDataBatch(requests, sapling::FetchMode::LocalOnly);
+  getBlobAuxDataBatch(requests, sapling::FetchMode::AllowRemote);
+
+  {
     for (auto& request : requests) {
       auto* promise = request->getPromise<BlobAuxDataPtr>();
       if (promise->isFulfilled()) {
-        XLOGF(
-            DBG4,
-            "BlobAuxData found in Sapling local for {}",
-            request->getRequest<SaplingImportRequest::BlobAuxImport>()->hash);
-        request->getContext()->setFetchedSource(
-            ObjectFetchContext::FetchedSource::Local,
-            ObjectFetchContext::ObjectType::BlobAuxData,
-            stats_.copy());
-        stats_->addDuration(
-            &SaplingBackingStoreStats::fetchBlobAuxData, watch.elapsed());
-        stats_->increment(&SaplingBackingStoreStats::fetchBlobAuxDataSuccess);
-      } else {
-        retryRequest.emplace_back(std::move(request));
-      }
-    }
-    getBlobAuxDataBatch(retryRequest, sapling::FetchMode::RemoteOnly);
-  }
-
-  {
-    for (auto& request : retryRequest) {
-      auto* promise = request->getPromise<BlobAuxDataPtr>();
-      if (promise->isFulfilled()) {
-        if (!config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-          XLOGF(
-              DBG4,
-              "BlobAuxData found in Sapling remote for {}",
-              request->getRequest<SaplingImportRequest::BlobAuxImport>()->hash);
-          request->getContext()->setFetchedSource(
-              ObjectFetchContext::FetchedSource::Remote,
-              ObjectFetchContext::ObjectType::BlobAuxData,
-              stats_.copy());
-        }
         stats_->addDuration(
             &SaplingBackingStoreStats::fetchBlobAuxData, watch.elapsed());
         stats_->increment(&SaplingBackingStoreStats::fetchBlobAuxDataSuccess);
@@ -1146,48 +1016,12 @@ void SaplingBackingStore::processTreeAuxImportRequests(
     XLOGF(DBG4, "Processing tree aux request for {}", treeAuxImport->hash);
   }
 
-  std::vector<std::shared_ptr<SaplingImportRequest>> retryRequest;
-  retryRequest.reserve(requests.size());
-  if (config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-    getTreeAuxDataBatch(requests, sapling::FetchMode::AllowRemote);
-    retryRequest = std::move(requests);
-  } else {
-    getTreeAuxDataBatch(requests, sapling::FetchMode::LocalOnly);
+  getTreeAuxDataBatch(requests, sapling::FetchMode::AllowRemote);
+
+  {
     for (auto& request : requests) {
       auto* promise = request->getPromise<TreeAuxDataPtr>();
       if (promise->isFulfilled()) {
-        XLOGF(
-            DBG4,
-            "TreeAuxData found in Sapling local for {}",
-            request->getRequest<SaplingImportRequest::TreeAuxImport>()->hash);
-        request->getContext()->setFetchedSource(
-            ObjectFetchContext::FetchedSource::Local,
-            ObjectFetchContext::ObjectType::TreeAuxData,
-            stats_.copy());
-        stats_->addDuration(
-            &SaplingBackingStoreStats::fetchTreeAuxData, watch.elapsed());
-        stats_->increment(&SaplingBackingStoreStats::fetchTreeAuxDataSuccess);
-      } else {
-        retryRequest.emplace_back(std::move(request));
-      }
-    }
-    getTreeAuxDataBatch(retryRequest, sapling::FetchMode::RemoteOnly);
-  }
-
-  {
-    for (auto& request : retryRequest) {
-      auto* promise = request->getPromise<TreeAuxDataPtr>();
-      if (promise->isFulfilled()) {
-        if (!config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-          XLOGF(
-              DBG4,
-              "TreeAuxData found in Sapling remote for {}",
-              request->getRequest<SaplingImportRequest::TreeAuxImport>()->hash);
-          request->getContext()->setFetchedSource(
-              ObjectFetchContext::FetchedSource::Remote,
-              ObjectFetchContext::ObjectType::TreeAuxData,
-              stats_.copy());
-        }
         stats_->addDuration(
             &SaplingBackingStoreStats::fetchTreeAuxData, watch.elapsed());
         stats_->increment(&SaplingBackingStoreStats::fetchTreeAuxDataSuccess);
@@ -2078,40 +1912,22 @@ folly::Try<TreePtr> SaplingBackingStore::getTreeFromBackingStore(
     const ObjectFetchContext::ObjectType type) {
   folly::Try<std::shared_ptr<sapling::Tree>> tree;
   sapling::FetchMode fetch_mode = sapling::FetchMode::AllowRemote;
-  if (config_->getEdenConfig()->allowRemoteGetBatch.getValue()) {
-    // For root trees we will try getting the tree locally first.  This allows
-    // us to catch when Mercurial might have just written a tree to the store,
-    // and refresh the store so that the store can pick it up.  We don't do
-    // this for all trees, as it would cause a lot of additional work on every
-    // cache miss, and just doing it for root trees is sufficient to detect the
-    // scenario where Mercurial just wrote a brand new tree.
-    if (path.empty()) {
-      fetch_mode = sapling::FetchMode::LocalOnly;
-    }
-    tree = store_.getTree(manifestId.getBytes(), fetch_mode);
-    if (tree.hasException() && fetch_mode == sapling::FetchMode::LocalOnly) {
-      // Mercurial might have just written the tree to the store. Refresh the
-      // store and try again, this time allowing remote fetches.
-      store_.flush();
-      fetch_mode = sapling::FetchMode::AllowRemote;
-      tree = store_.getTree(manifestId.getBytes(), fetch_mode);
-    }
-  } else {
+  // For root trees we will try getting the tree locally first.  This allows
+  // us to catch when Mercurial might have just written a tree to the store,
+  // and refresh the store so that the store can pick it up.  We don't do
+  // this for all trees, as it would cause a lot of additional work on every
+  // cache miss, and just doing it for root trees is sufficient to detect the
+  // scenario where Mercurial just wrote a brand new tree.
+  if (path.empty()) {
     fetch_mode = sapling::FetchMode::LocalOnly;
+  }
+  tree = store_.getTree(manifestId.getBytes(), fetch_mode);
+  if (tree.hasException() && fetch_mode == sapling::FetchMode::LocalOnly) {
+    // Mercurial might have just written the tree to the store. Refresh the
+    // store and try again, this time allowing remote fetches.
+    store_.flush();
+    fetch_mode = sapling::FetchMode::AllowRemote;
     tree = store_.getTree(manifestId.getBytes(), fetch_mode);
-    if (tree.hasException()) {
-      if (path.empty()) {
-        // This allows us to catch when Mercurial might have just written a tree
-        // to the store, and refresh the store so that the store can pick it up.
-        // We don't do this for all trees, as it would cause a lot of additional
-        // work on every cache miss, and just doing it for root trees is
-        // sufficient to detect the scenario where Mercurial just wrote a brand
-        // new tree.
-        store_.flush();
-      }
-      fetch_mode = sapling::FetchMode::RemoteOnly;
-      tree = store_.getTree(manifestId.getBytes(), fetch_mode);
-    }
   }
 
   using GetTreeResult = folly::Try<TreePtr>;
