@@ -22,7 +22,6 @@
 //! for that right now so that feature is skipped for now.
 //!
 //! TODO(T74221415): monitoring, signal handling
-use std::io::Error;
 use std::sync::LazyLock;
 
 use futures::future::Future;
@@ -37,6 +36,8 @@ pub use tokio::task::block_in_place;
 
 static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     let nproc = num_cpus::get();
+    // `block_on` relies on `block_in_place` for nested synchronous callers, which requires the
+    // multi-thread scheduler.
     RuntimeBuilder::new_multi_thread()
         .worker_threads(nproc.min(8))
         .enable_all()
@@ -64,11 +65,21 @@ where
 }
 
 /// Blocks the current thread while waiting for the computation defined by the Future `f`.
+///
+/// When called from a multi-thread Tokio runtime, this first releases that runtime's worker with
+/// [`block_in_place`] before entering Sapling's runtime. This also supports callers running inside
+/// a different multi-thread Tokio runtime.
 pub fn block_on<F>(f: F) -> F::Output
 where
     F: Future,
 {
-    RUNTIME.block_on(f)
+    if tokio::runtime::Handle::try_current().is_ok() {
+        // Tokio intentionally panics here for a current-thread runtime because it has no other
+        // worker to run async tasks while this thread blocks.
+        block_in_place(|| RUNTIME.block_on(f))
+    } else {
+        RUNTIME.block_on(f)
+    }
 }
 
 /// Takes an async stream and provide its contents in the form of a regular iterator.
@@ -212,32 +223,6 @@ pub fn iter_to_stream<I: Send + 'static>(
     });
     Box::pin(stream.fuse())
 }
-/// Blocks on the future from python code, interrupting future execution on Ctrl+C
-/// Wraps future's output with Result that returns error when interrupted
-/// If future already returns Result, use try_block_unless_interrupted
-///
-/// Send on this future only needed to prevent including `py` into this future
-pub fn block_unless_interrupted<F: Future>(f: F) -> Result<F::Output, Error> {
-    block_on(unless_interrupted(f))
-}
-
-/// Same as block_unless_interrupted but for futures that returns Result
-pub fn try_block_unless_interrupted<O, E, F: Future<Output = Result<O, E>>>(f: F) -> Result<O, E>
-where
-    E: Send,
-    E: From<Error>,
-{
-    block_on(async move { unless_interrupted(f).await? })
-}
-
-async fn unless_interrupted<F: Future>(f: F) -> Result<F::Output, Error> {
-    // This function used to use tokio::signal::ctrl_c().
-    // However tokio::signal::ctrl_c() cannot revert its side effect.
-    // Since we have a global ctrl_c handler, we can drop the use of
-    // tokio ctrl_c handling here.
-    Ok(f.await)
-}
-
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -250,6 +235,26 @@ mod tests {
     #[test]
     fn test_block_on() {
         assert_eq!(block_on(async { 2 + 2 }), 4);
+    }
+
+    #[test]
+    fn test_block_on_inside_runtime() {
+        block_on(async {
+            assert_eq!(block_on(async { 2 + 2 }), 4);
+        });
+    }
+
+    #[test]
+    fn test_block_on_inside_different_runtime() {
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            assert_eq!(block_on(async { 2 + 2 }), 4);
+        });
     }
 
     #[test]

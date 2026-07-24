@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use async_runtime::try_block_unless_interrupted as block_on;
+use async_runtime::block_on;
 use cpython::*;
 use cpython_ext::AnyhowResultExt;
 use cpython_ext::ResultPyErrExt;

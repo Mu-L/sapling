@@ -410,12 +410,7 @@ fn background_executor() -> &'static BackgroundExecutor {
 /// Calling this inside an async context requires Tokio's multi-thread runtime because it uses
 /// `block_in_place`.
 pub(crate) fn join_blocking<T>(handle: JoinHandle<T>) -> T {
-    let result = if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| async_runtime::block_on(handle))
-    } else {
-        async_runtime::block_on(handle)
-    };
-    match result {
+    match async_runtime::block_on(handle) {
         Ok(value) => value,
         Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()),
         Err(err) => panic!("sapling executor task was cancelled: {err}"),

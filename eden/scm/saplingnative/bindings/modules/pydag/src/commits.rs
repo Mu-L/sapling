@@ -14,7 +14,7 @@ use ::commits::HybridCommits;
 use ::commits::MemCommits;
 use ::commits::OnDiskCommits;
 use ::commits::RevlogCommits;
-use async_runtime::try_block_unless_interrupted as block_on;
+use async_runtime::block_on;
 use cpython::*;
 use cpython_ext::ExtractInner;
 use cpython_ext::PyNone;

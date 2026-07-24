@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::bail;
 use anyhow::format_err;
-use async_runtime::block_unless_interrupted;
+use async_runtime::block_on;
 use cpython::*;
 use cpython_async::PyFuture;
 use cpython_async::TStream;
@@ -104,9 +104,7 @@ use crate::util::to_trees_upload_items;
 /// `rustfmt` can still parse the code.
 pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     fn health_py(&self, py: Python) -> PyResult<PyDict> {
-        let meta = block_unless_interrupted(self.health())
-            .map_pyerr(py)?
-            .map_pyerr(py)?;
+        let meta = block_on(self.health()).map_pyerr(py)?;
         meta_to_dict(py, &meta)
     }
 
@@ -118,12 +116,11 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         let keys = to_keys(py, &keys)?;
         let entries = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let fctx = FetchContext::sapling_default();
                     self.files(fctx, keys).await
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -137,8 +134,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     ) -> PyResult<TStream<anyhow::Result<Serde<HistoryEntry>>>> {
         let keys = to_keys(py, &keys)?;
         let entries = py
-            .allow_threads(|| block_unless_interrupted(self.history(keys, length)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.history(keys, length)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -159,10 +155,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         let cursor = cursor.into_iter().map(|c| c.0).collect();
 
         let entries = py
-            .allow_threads(|| {
-                block_unless_interrupted(self.path_history(commit.0, paths, limit, cursor))
-            })
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.path_history(commit.0, paths, limit, cursor)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -184,13 +177,12 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
 
         let stats = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let fctx = FetchContext::sapling_default();
                     let response = self.trees(fctx, keys, attributes).await?;
                     write_trees(response, store, prog).await
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         stats::new(py, stats)
@@ -205,13 +197,12 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         let keys = to_keys(py, &keys)?;
         let (trees, stats) = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let fctx = FetchContext::sapling_default();
                     let response = self.trees(fctx, keys, attributes).await?;
                     Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         let trees_py = trees.map(|t| match t {
@@ -230,14 +221,13 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     ) -> PyResult<(TStream<anyhow::Result<Serde<CommitRevlogData>>>, PyFuture)> {
         let (commits, stats) = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let response = self.commit_revlog_data(nodes).await?;
                     let commits = response.entries;
                     let stats = response.stats;
                     Ok::<_, SaplingRemoteApiError>((commits, stats))
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         let commits_py = commits.map_ok(Serde).map_err(Into::into);
@@ -253,10 +243,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         freshness: Option<Serde<Freshness>>,
     ) -> PyResult<PyDict> {
         let response = py
-            .allow_threads(|| {
-                block_unless_interrupted(self.bookmarks(bookmarks, freshness.map(|v| v.0)))
-            })
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.bookmarks(bookmarks, freshness.map(|v| v.0))))
             .map_pyerr(py)?;
 
         let bookmarks = PyDict::new(py);
@@ -274,10 +261,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         kinds: Vec<BookmarkKind>,
     ) -> PyResult<PyDict> {
         let response = py
-            .allow_threads(|| {
-                block_unless_interrupted(self.list_bookmark_patterns(patterns, kinds))
-            })
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.list_bookmark_patterns(patterns, kinds)))
             .map_pyerr(py)?;
 
         let bookmarks = PyDict::new(py);
@@ -298,12 +282,11 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     ) -> PyResult<Serde<SetBookmarkResponse>> {
         let response = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let response = self.set_bookmark(bookmark, to, from, pushvars).await?;
                     Ok::<_, SaplingRemoteApiError>(response)
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         Ok(Serde(response))
@@ -320,12 +303,11 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     ) -> PyResult<Serde<LandStackResponse>> {
         let response = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let response = self.land_stack(bookmark, head, base, pushvars).await?;
                     Ok::<_, SaplingRemoteApiError>(response)
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         Ok(Serde(response))
@@ -338,8 +320,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         hash_prefixes: Vec<String>,
     ) -> PyResult<Serde<Vec<CommitHashLookupResponse>>> {
         let items = py
-            .allow_threads(|| block_unless_interrupted(self.hash_prefixes_lookup(hash_prefixes)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.hash_prefixes_lookup(hash_prefixes)))
             .map_pyerr(py)?;
         Ok(Serde(items))
     }
@@ -358,8 +339,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
             })
             .collect();
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.commit_location_to_hash(requests)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.commit_location_to_hash(requests)))
             .map_pyerr(py)?;
 
         Ok(Serde(responses))
@@ -373,10 +353,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         hgids: Vec<HgId>,
     ) -> PyResult<Serde<Vec<CommitHashToLocationResponse>>> {
         let responses = py
-            .allow_threads(|| {
-                block_unless_interrupted(self.commit_hash_to_location(master_heads, hgids))
-            })
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.commit_hash_to_location(master_heads, hgids)))
             .map_pyerr(py)?;
 
         Ok(Serde(responses))
@@ -389,8 +366,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         hgids: Vec<HgId>,
     ) -> PyResult<Serde<Vec<CommitKnownResponse>>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.commit_known(hgids)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.commit_known(hgids)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -403,8 +379,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         common: Vec<HgId>,
     ) -> PyResult<Serde<Vec<CommitGraphEntry>>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.commit_graph(heads, common)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.commit_graph(heads, common)))
             .map_pyerr(py)?;
 
         Ok(Serde(responses))
@@ -418,8 +393,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         common: Vec<HgId>,
     ) -> PyResult<Serde<Vec<CommitGraphSegmentsEntry>>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.commit_graph_segments(heads, common)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.commit_graph_segments(heads, common)))
             .map_pyerr(py)?;
 
         Ok(Serde(responses))
@@ -488,7 +462,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
     fn lookup_py(&self, py: Python, ids: Vec<AnyId>) -> PyResult<Serde<Vec<(usize, UploadToken)>>> {
         let responses = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     // Deduplicates input, keeping indexes
                     let indexable_ids: HashMap<IndexableId, Vec<usize>> = ids
                         .iter()
@@ -525,7 +499,6 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
                     })
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -597,7 +570,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
 
         let (responses, stats) = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let downcast_error = "incorrect upload token, failed to downcast 'token.data.id' to 'AnyId::AnyFileContentId::ContentId' type";
                     // upload file contents first, receiving upload tokens
                     let file_content_tokens = self
@@ -635,7 +608,6 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
                     Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         let responses_py = responses.map_ok(|r| Serde(r.token)).map_err(Into::into);
@@ -657,12 +629,11 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         let items = to_trees_upload_items(py, &items)?;
         let (responses, stats) = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let response = self.upload_trees_batch(items).await?;
                     Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         let responses_py = responses.map_ok(|r| Serde(r.token)).map_err(Into::into);
@@ -691,12 +662,11 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         let mutations = mutations.into_iter().map(|m| m.0).collect();
         let (responses, stats) = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     let response = self.upload_changesets(changesets, mutations).await?;
                     Ok::<_, SaplingRemoteApiError>((response.entries, response.stats))
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
 
         let responses_py = responses.map_ok(|r| Serde(r.token)).map_err(Into::into);
@@ -711,21 +681,19 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         data: Serde<AlterSnapshotRequest>,
     ) -> PyResult<Serde<AlterSnapshotResponse>> {
         py.allow_threads(|| {
-            block_unless_interrupted(async move {
+            block_on(async move {
                 let cs_id = data.0.cs_id;
                 self.alter_snapshot(data.0)
                     .await
                     .with_context(|| format_err!("Failed to alter snapshot {cs_id}"))
             })
         })
-        .map_pyerr(py)?
         .map_pyerr(py)
         .map(Serde)
     }
 
     fn downloadfiletomemory_py(&self, py: Python, token: Serde<UploadToken>) -> PyResult<PyBytes> {
-        py.allow_threads(|| block_unless_interrupted(self.download_file(token.0)))
-            .map_pyerr(py)?
+        py.allow_threads(|| block_on(self.download_file(token.0)))
             .map_pyerr(py)
             .map(|data| PyBytes::new(py, &data))
     }
@@ -738,8 +706,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<WorkspaceDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_workspace(workspace, reponame)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_workspace(workspace, reponame)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -752,8 +719,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<WorkspacesDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_workspaces(prefix, reponame)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_workspaces(prefix, reponame)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -764,8 +730,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         data: Serde<GetReferencesParams>,
         py: Python,
     ) -> PyResult<Serde<ReferencesDataResponse>> {
-        py.allow_threads(|| block_unless_interrupted(self.cloud_references(data.0)))
-            .map_pyerr(py)?
+        py.allow_threads(|| block_on(self.cloud_references(data.0)))
             .map_pyerr(py)
             .map(Serde)
     }
@@ -777,8 +742,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<ReferencesDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_update_references(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_update_references(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -790,8 +754,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<SmartlogDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_smartlog(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_smartlog(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -803,8 +766,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<CloudShareWorkspaceResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_share_workspace(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_share_workspace(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -816,8 +778,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<UpdateArchiveResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_update_archive(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_update_archive(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -829,8 +790,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<RenameWorkspaceResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_rename_workspace(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_rename_workspace(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -842,8 +802,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<SmartlogDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_smartlog_by_version(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_smartlog_by_version(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -855,8 +814,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<HistoricalVersionsResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_historical_versions(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_historical_versions(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -868,8 +826,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<RollbackWorkspaceResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_rollback_workspace(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_rollback_workspace(data.0)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }
@@ -881,8 +838,7 @@ pub trait SaplingRemoteApiPyExt: SaplingRemoteApi {
         py: Python,
     ) -> PyResult<Serde<WorkspacesDataResponse>> {
         let responses = py
-            .allow_threads(|| block_unless_interrupted(self.cloud_other_repo_workspaces(workspace)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(self.cloud_other_repo_workspaces(workspace)))
             .map_pyerr(py)?;
         Ok(Serde(responses))
     }

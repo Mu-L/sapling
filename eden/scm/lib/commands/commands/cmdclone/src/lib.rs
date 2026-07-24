@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::anyhow;
-use async_runtime::block_unless_interrupted as block_on;
+use async_runtime::block_on;
 use clidispatch::ReqCtx;
 use clidispatch::TermLogger;
 use clidispatch::abort;
@@ -627,7 +627,7 @@ fn clone_metadata(
         let edenapi = repo.eden_api().map_err(|err| err.tag_network())?;
 
         let mut capabilities: Vec<String> =
-            block_on(edenapi.capabilities())?.map_err(|e| e.tag_network())?;
+            block_on(edenapi.capabilities()).map_err(|e| e.tag_network())?;
         capabilities.sort_unstable();
         let has_capability = |name: &str| -> bool {
             capabilities

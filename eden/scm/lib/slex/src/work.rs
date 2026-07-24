@@ -2136,6 +2136,19 @@ mod tests {
     }
 
     #[test]
+    fn dropping_promoted_work_inside_runtime_does_not_panic() {
+        async_runtime::block_on(async {
+            let items = Work::run::<_, (), _, _>(
+                WorkOptions::new().inline_items(1).max_workers(2),
+                Items::<usize, ()>::ready((0..16).collect::<Vec<_>>()),
+                WorkShape::batch(|_batch, _scope| -> Result<(), ()> { Ok(()) }),
+            );
+
+            drop(unwrap_stream(items));
+        });
+    }
+
+    #[test]
     fn stays_inline_until_work_spans_two_chunks() {
         let caller = thread::current().id();
         let seen = Arc::new(Mutex::new(Vec::new()));

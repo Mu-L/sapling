@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::format_err;
-use async_runtime::block_unless_interrupted;
+use async_runtime::block_on;
 use configmodel::Config;
 use cpython::*;
 use cpython_async::PyFuture;
@@ -158,11 +158,10 @@ py_class!(pub class client |py| {
         let client = self.inner(py).as_ref();
         let caps = py
             .allow_threads(|| {
-                block_unless_interrupted(async move {
+                block_on(async move {
                     client.capabilities().await
                 })
             })
-            .map_pyerr(py)?
             .map_pyerr(py)?;
         Ok(caps)
     }
@@ -180,11 +179,10 @@ py_class!(pub class client |py| {
     ) -> PyResult<TStream<anyhow::Result<Serde<FileResponse>>>> {
         let api = self.inner(py).as_ref();
         let entries = py
-            .allow_threads(|| block_unless_interrupted(async move {
+            .allow_threads(|| block_on(async move {
                 let fctx = FetchContext::sapling_default();
                 api.files_attrs(fctx , spec.0).await
             }))
-            .map_pyerr(py)?
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -454,14 +452,13 @@ py_class!(pub class client |py| {
         let cache = SharedSnapshotFileCache::from_config(self.config(py).as_ref()).ok();
 
         py.allow_threads(|| {
-            block_unless_interrupted(upload_snapshot_with_cache(
+            block_on(upload_snapshot_with_cache(
                 api,
                 data.0,
                 bubble_properties.0,
                 cache,
             ))
         })
-        .map_pyerr(py)?
         .map_pyerr(py)
         .map(Serde)
     }
@@ -475,14 +472,13 @@ py_class!(pub class client |py| {
         let cache = SharedSnapshotFileCache::from_config(self.config(py).as_ref()).ok();
 
         py.allow_threads(|| {
-            block_unless_interrupted(async move {
+            block_on(async move {
                 let cs_id = data.0.cs_id;
                 fetch_snapshot_with_cache(api, data.0, cache)
                     .await
                     .with_context(|| format_err!("Failed to find snapshot {cs_id}"))
             })
         })
-        .map_pyerr(py)?
         .map_pyerr(py)
         .map(Serde)
     }
@@ -509,8 +505,7 @@ py_class!(pub class client |py| {
             .map(|(p, token, tp)| Ok((to_path(py, &p)?, token.0, tp.0)))
             .collect::<Result<Vec<_>, PyErr>>()?;
         let cache = SharedSnapshotFileCache::from_config(self.config(py).as_ref()).ok();
-        let stats = py.allow_threads(|| block_unless_interrupted(download_files_with_cache(api, &root.0, files, cache)))
-            .map_pyerr(py)?
+        let stats = py.allow_threads(|| block_on(download_files_with_cache(api, &root.0, files, cache)))
             .map_pyerr(py)?;
         downloadfilestats::new(py, stats)
     }
@@ -525,8 +520,7 @@ py_class!(pub class client |py| {
             .into_iter()
             .map(|(p, token, tp)| Ok((to_path(py, &p)?, token.0, tp.0)))
             .collect::<Result<Vec<_>, PyErr>>()?;
-        py.allow_threads(|| block_unless_interrupted(check_files(&root.0, files)))
-            .map_pyerr(py)?
+        py.allow_threads(|| block_on(check_files(&root.0, files)))
             .map_pyerr(py)
             .map(|v| v.into_iter().map(Into::into).collect())
     }
@@ -544,8 +538,7 @@ py_class!(pub class client |py| {
     {
         let api = self.inner(py).as_ref();
         py
-            .allow_threads(|| block_unless_interrupted(api.ephemeral_prepare(custom_duration.map(Duration::from_secs), labels)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.ephemeral_prepare(custom_duration.map(Duration::from_secs), labels)))
             .map_pyerr(py)
             .map(Serde)
     }
@@ -558,8 +551,7 @@ py_class!(pub class client |py| {
             PyErr::new::<cpython::exc::ValueError, _>(py, "bubble_id must be non-zero")
         })?;
         py
-            .allow_threads(|| block_unless_interrupted(api.ephemeral_extend(bubble_id, custom_duration_secs)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.ephemeral_extend(bubble_id, custom_duration_secs)))
             .map_pyerr(py)
             .map(Serde)
     }
@@ -574,8 +566,7 @@ py_class!(pub class client |py| {
         let api = self.inner(py).as_ref();
         let bubble_id = bubbleid.and_then(NonZeroU64::new);
         let entries = py
-            .allow_threads(|| block_unless_interrupted(api.process_files_upload(data.0, bubble_id, None, UploadLookupPolicy::PerformLookup)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.process_files_upload(data.0, bubble_id, None, UploadLookupPolicy::PerformLookup)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -589,8 +580,7 @@ py_class!(pub class client |py| {
     ) -> PyResult<TStream<anyhow::Result<Serde<UploadTokensResponse>>>> {
         let api = self.inner(py).as_ref();
         let entries = py
-            .allow_threads(|| block_unless_interrupted(api.upload_filenodes_batch(data.0)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.upload_filenodes_batch(data.0)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -601,8 +591,7 @@ py_class!(pub class client |py| {
         commits: Serde<Vec<HgId>>,
     ) -> PyResult<Serde<Vec<HgMutationEntryContent>>> {
         let api = self.inner(py).as_ref();
-        py.allow_threads(|| block_unless_interrupted(api.commit_mutations(commits.0)))
-            .map_pyerr(py)?
+        py.allow_threads(|| block_on(api.commit_mutations(commits.0)))
             .map_pyerr(py)
             .map(|responses| Serde(responses.into_iter().map(|r| r.mutation).collect()))
     }
@@ -616,8 +605,7 @@ py_class!(pub class client |py| {
         lookup_behavior: Option<String> = None,
     ) -> PyResult<TStream<anyhow::Result<Serde<CommitTranslateIdResponse>>>> {
         let api = self.inner(py).as_ref();
-        let responses = py.allow_threads(|| block_unless_interrupted(api.commit_translate_id(commits.0, scheme.0, fromrepo, torepo, lookup_behavior)))
-            .map_pyerr(py)?
+        let responses = py.allow_threads(|| block_on(api.commit_translate_id(commits.0, scheme.0, fromrepo, torepo, lookup_behavior)))
             .map_pyerr(py)?;
         Ok(responses.entries.map_ok(Serde).map_err(Into::into).into())
     }
@@ -627,8 +615,7 @@ py_class!(pub class client |py| {
         files: Serde<Vec<Key>>,
     ) -> PyResult<TStream<anyhow::Result<Serde<BlameResult>>>> {
         let api = self.inner(py).as_ref();
-        let blames = py.allow_threads(|| block_unless_interrupted(api.blame(files.0)))
-            .map_pyerr(py)?
+        let blames = py.allow_threads(|| block_on(api.blame(files.0)))
             .map_pyerr(py)?
             .entries;
         Ok(blames.map_ok(Serde).map_err(Into::into).into())
@@ -657,8 +644,7 @@ py_class!(pub class client |py| {
             manifest_ids: manifest_ids.0,
         };
         let entries = py
-            .allow_threads(|| block_unless_interrupted(api.check_manifest_permission(request)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.check_manifest_permission(request)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -683,8 +669,7 @@ py_class!(pub class client |py| {
             paths,
         };
         let entries = py
-            .allow_threads(|| block_unless_interrupted(api.check_path_permission(request)))
-            .map_pyerr(py)?
+            .allow_threads(|| block_on(api.check_path_permission(request)))
             .map_pyerr(py)?
             .entries;
         Ok(entries.map_ok(Serde).map_err(Into::into).into())
@@ -709,11 +694,10 @@ py_class!(pub class client |py| {
         prefixes: Serde<Option<Vec<String>>>,
     ) -> PyResult<TStream<anyhow::Result<Serde<SuffixQueryResponse>>>> {
         let api = self.inner(py).as_ref();
-        let suffix_query_response = py.allow_threads(|| block_unless_interrupted(api.suffix_query(
+        let suffix_query_response = py.allow_threads(|| block_on(api.suffix_query(
             commit.0,
             suffixes.0,
             prefixes.0)))
-            .map_pyerr(py)?
             .map_pyerr(py)?
             .entries;
         Ok(suffix_query_response.map_ok(Serde).map_err(Into::into).into())

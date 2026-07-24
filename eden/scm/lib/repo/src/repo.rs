@@ -529,10 +529,7 @@ impl Repo {
 
     pub fn add_commit(&self, new_commit: commits_trait::NewCommit) -> Result<HgId> {
         let dag = self.dag_commits()?;
-        async_runtime::try_block_unless_interrupted(commits::add_new_commit(
-            &mut **dag.write(),
-            new_commit,
-        ))
+        async_runtime::block_on(commits::add_new_commit(&mut **dag.write(), new_commit))
     }
 }
 

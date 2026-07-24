@@ -5,7 +5,7 @@
  * GNU General Public License version 2.
  */
 
-use async_runtime::block_unless_interrupted as block_on;
+use async_runtime::block_on;
 use clidispatch::ReqCtx;
 use cmdutil::NoOpts;
 use cmdutil::Result;

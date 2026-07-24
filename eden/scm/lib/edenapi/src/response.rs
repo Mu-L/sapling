@@ -5,8 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use anyhow::Context;
-use async_runtime::block_unless_interrupted;
+use async_runtime::block_on;
 pub use edenapi_trait::Response;
 pub use edenapi_trait::ResponseMeta;
 use futures::prelude::*;
@@ -25,11 +24,9 @@ impl<T> BlockingResponse<T> {
     where
         F: Future<Output = Result<Response<T>, SaplingRemoteApiError>>,
     {
-        let Response { entries, stats } =
-            block_unless_interrupted(fetch).context("transfer interrupted by user")??;
-        let entries = block_unless_interrupted(entries.try_collect())
-            .context("transfer interrupted by user")??;
-        let stats = block_unless_interrupted(stats).context("transfer interrupted by user")??;
+        let Response { entries, stats } = block_on(fetch)?;
+        let entries = block_on(entries.try_collect())?;
+        let stats = block_on(stats)?;
         Ok(Self { entries, stats })
     }
 }
